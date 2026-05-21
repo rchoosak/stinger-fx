@@ -1,0 +1,28 @@
+# Stinger-Fx — application config
+# Hot-reloaded: most settings apply immediately; broker.type and web.host/port require restart.
+
+mode: normal                   # normal | tui | web
+
+broker:
+  type: mt5                    # mt5 (Phase 1) | mt4 (Phase 2)
+  mt5:
+    # Path to terminal64.exe (used for Strategy Tester subprocess). Leave empty to auto-detect.
+    terminal_path: ""
+    # MT5 account credentials — leave empty to use the terminal's currently logged-in account.
+    login: 0
+    password: ""
+    server: ""
+    timeout_ms: 60000
+
+data_dir: ./data
+log_level: INFO
+timezone: UTC
+
+web:
+  host: 127.0.0.1
+  port: 8765
+
+risk:
+  max_open_positions_per_strategy: 5
+  max_daily_loss_pct: 5.0
+  kill_switch_drawdown_pct: 20.0

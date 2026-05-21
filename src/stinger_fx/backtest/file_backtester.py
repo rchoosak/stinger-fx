@@ -1,0 +1,157 @@
+"""FileBacktester — replays historical bars through the same engine path as live.
+
+The strategy class, runner, bus, and order router are identical to live mode.
+Only the broker (`SimBroker`) and clock (`SimClock`) are swapped.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from datetime import UTC, datetime
+from pathlib import Path
+
+from stinger_fx.backtest.base import BaseBacktester
+from stinger_fx.backtest.order_router import OrderRouter
+from stinger_fx.backtest.replay_broker import SimBroker
+from stinger_fx.backtest.reports import BacktestReport
+from stinger_fx.config.models import BacktestRunConfig, StrategyEntry
+from stinger_fx.core import AsyncEventBus, SimClock
+from stinger_fx.core.errors import BacktestError
+from stinger_fx.core.events import BarEvent, SignalEvent
+from stinger_fx.data import BacktestRepo, SqliteStore, iter_bars
+from stinger_fx.strategies import (
+    StrategyRunner,
+    derive_magic,
+    load_strategy_class,
+    validate_params,
+)
+
+logger = logging.getLogger("stinger.backtest.file")
+
+
+class FileBacktester(BaseBacktester):
+    name = "file"
+
+    def __init__(
+        self,
+        *,
+        strategy: StrategyEntry,
+        parquet_root: Path,
+        sqlite_store: SqliteStore | None = None,
+        report_dir: Path | None = None,
+    ) -> None:
+        self._strategy_entry = strategy
+        self._parquet_root = parquet_root
+        self._sqlite = sqlite_store
+        self._report_dir = report_dir or Path("./data/backtests")
+
+    async def run(self, cfg: BacktestRunConfig) -> BacktestReport:
+        if cfg.strategy_id != self._strategy_entry.id:
+            raise BacktestError(
+                f"strategy mismatch: run targets {cfg.strategy_id!r} but configured "
+                f"strategy is {self._strategy_entry.id!r}"
+            )
+
+        bus = AsyncEventBus()
+        sim_clock = SimClock(cfg.start)
+        broker = SimBroker(bus, initial_balance=cfg.initial_balance, slippage_pips=cfg.slippage_pips)
+
+        strategy_cls = load_strategy_class(self._strategy_entry.class_path)
+        # Allow the run config to override symbol/timeframe — useful for sweeps.
+        params_dict = dict(self._strategy_entry.params)
+        params_dict.setdefault("symbol", cfg.symbol)
+        params_dict.setdefault("timeframe", cfg.timeframe.value)
+        params = validate_params(strategy_cls, params_dict)
+
+        strategy_id = self._strategy_entry.id
+        magic = derive_magic(strategy_id)
+
+        router = OrderRouter(bus, broker, strategy_magic={strategy_id: magic})
+        await router.attach()
+
+        async def signal_sink(sig):
+            await bus.publish(SignalEvent(signal=sig))
+
+        runner = StrategyRunner(
+            strategy_id=strategy_id,
+            strategy=strategy_cls(),
+            params=params,
+            bus=bus,
+            clock=sim_clock,
+            reload_lock=asyncio.Lock(),
+            signal_sink=signal_sink,
+        )
+        await runner.start()
+
+        repo_row_id: int | None = None
+        if self._sqlite is not None:
+            self._sqlite.create_all()
+            repo_row_id = BacktestRepo(self._sqlite).start_run(
+                run_id=cfg.id,
+                strategy_id=strategy_id,
+                params=params.model_dump(mode="json"),
+            )
+
+        started_at = datetime.now(UTC)
+        equity_curve: list[tuple[datetime, float]] = []
+        bar_count = 0
+
+        for bar in iter_bars(self._parquet_root, cfg.symbol, cfg.timeframe, cfg.start, cfg.end):
+            sim_clock.advance(bar.time)
+            broker.advance_clock(bar.time)
+            broker.set_market(bar.symbol, bar.close)
+
+            # Stop-loss / take-profit check using bar high/low
+            for pos in broker.check_sl_tp(bar.symbol, bar.high, bar.low):
+                await broker.close_position(pos.ticket)
+
+            await bus.publish(BarEvent(bar=bar))
+            # Let queues drain so the strategy reacts before we move to the next bar.
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            # Mark-to-market equity for the curve
+            mtm = sum(
+                (bar.close - p.open_price) * p.side.sign * p.volume * 100_000.0
+                for p in await broker.get_positions()
+                if p.symbol == bar.symbol
+            )
+            equity_curve.append((bar.time, broker.balance + mtm))
+            bar_count += 1
+
+        # Close any remaining positions at the last bar's close
+        for pos in list(await broker.get_positions()):
+            await broker.close_position(pos.ticket)
+
+        await runner.stop()
+        await router.detach()
+        await bus.close()
+
+        finished_at = datetime.now(UTC)
+        report = BacktestReport(
+            run_id=cfg.id,
+            strategy_id=strategy_id,
+            started_at=started_at,
+            finished_at=finished_at,
+            trades=broker.trades,
+            equity_curve=equity_curve,
+            initial_balance=cfg.initial_balance,
+            final_balance=broker.balance,
+        )
+
+        # Persist
+        self._report_dir.mkdir(parents=True, exist_ok=True)
+        equity_path = self._report_dir / f"{cfg.id}_equity.parquet"
+        metrics_path = self._report_dir / f"{cfg.id}_metrics.json"
+        report.write_equity_curve(equity_path)
+        metrics_path.write_text(json.dumps(report.to_metrics_dict(), indent=2))
+
+        if self._sqlite is not None and repo_row_id is not None:
+            BacktestRepo(self._sqlite).finish_run(
+                repo_row_id, report.to_metrics_dict(), str(equity_path)
+            )
+
+        logger.info("backtest done bars=%s trades=%s", bar_count, len(report.trades))
+        return report
