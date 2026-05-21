@@ -1,0 +1,24 @@
+line-length = 100
+target-version = "py312"
+
+[lint]
+select = [
+    "E", "F", "W",        # pycodestyle + pyflakes
+    "I",                  # isort
+    "B",                  # bugbear
+    "UP",                 # pyupgrade
+    "SIM",                # simplifications
+    "RUF",                # ruff-native
+    "ASYNC",              # async correctness
+    "PT",                 # pytest style
+]
+ignore = [
+    "E501",  # line length (handled by formatter)
+]
+
+[lint.per-file-ignores]
+"tests/**/*.py" = ["B011"]
+"src/stinger_fx/backtest/mt5_shim/**" = ["ALL"]  # MQL5 source, not Python
+
+[format]
+quote-style = "double"

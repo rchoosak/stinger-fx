@@ -1,0 +1,14 @@
+# Active strategies. Each entry is hot-reloadable:
+#   • params changes      → live swap (calls on_params_reloaded)
+#   • add new entry       → strategy starts
+#   • set enabled: false  → strategy stops gracefully
+#   • change class_path   → old stops, new starts (no state migration)
+
+strategies:
+  - id: ma_eurusd_m15
+    class_path: stinger_fx.strategies.examples.ma_crossover:MACrossover
+    enabled: true
+    params:
+      fast: 10
+      slow: 30
+      volume: 0.01

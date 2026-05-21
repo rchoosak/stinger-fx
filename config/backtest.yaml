@@ -1,0 +1,22 @@
+# Backtest run definitions. Trigger via `stinger-fx backtest run --run-id <id>`.
+
+runs:
+  - id: ma_eurusd_m15_2024Q1_file
+    mode: file
+    strategy_id: ma_eurusd_m15
+    symbol: EURUSD
+    timeframe: M15
+    start: 2024-01-01T00:00:00Z
+    end: 2024-04-01T00:00:00Z
+    initial_balance: 10000.0
+    slippage_pips: 0.5
+    data_source: ./data/parquet/EURUSD/M15
+
+  - id: ma_eurusd_m15_2024Q1_mt5
+    mode: mt5_tester
+    strategy_id: ma_eurusd_m15
+    symbol: EURUSD
+    timeframe: M15
+    start: 2024-01-01T00:00:00Z
+    end: 2024-04-01T00:00:00Z
+    initial_balance: 10000.0

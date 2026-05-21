@@ -1,0 +1,235 @@
+"""StrategyRunner — per-strategy isolation around a `BaseStrategy` instance.
+
+Responsibilities:
+  • Subscribe to TickEvent/BarEvent filtered by this strategy's symbol/timeframe.
+  • Maintain a rolling history buffer in `ctx.history`.
+  • Dispatch events to the user's `on_*` hooks under the engine's reload lock.
+  • Track an error budget and quarantine the strategy when it's exceeded.
+  • Provide `update_params()`, `pause()`, `resume()`, `stop()` for the reloader.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import time
+from collections import deque
+
+from stinger_fx.core.clock import Clock
+from stinger_fx.core.errors import StrategyQuarantinedError
+from stinger_fx.core.event_bus import AsyncEventBus, Subscription
+from stinger_fx.core.events import (
+    BarEvent,
+    OrderFilledEvent,
+    OrderRejectedEvent,
+    PositionClosedEvent,
+    StrategyStateChangedEvent,
+    TickEvent,
+)
+from stinger_fx.log import get_logger
+from stinger_fx.strategies.base import BaseStrategy
+from stinger_fx.strategies.context import SignalSink, StrategyContext
+from stinger_fx.strategies.parameters import StrategyParams
+
+# Error budget — if a strategy raises more than this many times within
+# the window, it gets quarantined.
+MAX_ERRORS_PER_MINUTE = 5
+QUARANTINE_WINDOW_SECONDS = 60.0
+
+
+def derive_magic(strategy_id: str) -> int:
+    """Deterministic 63-bit magic-number from a strategy id."""
+    h = hashlib.sha256(strategy_id.encode("utf-8")).digest()
+    # 63-bit positive (avoid sign bit on platforms that treat int as signed)
+    return int.from_bytes(h[:8], "big") & ((1 << 63) - 1)
+
+
+class StrategyRunner:
+    """One per active strategy instance."""
+
+    def __init__(
+        self,
+        *,
+        strategy_id: str,
+        strategy: BaseStrategy,
+        params: StrategyParams,
+        bus: AsyncEventBus,
+        clock: Clock,
+        reload_lock: asyncio.Lock,
+        signal_sink: SignalSink,
+    ) -> None:
+        self.id = strategy_id
+        self.strategy = strategy
+        self.bus = bus
+        self.clock = clock
+        self._reload_lock = reload_lock
+        self._params = params
+        self._magic = derive_magic(strategy_id)
+        self._logger = get_logger(f"stinger.strategy.{strategy_id}")
+        self._subscriptions: list[Subscription] = []
+        self._errors: deque[float] = deque()
+        self._paused = False
+        self._stopped = False
+        self._quarantined = False
+        self._ctx: StrategyContext | None = None
+        self._signal_sink = signal_sink
+
+    # --- Lifecycle ----------------------------------------------------------
+
+    async def start(self) -> None:
+        # The strategy can declare multiple subscriptions; the first is primary
+        # and drives ctx.symbol/timeframe. Additional subs deliver events but
+        # the strategy is responsible for keying state by symbol if it cares.
+        subs = self.strategy.subscriptions(self._params)
+        if not subs:
+            self._logger.warning("strategy declared no subscriptions; nothing to do")
+            return
+        primary = subs[0]
+        self._ctx = StrategyContext(
+            strategy_id=self.id,
+            symbol=primary.symbol,
+            timeframe=primary.timeframe,
+            params=self._params,
+            clock=self.clock,
+            logger=self._logger,
+            magic=self._magic,
+            signal_sink=self._signal_sink,
+        )
+
+        # Subscribe to every needed feed; one bus subscription per event type
+        # is enough because the handler filters by (symbol, timeframe).
+        self._subscriptions.append(self.bus.subscribe(TickEvent, self._on_tick, name=f"{self.id}.tick"))
+        self._subscriptions.append(self.bus.subscribe(BarEvent, self._on_bar, name=f"{self.id}.bar"))
+        self._subscriptions.append(
+            self.bus.subscribe(OrderFilledEvent, self._on_order_filled, name=f"{self.id}.fill")
+        )
+        self._subscriptions.append(
+            self.bus.subscribe(OrderRejectedEvent, self._on_order_rejected, name=f"{self.id}.reject")
+        )
+        self._subscriptions.append(
+            self.bus.subscribe(PositionClosedEvent, self._on_position_closed, name=f"{self.id}.close")
+        )
+
+        # User hook
+        await self._guarded(self.strategy.on_start, self._ctx)
+        await self.bus.publish(
+            StrategyStateChangedEvent(strategy_id=self.id, state="started")
+        )
+
+    async def stop(self) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
+        for sub in self._subscriptions:
+            await sub.unsubscribe()
+        self._subscriptions.clear()
+        if self._ctx is not None:
+            await self._guarded(self.strategy.on_stop, self._ctx)
+        await self.bus.publish(
+            StrategyStateChangedEvent(strategy_id=self.id, state="stopped")
+        )
+
+    async def pause(self) -> None:
+        self._paused = True
+        await self.bus.publish(
+            StrategyStateChangedEvent(strategy_id=self.id, state="paused")
+        )
+
+    async def resume(self) -> None:
+        self._paused = False
+        await self.bus.publish(
+            StrategyStateChangedEvent(strategy_id=self.id, state="started")
+        )
+
+    async def update_params(self, new_params: StrategyParams) -> None:
+        """Atomically swap params and call on_params_reloaded."""
+        old = self._params
+        async with self._reload_lock:
+            self._params = new_params
+            if self._ctx is not None:
+                self._ctx._replace_params(new_params)
+        if self._ctx is not None:
+            await self._guarded(self.strategy.on_params_reloaded, self._ctx, old, new_params)
+
+    # --- Event dispatch -----------------------------------------------------
+
+    async def _on_tick(self, evt: TickEvent) -> None:
+        if not self._active():
+            return
+        if self._ctx is None or evt.tick.symbol != self._ctx.symbol:
+            return
+        self._ctx.history.update_tick(evt.tick)
+        await self._guarded(self.strategy.on_tick, self._ctx, evt.tick)
+
+    async def _on_bar(self, evt: BarEvent) -> None:
+        if not self._active():
+            return
+        if (
+            self._ctx is None
+            or evt.bar.symbol != self._ctx.symbol
+            or evt.bar.timeframe != self._ctx.timeframe
+        ):
+            return
+        self._ctx.history.append_bar(evt.bar)
+        if evt.bar.is_closed:
+            await self._guarded(self.strategy.on_bar, self._ctx, evt.bar)
+
+    async def _on_order_filled(self, evt: OrderFilledEvent) -> None:
+        if not self._active() or evt.order.strategy_id != self.id:
+            return
+        if self._ctx is None:
+            return
+        await self._guarded(self.strategy.on_order_filled, self._ctx, evt.order)
+
+    async def _on_order_rejected(self, evt: OrderRejectedEvent) -> None:
+        if not self._active() or evt.order.strategy_id != self.id:
+            return
+        if self._ctx is None:
+            return
+        await self._guarded(self.strategy.on_order_rejected, self._ctx, evt.order, evt.reason)
+
+    async def _on_position_closed(self, evt: PositionClosedEvent) -> None:
+        if not self._active() or evt.position.magic != self._magic:
+            return
+        if self._ctx is None:
+            return
+        await self._guarded(self.strategy.on_position_closed, self._ctx, evt.position)
+
+    # --- Internals ----------------------------------------------------------
+
+    def _active(self) -> bool:
+        return not (self._stopped or self._paused or self._quarantined)
+
+    async def _guarded(self, fn, *args, **kwargs) -> None:
+        """Run a user hook under the reload lock with error budget tracking."""
+        async with self._reload_lock:
+            try:
+                await fn(*args, **kwargs)
+                return
+            except StrategyQuarantinedError:
+                raise
+            except Exception as e:
+                self._logger.exception("strategy hook raised", hook=fn.__name__)
+                self._record_error()
+                if self._quarantined:
+                    await self.bus.publish(
+                        StrategyStateChangedEvent(
+                            strategy_id=self.id,
+                            state="quarantined",
+                            reason=str(e),
+                        )
+                    )
+
+    def _record_error(self) -> None:
+        now = time.monotonic()
+        self._errors.append(now)
+        cutoff = now - QUARANTINE_WINDOW_SECONDS
+        while self._errors and self._errors[0] < cutoff:
+            self._errors.popleft()
+        if len(self._errors) > MAX_ERRORS_PER_MINUTE:
+            self._quarantined = True
+            self._logger.error(
+                "strategy quarantined: too many errors",
+                count=len(self._errors),
+                window_s=QUARANTINE_WINDOW_SECONDS,
+            )
