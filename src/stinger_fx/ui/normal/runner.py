@@ -13,10 +13,12 @@ import logging
 from stinger_fx.core.event_bus import AsyncEventBus, Subscription
 from stinger_fx.core.events import (
     AccountSnapshotEvent,
+    BarEvent,
     EngineHeartbeatEvent,
     OrderFilledEvent,
     OrderRejectedEvent,
     StrategyStateChangedEvent,
+    TickEvent,
 )
 from stinger_fx.log import get_logger
 from stinger_fx.ui.handle import EngineHandle
@@ -36,6 +38,14 @@ class NormalUI:
         self._hb_task: asyncio.Task[None] | None = None
         self._latest_equity: float | None = None
         self._latest_balance: float | None = None
+        self._latest_profit: float | None = None
+        # Flow counters reset each heartbeat — so the operator can see at a
+        # glance whether ticks/bars are actually arriving.
+        self._ticks_since_heartbeat: int = 0
+        self._bars_since_heartbeat: int = 0
+        self._last_tick_symbol: str | None = None
+        self._last_tick_bid: float | None = None
+        self._last_tick_ask: float | None = None
 
     async def start(self) -> None:
         self._subs.append(self._bus.subscribe(OrderFilledEvent, self._on_filled, name="ui.normal.fill"))
@@ -45,6 +55,12 @@ class NormalUI:
         )
         self._subs.append(
             self._bus.subscribe(AccountSnapshotEvent, self._on_snapshot, name="ui.normal.snapshot")
+        )
+        self._subs.append(
+            self._bus.subscribe(TickEvent, self._on_tick, name="ui.normal.tick")
+        )
+        self._subs.append(
+            self._bus.subscribe(BarEvent, self._on_bar, name="ui.normal.bar")
         )
         self._hb_task = asyncio.create_task(self._heartbeat_loop())
         logger.info("normal_ui_started")
@@ -93,6 +109,24 @@ class NormalUI:
     async def _on_snapshot(self, evt: AccountSnapshotEvent) -> None:
         self._latest_equity = evt.snapshot.equity
         self._latest_balance = evt.snapshot.balance
+        self._latest_profit = evt.snapshot.profit
+
+    async def _on_tick(self, evt: TickEvent) -> None:
+        self._ticks_since_heartbeat += 1
+        self._last_tick_symbol = evt.tick.symbol
+        self._last_tick_bid = evt.tick.bid
+        self._last_tick_ask = evt.tick.ask
+
+    async def _on_bar(self, evt: BarEvent) -> None:
+        if evt.bar.is_closed:
+            self._bars_since_heartbeat += 1
+            logger.info(
+                "bar_closed",
+                symbol=evt.bar.symbol,
+                timeframe=evt.bar.timeframe.value,
+                time=evt.bar.time.isoformat(),
+                close=evt.bar.close,
+            )
 
     async def _heartbeat_loop(self) -> None:
         while True:
@@ -108,5 +142,13 @@ class NormalUI:
                 positions=len(positions),
                 balance=self._latest_balance,
                 equity=self._latest_equity,
+                profit=self._latest_profit,
+                ticks=self._ticks_since_heartbeat,
+                bars=self._bars_since_heartbeat,
+                last_symbol=self._last_tick_symbol,
+                last_bid=self._last_tick_bid,
+                last_ask=self._last_tick_ask,
             )
+            self._ticks_since_heartbeat = 0
+            self._bars_since_heartbeat = 0
             await self._bus.publish(EngineHeartbeatEvent(interval_seconds=self._heartbeat))
