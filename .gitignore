@@ -218,5 +218,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Stinger-Fx runtime artifacts
-data/
+# Anchored with a leading slash so this only matches the runtime data dir at
+# the repo root — NOT src/stinger_fx/data/, which is the source-code package.
+/data/
 
