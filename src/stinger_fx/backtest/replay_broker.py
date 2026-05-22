@@ -23,6 +23,7 @@ from stinger_fx.core.events import (
 )
 from stinger_fx.domain import (
     AccountInfo,
+    AccountSnapshot,
     Order,
     OrderRequest,
     OrderResult,
@@ -94,6 +95,27 @@ class SimBroker(BaseBroker):
             currency="USD",
             leverage=100,
             name="simulated",
+        )
+
+    async def get_account_snapshot(self) -> AccountSnapshot:
+        # Unrealized P&L on still-open positions, marked-to-market at the last
+        # price the backtester pushed in.
+        unrealized = 0.0
+        for p in self._positions.values():
+            mid = self._last_price.get(p.symbol)
+            if mid is None:
+                continue
+            unrealized += (mid - p.open_price) * p.side.sign * p.volume * self._contract
+        equity = self.balance + unrealized
+        return AccountSnapshot(
+            account_id="sim",
+            time=self._sim_time,
+            balance=self.balance,
+            equity=equity,
+            margin=0.0,
+            free_margin=equity,
+            margin_level=0.0,
+            profit=unrealized,
         )
 
     async def get_symbol_info(self, symbol: str) -> SymbolInfo:

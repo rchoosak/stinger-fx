@@ -31,6 +31,7 @@ from stinger_fx.core.event_bus import AsyncEventBus
 from stinger_fx.core.events import TickEvent
 from stinger_fx.domain import (
     AccountInfo,
+    AccountSnapshot,
     Order,
     OrderRequest,
     OrderResult,
@@ -142,6 +143,26 @@ class MT5Broker(BaseBroker):
             currency=info.currency,
             leverage=int(info.leverage) or 1,
             name=info.name or "",
+        )
+
+    async def get_account_snapshot(self) -> AccountSnapshot:
+        self._require_connected()
+        mt5 = self._mt5()
+        info = await self._sdk(mt5.account_info)
+        if info is None:
+            err = await self._sdk(mt5.last_error)
+            raise BrokerError(f"account_info() failed: {err}")
+        margin = float(info.margin)
+        equity = float(info.equity)
+        return AccountSnapshot(
+            account_id=str(info.login),
+            time=datetime.now(UTC),
+            balance=float(info.balance),
+            equity=equity,
+            margin=margin,
+            free_margin=float(info.margin_free),
+            margin_level=(equity / margin * 100.0) if margin > 0 else 0.0,
+            profit=float(info.profit),
         )
 
     async def get_symbol_info(self, symbol: str) -> SymbolInfo:

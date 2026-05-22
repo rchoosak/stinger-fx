@@ -17,8 +17,11 @@ import pytest
 from stinger_fx.brokers.base import BaseBroker
 from stinger_fx.core import AsyncEventBus
 from stinger_fx.core.events import TickEvent
+from datetime import UTC, datetime as _dt
+
 from stinger_fx.domain import (
     AccountInfo,
+    AccountSnapshot,
     Order,
     OrderRequest,
     OrderResult,
@@ -53,6 +56,12 @@ class _RecordingBroker(BaseBroker):
 
     async def get_account_info(self) -> AccountInfo:
         return AccountInfo(account_id="x", broker="x", server="x", currency="USD", leverage=1)
+
+    async def get_account_snapshot(self) -> AccountSnapshot:
+        return AccountSnapshot(
+            account_id="x", time=_dt.now(UTC),
+            balance=10_000, equity=10_000, margin=0, free_margin=10_000,
+        )
 
     async def get_symbol_info(self, symbol: str) -> SymbolInfo:
         return SymbolInfo(
@@ -151,3 +160,48 @@ async def test_subscribe_bars_runs_after_broker_connects(monkeypatch, tmp_path: 
     for runner in list(app.runners.values()):
         await runner.stop()
     await app.engine.bus.close()  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_account_snapshot_is_published_to_bus(monkeypatch, tmp_path: Path) -> None:
+    """The runtime should fan account snapshots out on the bus so UIs see them."""
+    from stinger_fx.core.events import AccountSnapshotEvent
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "app.yaml").write_text(
+        "mode: normal\n"
+        "broker:\n  type: mt5\n  mt5: {}\n"
+        f"data_dir: {tmp_path / 'data'}\n"
+    )
+    (config_dir / "strategies.yaml").write_text("strategies: []\n")
+    (config_dir / "backtest.yaml").write_text("runs: []\n")
+
+    recording: dict[str, _RecordingBroker] = {}
+    monkeypatch.setattr(
+        "stinger_fx.runtime.build_broker",
+        lambda cfg, bus: recording.setdefault("broker", _RecordingBroker(bus)),
+    )
+
+    app = StingerApp(config_dir)
+    await app.setup()
+
+    received: list[AccountSnapshotEvent] = []
+
+    async def collect(evt: AccountSnapshotEvent) -> None:
+        received.append(evt)
+
+    assert app.engine is not None and app.engine.bus is not None
+    app.engine.bus.subscribe(AccountSnapshotEvent, collect)
+
+    # Simulate broker connect + manually fire the scheduler job once
+    await recording["broker"].start()
+    await app._publish_account_snapshot()
+    # Yield twice so the bus delivers to subscribers
+    for _ in range(3):
+        await __import__("asyncio").sleep(0)
+
+    assert len(received) == 1
+    assert received[0].snapshot.balance == 10_000
+
+    await app.engine.bus.close()

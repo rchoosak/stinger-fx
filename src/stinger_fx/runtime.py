@@ -25,6 +25,7 @@ from stinger_fx.config import (
 from stinger_fx.brokers.base import BaseBroker
 from stinger_fx.core import AsyncEventBus, LiveClock, TradingEngine
 from stinger_fx.core.events import (
+    AccountSnapshotEvent,
     ConfigReloadedEvent,
     ConfigReloadFailedEvent,
     SignalEvent,
@@ -118,6 +119,12 @@ class StingerApp:
             and self._watcher is not None
             and self._broker is not None
         )
+        # Schedule periodic account snapshots BEFORE engine.start so they're
+        # registered on the engine's scheduler. The scheduler starts inside
+        # engine.start() and will begin firing the job immediately after.
+        self.engine.scheduler.every(
+            5.0, self._publish_account_snapshot, name="account_snapshot"
+        )
         await self.engine.start()
         # Now that the broker is connected (via engine.start), subscribe it to
         # every (symbol, timeframe) the active strategies declared.
@@ -137,6 +144,17 @@ class StingerApp:
         if self._router is not None:
             await self._router.detach()
         await self.engine.stop()
+
+    async def _publish_account_snapshot(self) -> None:
+        """Scheduler job: pull account state from the broker, fan out on bus."""
+        if self._broker is None or self.bus is None:
+            return
+        try:
+            snapshot = await self._broker.get_account_snapshot()
+        except Exception:
+            logger.exception("account snapshot failed")
+            return
+        await self.bus.publish(AccountSnapshotEvent(snapshot=snapshot))
 
     # --- Strategy lifecycle (also used by hot reload) ---------------------
 

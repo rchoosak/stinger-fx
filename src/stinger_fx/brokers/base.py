@@ -18,6 +18,7 @@ import pyarrow as pa
 from stinger_fx.core.event_bus import AsyncEventBus
 from stinger_fx.domain import (
     AccountInfo,
+    AccountSnapshot,
     Order,
     OrderRequest,
     OrderResult,
@@ -50,6 +51,11 @@ class BaseBroker(ABC):
 
     @abstractmethod
     async def get_account_info(self) -> AccountInfo: ...
+
+    @abstractmethod
+    async def get_account_snapshot(self) -> AccountSnapshot:
+        """Point-in-time balance/equity/margin. Polled periodically by the
+        engine and published as an AccountSnapshotEvent so UIs see live P&L."""
 
     @abstractmethod
     async def get_symbol_info(self, symbol: str) -> SymbolInfo: ...
