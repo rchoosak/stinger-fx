@@ -22,8 +22,14 @@ from stinger_fx.config import (
     StrategyEntry,
     load_all,
 )
+from stinger_fx.brokers.base import BaseBroker
 from stinger_fx.core import AsyncEventBus, LiveClock, TradingEngine
-from stinger_fx.core.events import ConfigReloadedEvent, ConfigReloadFailedEvent, SignalEvent
+from stinger_fx.core.events import (
+    ConfigReloadedEvent,
+    ConfigReloadFailedEvent,
+    SignalEvent,
+    TickEvent,
+)
 from stinger_fx.data import SqliteStore
 from stinger_fx.domain.timeframes import Timeframe
 from stinger_fx.log import configure as configure_logs
@@ -56,6 +62,7 @@ class StingerApp:
         self._reloader: ConfigReloader | None = None
         self._router: OrderRouter | None = None
         self._ui: NormalUI | None = None
+        self._broker: BaseBroker | None = None
 
     async def setup(self) -> None:
         self.full_cfg = load_all(self.config_dir)
@@ -86,8 +93,11 @@ class StingerApp:
         self._router = OrderRouter(self.bus, broker, strategy_magic=magic_by_id)
         await self._router.attach()
 
-        # Subscribe broker to symbols + register aggregators for sub-minute
-        await self._wire_broker_subscriptions(broker)
+        # Broker subscriptions are deferred until run_until_signal(), because
+        # the broker is not connected until engine.start() runs through the
+        # registered components — calling subscribe_bars() on a not-yet-connected
+        # broker raises BrokerNotConnectedError.
+        self._broker = broker
 
         # Hot-reload plumbing
         self._reloader = ConfigReloader(self._build_reload_actions(broker))
@@ -103,8 +113,15 @@ class StingerApp:
             self.engine.register(self._ui)
 
     async def run_until_signal(self) -> None:
-        assert self.engine is not None and self._watcher is not None
+        assert (
+            self.engine is not None
+            and self._watcher is not None
+            and self._broker is not None
+        )
         await self.engine.start()
+        # Now that the broker is connected (via engine.start), subscribe it to
+        # every (symbol, timeframe) the active strategies declared.
+        await self._wire_broker_subscriptions(self._broker)
         await self._watcher.start()
 
         loop = asyncio.get_running_loop()
@@ -163,8 +180,11 @@ class StingerApp:
                 await broker.subscribe_bars(sub.symbol, sub.timeframe)
                 if not sub.timeframe.is_native_mt5 and sub.timeframe.value != "TICK":
                     agg = BarAggregator(sub.symbol, sub.timeframe, self.bus)
+                    # Subscribe the aggregator to TickEvent (the bus dispatches
+                    # by isinstance, so `type(agg).__mro__[0]` was a no-op bug
+                    # subscribing to the wrong type and dropping every tick).
                     self.bus.subscribe(
-                        type(agg).__mro__[0],  # type filter handled inside on_tick
+                        TickEvent,
                         agg.on_tick,  # type: ignore[arg-type]
                         name=f"agg.{sub.symbol}.{sub.timeframe.value}",
                     )
