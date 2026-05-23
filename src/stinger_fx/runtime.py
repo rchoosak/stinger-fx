@@ -35,6 +35,7 @@ from stinger_fx.data import SqliteStore
 from stinger_fx.domain.timeframes import Timeframe
 from stinger_fx.log import configure as configure_logs
 from stinger_fx.log import set_level
+from stinger_fx.risk import RiskMonitor
 from stinger_fx.strategies import (
     StrategyRunner,
     derive_magic,
@@ -64,6 +65,7 @@ class StingerApp:
         self._router: OrderRouter | None = None
         self._ui: NormalUI | None = None
         self._broker: BaseBroker | None = None
+        self._risk: RiskMonitor | None = None
 
     async def setup(self) -> None:
         self.full_cfg = load_all(self.config_dir)
@@ -84,14 +86,20 @@ class StingerApp:
         self.handle = EngineHandle(bus=self.bus, broker=broker, runners=self.runners)
         magic_by_id: dict[str, int] = {}
 
+        # Risk monitor — starts before strategies so it sees their first events.
+        self._risk = RiskMonitor(self.bus, app_cfg.risk)
+        await self._risk.start()
+
         # Build strategies
         for entry in self.full_cfg.strategies.strategies:
             if not entry.enabled:
                 continue
             await self._add_strategy_internal(entry, magic_by_id)
 
-        # Order router
-        self._router = OrderRouter(self.bus, broker, strategy_magic=magic_by_id)
+        # Order router (with risk pre-trade checks)
+        self._router = OrderRouter(
+            self.bus, broker, strategy_magic=magic_by_id, risk=self._risk
+        )
         await self._router.attach()
 
         # Broker subscriptions are deferred until run_until_signal(), because
@@ -143,6 +151,8 @@ class StingerApp:
         await self._watcher.stop()
         if self._router is not None:
             await self._router.detach()
+        if self._risk is not None:
+            await self._risk.stop()
         await self.engine.stop()
 
     async def _publish_account_snapshot(self) -> None:
@@ -246,9 +256,9 @@ class StingerApp:
         async def log_level(level: str) -> None:
             set_level(level)
 
-        async def risk(_cfg) -> None:
-            # OrderRouter risk hookup is Phase-2; just acknowledge for now.
-            logger.info("risk config noted (no live application yet)")
+        async def risk(cfg) -> None:  # noqa: ANN001
+            if self._risk is not None:
+                self._risk.update_config(cfg)
 
         return ReloadActions(
             add_strategy=add,
