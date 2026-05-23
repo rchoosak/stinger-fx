@@ -70,6 +70,7 @@ class StingerApp:
         self._mode: str = "normal"
         self._web_host: str = "127.0.0.1"
         self._web_port: int = 8765
+        self._metrics: object | None = None  # MetricsCollector when metrics.enabled
 
     async def setup(self) -> None:
         self.full_cfg = load_all(self.config_dir)
@@ -117,6 +118,26 @@ class StingerApp:
         # Hot-reload plumbing
         self._reloader = ConfigReloader(self._build_reload_actions(broker))
         self._watcher = ConfigWatcher(self.config_dir, self._on_config_change)
+
+        # Optional Prometheus metrics — collector subscribes to the bus and a
+        # standalone HTTP server exposes /metrics on a configurable port. The
+        # collector runs as a lifecycle component so it stops with the engine.
+        if app_cfg.metrics.enabled:
+            from stinger_fx.observability import MetricsCollector, start_metrics_server
+
+            self._metrics = MetricsCollector(self.bus)
+            self.engine.register(self._metrics)
+            try:
+                start_metrics_server(
+                    port=app_cfg.metrics.port,
+                    addr=app_cfg.metrics.host,
+                )
+            except OSError as e:
+                # Don't kill the engine just because the metrics port is taken.
+                logger.error(
+                    "metrics_server_bind_failed host=%s port=%d error=%s",
+                    app_cfg.metrics.host, app_cfg.metrics.port, e,
+                )
 
         # UI — TUI takes the loop, web mounts uvicorn alongside, normal owns
         # stdout. tui+web are launched in run_until_signal so the engine is
