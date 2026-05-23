@@ -125,3 +125,22 @@ class BacktestReport:
             schema=pa.schema([("time", pa.timestamp("ns", tz="UTC")), ("equity", pa.float64())]),
         )
         pq.write_table(tbl, path, compression="zstd")
+
+    def trades_to_jsonable(self) -> list[dict]:
+        """List-of-dicts representation suitable for JSON serialization.
+
+        Used by the web trade-replay view so the browser can plot entry/exit
+        markers on top of the equity curve.
+        """
+        return [
+            {
+                "open_ts": t.open_ts.isoformat(),
+                "close_ts": t.close_ts.isoformat(),
+                "side": t.side,
+                "open_price": t.open_price,
+                "close_price": t.close_price,
+                "volume": t.volume,
+                "pnl": round(t.pnl, 2),
+            }
+            for t in self.trades
+        ]
