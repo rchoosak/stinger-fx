@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from stinger_fx.domain.timeframes import Timeframe
 
@@ -44,6 +44,11 @@ class MT4Config(BaseModel):
 class BrokerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # `id` identifies the broker in a multi-account setup; strategies pick which
+    # broker to trade against via StrategyEntry.account. The legacy singular
+    # `broker:` block omits this field and gets id="default" assigned by the
+    # AppConfig validator.
+    id: str = Field("default", min_length=1, pattern=r"^[A-Za-z0-9_-]+$")
     type: Literal["mt5", "mt4"] = "mt5"
     mt5: MT5Config | None = None
     mt4: MT4Config | None = None
@@ -92,7 +97,10 @@ class AppConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: Literal["normal", "tui", "web"] = "normal"
-    broker: BrokerConfig
+    # Backward-compat singleton (Phase 1–2). New configs may use `brokers:` for
+    # multi-account; either path resolves to `broker_list` via the validator.
+    broker: BrokerConfig | None = None
+    brokers: list[BrokerConfig] | None = None
     data_dir: Path = Path("./data")
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     timezone: str = "UTC"
@@ -100,6 +108,41 @@ class AppConfig(BaseModel):
     risk: RiskConfig = RiskConfig()
     metrics: MetricsConfig = MetricsConfig()
     notifications: list[NotificationChannelConfig] = Field(default_factory=list)
+
+    @field_validator("brokers")
+    @classmethod
+    def _unique_broker_ids(
+        cls, v: list[BrokerConfig] | None
+    ) -> list[BrokerConfig] | None:
+        if not v:
+            return v
+        ids = [b.id for b in v]
+        if len(ids) != len(set(ids)):
+            dupes = sorted({i for i in ids if ids.count(i) > 1})
+            raise ValueError(f"duplicate broker ids: {dupes}")
+        return v
+
+    @model_validator(mode="after")
+    def _normalise_brokers(self) -> AppConfig:
+        # Exactly one of `broker:` or `brokers:` must be present.
+        if self.broker is None and not self.brokers:
+            raise ValueError(
+                "AppConfig requires `broker:` (singular) or `brokers:` (list of accounts)"
+            )
+        if self.broker is not None and self.brokers:
+            raise ValueError(
+                "AppConfig has both `broker:` and `brokers:` — keep only one"
+            )
+        return self
+
+    @property
+    def broker_list(self) -> list[BrokerConfig]:
+        """Unified accessor used by the runtime — returns the broker list
+        regardless of which YAML shape was supplied."""
+        if self.brokers:
+            return list(self.brokers)
+        assert self.broker is not None  # guarded by _normalise_brokers
+        return [self.broker]
 
 
 # --- Strategies ---------------------------------------------------------------
@@ -111,6 +154,10 @@ class StrategyEntry(BaseModel):
     id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]+$")
     class_path: str = Field(min_length=1)
     enabled: bool = True
+    # In a multi-account setup, picks which broker.id the strategy trades
+    # against. Single-broker configs leave this at the default — it resolves
+    # to the (only) broker via the broker pool.
+    account: str = Field("default", min_length=1, pattern=r"^[A-Za-z0-9_-]+$")
     params: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("class_path")

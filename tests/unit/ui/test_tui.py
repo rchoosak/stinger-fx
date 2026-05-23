@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from stinger_fx.brokers import BrokerPool
 from stinger_fx.brokers.base import BaseBroker
 from stinger_fx.core import AsyncEventBus
 from stinger_fx.core.events import (
@@ -94,7 +95,9 @@ class _StubBroker(BaseBroker):
 def _make_handle() -> EngineHandle:
     bus = AsyncEventBus()
     broker = _StubBroker(bus)
-    return EngineHandle(bus=bus, broker=broker, runners={})
+    return EngineHandle(
+        bus=bus, brokers=BrokerPool([("default", broker)]), runners={}
+    )
 
 
 @pytest.mark.asyncio
