@@ -1,0 +1,22 @@
+<h2>Positions</h2>
+{% if positions %}
+<table>
+  <thead><tr><th>ticket</th><th>symbol</th><th>side</th><th>vol</th><th>open</th><th>sl</th><th>tp</th><th>P/L</th></tr></thead>
+  <tbody>
+  {% for p in positions %}
+    <tr>
+      <td>{{ p.ticket }}</td>
+      <td>{{ p.symbol }}</td>
+      <td class="side-{{ p.side.value }}">{{ p.side.value | upper }}</td>
+      <td>{{ "%.2f" | format(p.volume) }}</td>
+      <td>{{ "%.5f" | format(p.open_price) }}</td>
+      <td>{{ "%.5f" | format(p.sl) if p.sl else "—" }}</td>
+      <td>{{ "%.5f" | format(p.tp) if p.tp else "—" }}</td>
+      <td class="{{ 'profit' if p.profit > 0 else 'loss' if p.profit < 0 else '' }}">{{ "%+.2f" | format(p.profit) }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="loading">no open positions</p>
+{% endif %}

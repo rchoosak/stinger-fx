@@ -68,6 +68,8 @@ class StingerApp:
         self._broker: BaseBroker | None = None
         self._risk: RiskMonitor | None = None
         self._mode: str = "normal"
+        self._web_host: str = "127.0.0.1"
+        self._web_port: int = 8765
 
     async def setup(self) -> None:
         self.full_cfg = load_all(self.config_dir)
@@ -116,18 +118,17 @@ class StingerApp:
         self._reloader = ConfigReloader(self._build_reload_actions(broker))
         self._watcher = ConfigWatcher(self.config_dir, self._on_config_change)
 
-        # UI — TUI takes over the asyncio loop in run_until_signal, so we don't
-        # register a NormalUI in that case; otherwise normal mode owns stdout.
+        # UI — TUI takes the loop, web mounts uvicorn alongside, normal owns
+        # stdout. tui+web are launched in run_until_signal so the engine is
+        # already running by the time they mount.
         self._mode = app_cfg.mode
+        self._web_host = app_cfg.web.host
+        self._web_port = app_cfg.web.port
         if app_cfg.mode == "normal":
             self._ui = NormalUI(self.handle)
             self.engine.register(self._ui)
-        elif app_cfg.mode == "tui":
-            logger.info("UI mode=tui — Textual dashboard will mount after engine start")
-        elif app_cfg.mode == "web":
-            logger.warning("UI mode web is a Phase-2 feature (next PR); falling back to normal")
-            self._ui = NormalUI(self.handle)
-            self.engine.register(self._ui)
+        elif app_cfg.mode in ("tui", "web"):
+            logger.info("UI mode=%s — will mount after engine start", app_cfg.mode)
 
     async def run_until_signal(self) -> None:
         assert (
@@ -149,13 +150,39 @@ class StingerApp:
 
         if self._mode == "tui":
             # Textual takes over the loop until the user quits with 'q'.
-            # Importing lazily so non-TUI runs don't pay the import cost.
+            # Lazy-import so non-TUI runs don't pay the import cost.
             from stinger_fx.ui.tui import StingerTUI
 
             assert self.handle is not None
-            tui = StingerTUI(self.handle)
+            # Pass the risk monitor so the TUI's kill-switch field + 'r' binding
+            # work end-to-end; the TUI accepts it duck-typed.
+            tui = StingerTUI(self.handle, risk=self._risk)
             try:
                 await tui.run_async()
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                pass
+        elif self._mode == "web":
+            # uvicorn runs in the same asyncio loop as the engine. SIGINT
+            # propagates through the awaited serve() and we fall through to
+            # the cleanup sequence below.
+            import uvicorn
+
+            from stinger_fx.ui.web import create_app
+
+            assert self.handle is not None
+            web_app = create_app(self.handle)
+            config = uvicorn.Config(
+                web_app,
+                host=self._web_host,
+                port=self._web_port,
+                log_level="warning",
+                access_log=False,
+                loop="asyncio",
+            )
+            server = uvicorn.Server(config)
+            logger.info("web ui listening on http://%s:%d", self._web_host, self._web_port)
+            try:
+                await server.serve()
             except (KeyboardInterrupt, asyncio.CancelledError):
                 pass
         else:

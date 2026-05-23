@@ -1,0 +1,26 @@
+<h2>Strategies</h2>
+{% if strategies %}
+<table>
+  <thead><tr><th>id</th><th>name</th><th>symbol</th><th>tf</th><th>state</th><th></th></tr></thead>
+  <tbody>
+  {% for s in strategies %}
+    <tr>
+      <td><code>{{ s.id }}</code></td>
+      <td>{{ s.name }}</td>
+      <td>{{ s.symbol }}</td>
+      <td>{{ s.timeframe }}</td>
+      <td><span class="state state-{{ s.state }}">{{ s.state }}</span></td>
+      <td>
+        {% if s.state == "paused" %}
+          <button hx-post="/strategy/{{ s.id }}/resume" hx-target="#strategies-panel" hx-swap="innerHTML">Resume</button>
+        {% else %}
+          <button hx-post="/strategy/{{ s.id }}/pause" hx-target="#strategies-panel" hx-swap="innerHTML">Pause</button>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="loading">no strategies configured</p>
+{% endif %}
