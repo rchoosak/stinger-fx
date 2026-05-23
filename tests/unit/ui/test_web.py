@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 import pytest
 from fastapi.testclient import TestClient
 
+from stinger_fx.brokers import BrokerPool
 from stinger_fx.brokers.base import BaseBroker
 from stinger_fx.core import AsyncEventBus
 from stinger_fx.core.events import AccountSnapshotEvent
@@ -89,7 +90,9 @@ class _StubBroker(BaseBroker):
 def client() -> TestClient:
     bus = AsyncEventBus()
     broker = _StubBroker(bus)
-    handle = EngineHandle(bus=bus, broker=broker, runners={})
+    handle = EngineHandle(
+        bus=bus, brokers=BrokerPool([("default", broker)]), runners={}
+    )
     app = create_app(handle)
     return TestClient(app)
 

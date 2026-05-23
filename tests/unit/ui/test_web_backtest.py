@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from stinger_fx.backtest.reports import BacktestReport, TradeRecord
+from stinger_fx.brokers import BrokerPool
 from stinger_fx.brokers.base import BaseBroker
 from stinger_fx.core import AsyncEventBus
 from stinger_fx.domain import (
@@ -121,7 +122,9 @@ def _write_trades_sidecar(data_dir: Path, run_id: str, trade_count: int) -> dict
 def client_with_data(tmp_path: Path) -> tuple[TestClient, Path]:
     bus = AsyncEventBus()
     broker = _StubBroker(bus)
-    handle = EngineHandle(bus=bus, broker=broker, runners={})
+    handle = EngineHandle(
+        bus=bus, brokers=BrokerPool([("default", broker)]), runners={}
+    )
     app = create_app(handle, data_dir=tmp_path)
     return TestClient(app), tmp_path
 

@@ -12,7 +12,7 @@ import signal
 from pathlib import Path
 
 from stinger_fx.backtest.order_router import OrderRouter
-from stinger_fx.brokers import build_broker
+from stinger_fx.brokers import BrokerPool, build_broker
 from stinger_fx.brokers.bar_aggregator import BarAggregator
 from stinger_fx.config import (
     ConfigReloader,
@@ -24,6 +24,7 @@ from stinger_fx.config import (
 )
 from stinger_fx.brokers.base import BaseBroker
 from stinger_fx.core import AsyncEventBus, LiveClock, TradingEngine
+from stinger_fx.core.errors import ConfigError
 from stinger_fx.core.events import (
     AccountSnapshotEvent,
     ConfigReloadedEvent,
@@ -65,7 +66,8 @@ class StingerApp:
         self._reloader: ConfigReloader | None = None
         self._router: OrderRouter | None = None
         self._ui: NormalUI | None = None
-        self._broker: BaseBroker | None = None
+        self._pool: BrokerPool = BrokerPool()
+        self._strategy_accounts: dict[str, str] = {}
         self._risk: RiskMonitor | None = None
         self._notifications: object | None = None
         self._mode: str = "normal"
@@ -88,10 +90,34 @@ class StingerApp:
         self.engine = TradingEngine(clock=LiveClock())
         self.bus = self.engine.bus
 
-        broker = build_broker(app_cfg.broker, self.bus)
-        self.engine.register(broker)
+        # Multi-account broker pool. broker_list yields one BrokerConfig per
+        # configured account; backward-compat configs with a singular
+        # `broker:` collapse to a one-element list with id="default".
+        self._pool = BrokerPool()
+        for bcfg in app_cfg.broker_list:
+            broker = build_broker(bcfg, self.bus)
+            self._pool.add(bcfg.id, broker)
+            self.engine.register(broker)
 
-        self.handle = EngineHandle(bus=self.bus, broker=broker, runners=self.runners)
+        # Map strategy_id → account_id for the router + UI labelling.
+        strategy_accounts: dict[str, str] = {
+            s.id: s.account for s in self.full_cfg.strategies.strategies
+        }
+        # Reject configs that point at unknown brokers up-front.
+        for sid, account_id in strategy_accounts.items():
+            if not self._pool.has(account_id):
+                raise ConfigError(
+                    f"strategy {sid!r} targets account {account_id!r} but no "
+                    f"broker with that id is configured (known: {sorted(b for b, _ in self._pool.items())})"
+                )
+
+        self.handle = EngineHandle(
+            bus=self.bus,
+            brokers=self._pool,
+            runners=self.runners,
+            strategy_accounts=strategy_accounts,
+        )
+        self._strategy_accounts = strategy_accounts
         magic_by_id: dict[str, int] = {}
 
         # Risk monitor — starts before strategies so it sees their first events.
@@ -104,17 +130,22 @@ class StingerApp:
                 continue
             await self._add_strategy_internal(entry, magic_by_id)
 
-        # Order router (with risk pre-trade checks)
+        # Order router — multi-account aware. handle_signal picks the broker
+        # from the pool based on the strategy → account mapping; unknown
+        # strategies fall back to the primary broker.
         self._router = OrderRouter(
-            self.bus, broker, strategy_magic=magic_by_id, risk=self._risk
+            self.bus,
+            pool=self._pool,
+            strategy_magic=magic_by_id,
+            strategy_accounts=strategy_accounts,
+            risk=self._risk,
         )
         await self._router.attach()
 
         # Broker subscriptions are deferred until run_until_signal(), because
-        # the broker is not connected until engine.start() runs through the
-        # registered components — calling subscribe_bars() on a not-yet-connected
-        # broker raises BrokerNotConnectedError.
-        self._broker = broker
+        # the brokers aren't connected until engine.start() runs through the
+        # registered components — calling subscribe_bars() on a not-yet-
+        # connected broker raises BrokerNotConnectedError.
 
         # Notification dispatcher — Telegram / Discord webhooks fired off the
         # bus. Registered as an engine lifecycle component so it starts +
@@ -125,8 +156,8 @@ class StingerApp:
             self._notifications = NotificationDispatcher(self.bus, app_cfg.notifications)
             self.engine.register(self._notifications)
 
-        # Hot-reload plumbing
-        self._reloader = ConfigReloader(self._build_reload_actions(broker))
+        # Hot-reload plumbing — uses the primary broker for legacy actions.
+        self._reloader = ConfigReloader(self._build_reload_actions(self._pool.primary()))
         self._watcher = ConfigWatcher(self.config_dir, self._on_config_change)
 
         # Optional Prometheus metrics — collector subscribes to the bus and a
@@ -165,7 +196,7 @@ class StingerApp:
         assert (
             self.engine is not None
             and self._watcher is not None
-            and self._broker is not None
+            and len(self._pool) > 0
         )
         # Schedule periodic account snapshots BEFORE engine.start so they're
         # registered on the engine's scheduler. The scheduler starts inside
@@ -174,9 +205,9 @@ class StingerApp:
             5.0, self._publish_account_snapshot, name="account_snapshot"
         )
         await self.engine.start()
-        # Now that the broker is connected (via engine.start), subscribe it to
-        # every (symbol, timeframe) the active strategies declared.
-        await self._wire_broker_subscriptions(self._broker)
+        # Now that every broker is connected (via engine.start), subscribe
+        # each one to the (symbol, timeframe) pairs its strategies declared.
+        await self._wire_broker_subscriptions_multi()
         await self._watcher.start()
 
         if self._mode == "tui":
@@ -234,15 +265,21 @@ class StingerApp:
         await self.engine.stop()
 
     async def _publish_account_snapshot(self) -> None:
-        """Scheduler job: pull account state from the broker, fan out on bus."""
-        if self._broker is None or self.bus is None:
+        """Scheduler job: pull account state from every broker, fan out on bus.
+
+        Each broker publishes its own AccountSnapshotEvent with its own
+        `snapshot.account_id`, so per-account observers (risk, UI, metrics)
+        can disambiguate without extra plumbing.
+        """
+        if self.bus is None or len(self._pool) == 0:
             return
-        try:
-            snapshot = await self._broker.get_account_snapshot()
-        except Exception:
-            logger.exception("account snapshot failed")
-            return
-        await self.bus.publish(AccountSnapshotEvent(snapshot=snapshot))
+        for account_id, broker in self._pool.items():
+            try:
+                snapshot = await broker.get_account_snapshot()
+            except Exception:
+                logger.exception("account snapshot failed account_id=%s", account_id)
+                continue
+            await self.bus.publish(AccountSnapshotEvent(snapshot=snapshot))
 
     # --- Strategy lifecycle (also used by hot reload) ---------------------
 
@@ -273,28 +310,56 @@ class StingerApp:
         logger.info("strategy_started id=%s class=%s", entry.id, entry.class_path)
 
     async def _wire_broker_subscriptions(self, broker) -> None:
-        # Aggregate the union of all strategy subscriptions
+        """Subscribe a single broker to every strategy's declared feeds.
+
+        Kept for backward compatibility / the hot-reload action; the live-mode
+        startup uses `_wire_broker_subscriptions_multi` instead so it can fan
+        out per-broker.
+        """
         assert self.bus is not None
         seen: set[tuple[str, Timeframe]] = set()
         for runner in self.runners.values():
-            subs = runner.strategy.subscriptions(runner._params)
-            for sub in subs:
+            for sub in runner.strategy.subscriptions(runner._params):
                 key = (sub.symbol, sub.timeframe)
                 if key in seen:
                     continue
                 seen.add(key)
-                await broker.subscribe_bars(sub.symbol, sub.timeframe)
-                if not sub.timeframe.is_native_mt5 and sub.timeframe.value != "TICK":
-                    agg = BarAggregator(sub.symbol, sub.timeframe, self.bus)
-                    # Subscribe the aggregator to TickEvent (the bus dispatches
-                    # by isinstance, so `type(agg).__mro__[0]` was a no-op bug
-                    # subscribing to the wrong type and dropping every tick).
-                    self.bus.subscribe(
-                        TickEvent,
-                        agg.on_tick,  # type: ignore[arg-type]
-                        name=f"agg.{sub.symbol}.{sub.timeframe.value}",
-                    )
-                    self.aggregators[key] = agg
+                await self._subscribe_one(broker, sub.symbol, sub.timeframe)
+
+    async def _wire_broker_subscriptions_multi(self) -> None:
+        """Multi-account variant: for each strategy, subscribe only the broker
+        that owns its account. Brokers without any active strategies stay
+        idle (no symbol subscriptions, no tick pump cost).
+        """
+        assert self.bus is not None
+        # Track per-broker dedupe so the same symbol isn't subscribed twice
+        # for the same broker even when multiple strategies share it.
+        per_broker_seen: dict[str, set[tuple[str, Timeframe]]] = {
+            acc: set() for acc, _ in self._pool.items()
+        }
+        for sid, runner in self.runners.items():
+            account_id = self._strategy_accounts.get(sid, self._pool.primary_id())
+            broker = self._pool.get(account_id)
+            for sub in runner.strategy.subscriptions(runner._params):
+                key = (sub.symbol, sub.timeframe)
+                if key in per_broker_seen[account_id]:
+                    continue
+                per_broker_seen[account_id].add(key)
+                await self._subscribe_one(broker, sub.symbol, sub.timeframe)
+
+    async def _subscribe_one(self, broker, symbol: str, tf: Timeframe) -> None:
+        """Subscribe broker to (symbol, tf), wiring a BarAggregator if the
+        timeframe isn't native to MT5."""
+        assert self.bus is not None
+        await broker.subscribe_bars(symbol, tf)
+        if not tf.is_native_mt5 and tf.value != "TICK":
+            agg = BarAggregator(symbol, tf, self.bus)
+            self.bus.subscribe(
+                TickEvent,
+                agg.on_tick,  # type: ignore[arg-type]
+                name=f"agg.{symbol}.{tf.value}",
+            )
+            self.aggregators[(symbol, tf)] = agg
 
     def _build_reload_actions(self, broker) -> ReloadActions:
         magic_by_id: dict[str, int] = {sid: derive_magic(sid) for sid in self.runners}
