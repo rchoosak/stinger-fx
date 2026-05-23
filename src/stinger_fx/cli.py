@@ -63,18 +63,71 @@ def run_cmd(
     mode: str | None = typer.Option(
         None, "--mode", "-m", help="Override app.yaml: normal | tui | web"
     ),
+    detach: bool = typer.Option(
+        False, "--detach", help="Spawn the engine in the background and return immediately.",
+    ),
 ) -> None:
     """Start the trading engine in the configured (or overridden) mode."""
-    from stinger_fx.runtime import assemble_and_run
-
     if mode is not None and mode not in {"normal", "tui", "web"}:
         typer.echo(f"ERROR: --mode must be one of normal|tui|web, got {mode!r}", err=True)
         raise typer.Exit(code=1)
+
+    if detach:
+        from stinger_fx.config import load_all
+        from stinger_fx.detach import DetachError, detach_spawn
+
+        cfg = load_all(config_dir)
+        try:
+            info = detach_spawn(config_dir, cfg.app.data_dir)
+        except DetachError as e:
+            typer.echo(f"ERROR: {e}", err=True)
+            raise typer.Exit(code=1) from e
+        typer.echo(f"engine detached pid={info['pid']}")
+        typer.echo(f"web UI: {info['web_url']}")
+        typer.echo(f"  · status: stinger-fx status")
+        typer.echo(f"  · stop:   stinger-fx stop")
+        typer.echo(f"  · logs:   tail -f {info['log']}")
+        return
+
+    from stinger_fx.runtime import assemble_and_run
 
     try:
         asyncio.run(assemble_and_run(config_dir, mode_override=mode))
     except KeyboardInterrupt:
         typer.echo("interrupted")
+
+
+@app.command("status")
+def status_cmd(
+    config_dir: Path = typer.Option(Path("config"), "--config-dir", "-c"),
+) -> None:
+    """Check the status of the detached engine, if any."""
+    from stinger_fx.config import load_all
+    from stinger_fx.detach import detach_status
+
+    cfg = load_all(config_dir)
+    info = detach_status(cfg.app.data_dir)
+    typer.echo(json.dumps(info, indent=2))
+    if info["status"] in ("not_running", "stale_pidfile"):
+        raise typer.Exit(code=1)
+
+
+@app.command("stop")
+def stop_cmd(
+    config_dir: Path = typer.Option(Path("config"), "--config-dir", "-c"),
+    timeout: float = typer.Option(15.0, "--timeout", help="Seconds to wait for clean shutdown."),
+) -> None:
+    """Politely shut down the detached engine."""
+    from stinger_fx.config import load_all
+    from stinger_fx.detach import DetachError, detach_stop
+
+    cfg = load_all(config_dir)
+    try:
+        info = detach_stop(cfg.app.data_dir, timeout_seconds=timeout)
+    except DetachError as e:
+        typer.echo(f"ERROR: {e}", err=True)
+        raise typer.Exit(code=1) from e
+    typer.echo(json.dumps(info, indent=2))
 
 
 # --- config -----------------------------------------------------------------

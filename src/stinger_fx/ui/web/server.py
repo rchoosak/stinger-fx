@@ -20,7 +20,7 @@ from pathlib import Path
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -86,6 +86,8 @@ def create_app(
     app.state.latest_snapshot = None
     # data_dir lets the backtest views resolve <run_id>_trades.json etc.
     app.state.data_dir = Path(data_dir or "./data")
+    # Best-known time the engine entered service — used by /health.
+    app.state.started_at = datetime.now().isoformat()
 
     app.mount("/static", StaticFiles(directory=str(_HERE / "static")), name="static")
 
@@ -292,6 +294,61 @@ def create_app(
         if data is None:
             raise HTTPException(404, f"no backtest run with id {run_id!r}")
         return JSONResponse(data)
+
+    # --- Control plane ---------------------------------------------------
+    # Two tiny endpoints the `--detach` flow leans on. They're broker- and
+    # mode-agnostic so they work the same way for any running engine.
+
+    @app.get("/health")
+    async def health():
+        from fastapi.responses import JSONResponse
+
+        from stinger_fx import __version__
+
+        strategies = await handle.list_strategies()
+        accounts: list[dict] = []
+        try:
+            for account_id, info in await handle.list_accounts():
+                accounts.append({"account_id": account_id, "broker": info.broker})
+        except Exception:  # noqa: BLE001 — multi-account introduced list_accounts
+            try:
+                info = await handle.get_account()
+                accounts = [{"account_id": info.account_id, "broker": info.broker}]
+            except Exception:  # noqa: BLE001
+                accounts = []
+        return JSONResponse(
+            {
+                "status": "ok",
+                "version": __version__,
+                "started_at": app.state.started_at,
+                "strategies": len(strategies),
+                "accounts": accounts,
+            }
+        )
+
+    @app.post("/control/shutdown")
+    async def shutdown(background_tasks: "BackgroundTasks"):
+        """Politely terminate the engine process.
+
+        SIGINT is what the existing run-loop already handles in its cleanup
+        path, so this gives us the same graceful drain as Ctrl+C — except
+        triggered by `stinger-fx stop`.
+
+        The signal is fired from a Starlette BackgroundTask so the response
+        flushes first and the loop stays alive long enough to deliver it.
+        """
+        import os
+        import signal as _signal
+        import time
+
+        from fastapi.responses import JSONResponse
+
+        def _send_signal() -> None:
+            time.sleep(0.05)
+            os.kill(os.getpid(), _signal.SIGINT)
+
+        background_tasks.add_task(_send_signal)
+        return JSONResponse({"status": "shutting_down"})
 
     return app
 
