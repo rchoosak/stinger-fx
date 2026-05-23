@@ -28,6 +28,7 @@ from stinger_fx.domain import (
     OrderType,
     Signal,
 )
+from stinger_fx.risk import RiskMonitor
 
 logger = logging.getLogger("stinger.engine.router")
 
@@ -39,15 +40,42 @@ class OrderRouter:
         broker: BaseBroker,
         *,
         strategy_magic: dict[str, int] | None = None,
+        risk: RiskMonitor | None = None,
     ) -> None:
         self.bus = bus
         self.broker = broker
         self.strategy_magic = strategy_magic or {}
+        self.risk = risk
 
     async def handle_signal(self, signal: Signal) -> None:
         client_order_id = str(uuid.uuid4())
         magic = self.strategy_magic.get(signal.strategy_id, 0)
         volume = signal.suggested_volume or 0.01
+
+        # Pre-trade risk check. Rejection short-circuits the order path and
+        # is recorded in a DecisionEvent so the trade journal shows why.
+        if self.risk is not None:
+            verdict = self.risk.check_signal(signal)
+            if not verdict.allowed:
+                logger.info(
+                    "signal_rejected_by_risk strategy=%s symbol=%s reason=%s",
+                    signal.strategy_id,
+                    signal.symbol,
+                    verdict.reason,
+                )
+                await self.bus.publish(
+                    DecisionEvent(
+                        decision=Decision(
+                            signal=signal,
+                            time=signal.time,
+                            action="rejected",
+                            reason=verdict.reason,
+                            risk_check_passed=False,
+                            client_order_id=None,
+                        )
+                    )
+                )
+                return
 
         req = OrderRequest(
             strategy_id=signal.strategy_id,
