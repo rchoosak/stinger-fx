@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="grid">
+
+  <section class="panel" id="account-panel"
+           hx-get="/partial/account"
+           hx-trigger="load, every 5s"
+           hx-swap="innerHTML">
+    <h2>Account</h2>
+    <p class="loading">loading…</p>
+  </section>
+
+  <section class="panel" id="market-panel"
+           hx-ext="sse"
+           sse-connect="/stream/market"
+           sse-swap="snapshot">
+    <h2>Market</h2>
+    <p class="loading">awaiting first tick…</p>
+  </section>
+
+  <section class="panel wide" id="strategies-panel"
+           hx-get="/partial/strategies"
+           hx-trigger="load, every 3s"
+           hx-swap="innerHTML">
+    <h2>Strategies</h2>
+    <p class="loading">loading…</p>
+  </section>
+
+  <section class="panel wide" id="positions-panel"
+           hx-get="/partial/positions"
+           hx-trigger="load, every 3s"
+           hx-swap="innerHTML">
+    <h2>Positions</h2>
+    <p class="loading">loading…</p>
+  </section>
+
+  <section class="panel widest" id="events-panel"
+           hx-ext="sse"
+           sse-connect="/stream/events">
+    <h2>Events</h2>
+    <ul id="event-list" sse-swap="event" hx-swap="afterbegin"></ul>
+  </section>
+
+</div>
+{% endblock %}

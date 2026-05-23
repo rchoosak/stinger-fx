@@ -1,0 +1,16 @@
+<h2>Account</h2>
+{% if account %}
+<dl class="kv">
+  <dt>Broker</dt><dd>{{ account.broker }}</dd>
+  <dt>Currency</dt><dd>{{ account.currency }}</dd>
+  <dt>Balance</dt><dd>{{ snapshot.balance | money(account.currency) if snapshot else "—" }}</dd>
+  <dt>Equity</dt><dd>{{ snapshot.equity | money(account.currency) if snapshot else "—" }}</dd>
+  <dt>Floating P/L</dt>
+  <dd class="{{ 'profit' if snapshot and snapshot.profit > 0 else 'loss' if snapshot and snapshot.profit < 0 else '' }}">
+    {{ snapshot.profit | money(account.currency) if snapshot else "—" }}
+  </dd>
+  <dt>Free margin</dt><dd>{{ snapshot.free_margin | money(account.currency) if snapshot else "—" }}</dd>
+</dl>
+{% else %}
+<p class="loading">broker not connected</p>
+{% endif %}
