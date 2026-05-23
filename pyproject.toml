@@ -36,6 +36,8 @@ dependencies = [
     "numpy>=1.26",
     # Observability
     "prometheus-client>=0.20",
+    # Notifications
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
