@@ -67,6 +67,7 @@ class StingerApp:
         self._ui: NormalUI | None = None
         self._broker: BaseBroker | None = None
         self._risk: RiskMonitor | None = None
+        self._notifications: object | None = None
         self._mode: str = "normal"
         self._web_host: str = "127.0.0.1"
         self._web_port: int = 8765
@@ -114,6 +115,15 @@ class StingerApp:
         # registered components — calling subscribe_bars() on a not-yet-connected
         # broker raises BrokerNotConnectedError.
         self._broker = broker
+
+        # Notification dispatcher — Telegram / Discord webhooks fired off the
+        # bus. Registered as an engine lifecycle component so it starts +
+        # stops with the engine and cleans up the httpx client.
+        if app_cfg.notifications:
+            from stinger_fx.observability import NotificationDispatcher
+
+            self._notifications = NotificationDispatcher(self.bus, app_cfg.notifications)
+            self.engine.register(self._notifications)
 
         # Hot-reload plumbing
         self._reloader = ConfigReloader(self._build_reload_actions(broker))

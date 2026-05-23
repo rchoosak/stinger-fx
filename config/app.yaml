@@ -26,3 +26,24 @@ risk:
   max_open_positions_per_strategy: 5
   max_daily_loss_pct: 5.0
   kill_switch_drawdown_pct: 20.0
+
+# Notification sinks — Telegram + Discord webhooks. Each channel chooses
+# which events to forward. Catalogue of `events` values:
+#   order_filled, order_rejected, signal_rejected_by_risk,
+#   kill_switch_tripped, strategy_state_changed,
+#   config_reloaded, config_reload_failed
+# Identical messages within 30s are deduplicated so a chatty event burst
+# doesn't spam your phone.
+#
+# notifications:
+#   - kind: telegram
+#     enabled: false
+#     bot_token: "123456:ABC-DEF..."        # from @BotFather
+#     chat_id: 987654321                     # your chat or group id
+#     events: [order_filled, kill_switch_tripped, config_reload_failed]
+#
+#   - kind: discord
+#     enabled: false
+#     webhook_url: "https://discord.com/api/webhooks/1234.../abc..."
+#     events: [order_filled, order_rejected, signal_rejected_by_risk]
+notifications: []

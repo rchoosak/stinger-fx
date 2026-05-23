@@ -72,6 +72,22 @@ class MetricsConfig(BaseModel):
     port: int = Field(9100, gt=0, lt=65536)
 
 
+class NotificationChannelConfig(BaseModel):
+    """One Telegram / Discord notification target."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["telegram", "discord"]
+    enabled: bool = True
+    # Telegram
+    bot_token: str = ""
+    chat_id: int | str = ""
+    # Discord
+    webhook_url: str = ""
+    # Event filters — see notifications.known_event_names() for the catalogue.
+    events: list[str] = Field(default_factory=list)
+
+
 class AppConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -83,6 +99,7 @@ class AppConfig(BaseModel):
     web: WebConfig = WebConfig()
     risk: RiskConfig = RiskConfig()
     metrics: MetricsConfig = MetricsConfig()
+    notifications: list[NotificationChannelConfig] = Field(default_factory=list)
 
 
 # --- Strategies ---------------------------------------------------------------
