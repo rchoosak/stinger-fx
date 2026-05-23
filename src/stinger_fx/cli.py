@@ -67,14 +67,12 @@ def run_cmd(
     """Start the trading engine in the configured (or overridden) mode."""
     from stinger_fx.runtime import assemble_and_run
 
-    if mode is not None:
-        # Apply override by patching the in-memory config after load. Simpler
-        # to set an env var so the loader picks it up; for Phase 1 we just
-        # warn if it conflicts.
-        typer.echo("--mode override is not yet applied; using config/app.yaml mode")
+    if mode is not None and mode not in {"normal", "tui", "web"}:
+        typer.echo(f"ERROR: --mode must be one of normal|tui|web, got {mode!r}", err=True)
+        raise typer.Exit(code=1)
 
     try:
-        asyncio.run(assemble_and_run(config_dir))
+        asyncio.run(assemble_and_run(config_dir, mode_override=mode))
     except KeyboardInterrupt:
         typer.echo("interrupted")
 
