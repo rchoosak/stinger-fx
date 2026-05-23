@@ -20,3 +20,24 @@ runs:
     start: 2024-01-01T00:00:00Z
     end: 2024-04-01T00:00:00Z
     initial_balance: 10000.0
+
+
+# Parameter sweeps. Trigger via `stinger-fx backtest sweep --sweep-id <id>`.
+# Each cell of the cartesian product of `parameter_grid` is backtested in turn
+# and ranked by `rank_by` (net_pnl | sharpe | profit_factor | win_rate |
+# expectancy | max_drawdown | trades). `max_drawdown` ranks smaller-is-better.
+sweeps:
+  - id: ma_eurusd_grid_q1
+    strategy_id: ma_eurusd_m15
+    symbol: EURUSD
+    timeframe: M15
+    start: 2024-01-01T00:00:00Z
+    end: 2024-04-01T00:00:00Z
+    initial_balance: 10000.0
+    slippage_pips: 0.5
+    data_source: ./data/parquet/EURUSD/M15
+    rank_by: net_pnl
+    top_n: 10
+    parameter_grid:
+      fast: [5, 8, 10, 12, 15]
+      slow: [20, 25, 30, 35, 40]

@@ -135,10 +135,59 @@ class BacktestRunConfig(BaseModel):
         return v
 
 
+MetricName = Literal[
+    "net_pnl",
+    "sharpe",
+    "profit_factor",
+    "win_rate",
+    "expectancy",
+    "max_drawdown",      # smaller is better; ranking flips automatically
+    "trades",
+]
+
+
+class SweepRunConfig(BaseModel):
+    """A parameter-sweep run — same as BacktestRunConfig plus a grid of values
+    to try. Each cell of the cartesian product is backtested in turn."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]+$")
+    strategy_id: str
+    symbol: str
+    timeframe: Timeframe
+    start: datetime
+    end: datetime
+    initial_balance: float = Field(10_000.0, gt=0)
+    slippage_pips: float = Field(0.0, ge=0)
+    data_source: Path
+    parameter_grid: dict[str, list[Any]] = Field(default_factory=dict)
+    rank_by: MetricName = "net_pnl"
+    top_n: int = Field(10, ge=1, le=1000)
+
+    @field_validator("start", "end")
+    @classmethod
+    def _require_tz(cls, v: datetime) -> datetime:
+        if v.tzinfo is None:
+            raise ValueError("start/end must include a timezone (e.g. ...T00:00:00Z)")
+        return v
+
+    @field_validator("parameter_grid")
+    @classmethod
+    def _grid_nonempty(cls, v: dict[str, list[Any]]) -> dict[str, list[Any]]:
+        if not v:
+            raise ValueError("parameter_grid must declare at least one parameter")
+        for name, values in v.items():
+            if not values:
+                raise ValueError(f"parameter_grid['{name}'] is empty — list one value at minimum")
+        return v
+
+
 class BacktestConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     runs: list[BacktestRunConfig] = Field(default_factory=list)
+    sweeps: list[SweepRunConfig] = Field(default_factory=list)
 
     @field_validator("runs")
     @classmethod
@@ -147,6 +196,15 @@ class BacktestConfig(BaseModel):
         if len(ids) != len(set(ids)):
             dupes = sorted({i for i in ids if ids.count(i) > 1})
             raise ValueError(f"duplicate backtest run ids: {dupes}")
+        return v
+
+    @field_validator("sweeps")
+    @classmethod
+    def _unique_sweep_ids(cls, v: list[SweepRunConfig]) -> list[SweepRunConfig]:
+        ids = [r.id for r in v]
+        if len(ids) != len(set(ids)):
+            dupes = sorted({i for i in ids if ids.count(i) > 1})
+            raise ValueError(f"duplicate sweep ids: {dupes}")
         return v
 
 

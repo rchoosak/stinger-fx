@@ -8,6 +8,7 @@ from stinger_fx.data.repositories import (
     DecisionRepo,
     OrderRepo,
     SignalRepo,
+    SweepRepo,
     TradeRepo,
 )
 from stinger_fx.data.sqlite_store import SqliteStore, in_memory_store
@@ -20,6 +21,7 @@ __all__ = [
     "ParquetStore",
     "SignalRepo",
     "SqliteStore",
+    "SweepRepo",
     "TradeRepo",
     "in_memory_store",
     "iter_bars",
