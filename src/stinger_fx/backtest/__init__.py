@@ -11,6 +11,12 @@ from stinger_fx.backtest.sweep import (
     SweepReport,
     enumerate_grid,
 )
+from stinger_fx.backtest.walk_forward import (
+    WalkForward,
+    WalkForwardFold,
+    WalkForwardReport,
+    slice_folds,
+)
 
 __all__ = [
     "BacktestReport",
@@ -22,5 +28,9 @@ __all__ = [
     "SweepCellResult",
     "SweepReport",
     "TradeRecord",
+    "WalkForward",
+    "WalkForwardFold",
+    "WalkForwardReport",
     "enumerate_grid",
+    "slice_folds",
 ]

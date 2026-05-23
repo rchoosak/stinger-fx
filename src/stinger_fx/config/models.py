@@ -183,11 +183,28 @@ class SweepRunConfig(BaseModel):
         return v
 
 
+class WalkForwardConfig(BaseModel):
+    """Walk-forward optimisation: time-sliced sweeps with out-of-sample
+    evaluation. References a sweep config for the parameter grid + backtest
+    settings; this config layers the time slicing on top.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]+$")
+    sweep_id: str           # the SweepRunConfig that supplies the parameter grid
+    folds: int = Field(4, ge=2, le=50)
+    scheme: Literal["expanding", "rolling"] = "expanding"
+    in_sample_ratio: float = Field(0.7, gt=0.0, lt=1.0)  # only used for rolling
+    rank_by: MetricName | None = None     # default: inherit from sweep
+
+
 class BacktestConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     runs: list[BacktestRunConfig] = Field(default_factory=list)
     sweeps: list[SweepRunConfig] = Field(default_factory=list)
+    walk_forwards: list[WalkForwardConfig] = Field(default_factory=list)
 
     @field_validator("runs")
     @classmethod
@@ -205,6 +222,15 @@ class BacktestConfig(BaseModel):
         if len(ids) != len(set(ids)):
             dupes = sorted({i for i in ids if ids.count(i) > 1})
             raise ValueError(f"duplicate sweep ids: {dupes}")
+        return v
+
+    @field_validator("walk_forwards")
+    @classmethod
+    def _unique_wf_ids(cls, v: list[WalkForwardConfig]) -> list[WalkForwardConfig]:
+        ids = [r.id for r in v]
+        if len(ids) != len(set(ids)):
+            dupes = sorted({i for i in ids if ids.count(i) > 1})
+            raise ValueError(f"duplicate walk-forward ids: {dupes}")
         return v
 
 

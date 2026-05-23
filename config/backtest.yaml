@@ -41,3 +41,17 @@ sweeps:
     parameter_grid:
       fast: [5, 8, 10, 12, 15]
       slow: [20, 25, 30, 35, 40]
+
+
+# Walk-forward optimisations. Trigger via
+# `stinger-fx backtest walk-forward --wf-id <id>`.
+# Inherits the parameter grid + backtest knobs from the referenced sweep_id,
+# then slices the date range into N folds. Each fold optimises in-sample then
+# evaluates the winning params out-of-sample. Comparing in-sample vs OOS
+# metrics tells you whether the optimisation is overfitting.
+walk_forwards:
+  - id: ma_eurusd_wf_2024Q1
+    sweep_id: ma_eurusd_grid_q1
+    folds: 4
+    scheme: expanding
+    # rank_by: net_pnl     # default inherits from sweep

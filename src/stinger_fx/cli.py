@@ -368,6 +368,72 @@ def backtest_sweep_list(
     console.print(table)
 
 
+@backtest_app.command("walk-forward")
+def backtest_walk_forward(
+    wf_id: str = typer.Option(..., "--wf-id"),
+    config_dir: Path = typer.Option(Path("config"), "--config-dir", "-c"),
+) -> None:
+    """Run a walk-forward optimisation defined in backtest.yaml (walk_forwards:)."""
+    from stinger_fx.backtest import WalkForward
+    from stinger_fx.config import load_all
+    from stinger_fx.data import SqliteStore
+
+    cfg = load_all(config_dir)
+    wf_cfg = next((w for w in cfg.backtest.walk_forwards if w.id == wf_id), None)
+    if wf_cfg is None:
+        typer.echo(f"ERROR: no walk-forward run with id {wf_id!r}", err=True)
+        raise typer.Exit(code=1)
+    sweep_cfg = next((s for s in cfg.backtest.sweeps if s.id == wf_cfg.sweep_id), None)
+    if sweep_cfg is None:
+        typer.echo(
+            f"ERROR: walk-forward {wf_id!r} references unknown sweep_id {wf_cfg.sweep_id!r}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    strategy = next(
+        (s for s in cfg.strategies.strategies if s.id == sweep_cfg.strategy_id), None
+    )
+    if strategy is None:
+        typer.echo(
+            f"ERROR: sweep references unknown strategy {sweep_cfg.strategy_id!r}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    sqlite = SqliteStore(cfg.app.data_dir / "stinger.db")
+    sqlite.create_all()
+
+    wf = WalkForward(
+        base_strategy=strategy,
+        sqlite_store=sqlite,
+        report_dir=cfg.app.data_dir / "walk_forwards",
+    )
+    report = asyncio.run(wf.run(wf_cfg, sweep_cfg))
+
+    console = Console()
+    rank_by = report.rank_by
+    console.print(
+        f"\n=== Walk-forward [bold]{wf_id}[/] — {len(report.folds)} folds ({wf_cfg.scheme}) "
+        f"— rank_by [bold]{rank_by}[/] ===\n"
+    )
+    param_keys = sorted({k for f in report.folds for k in f.best_params.keys()})
+    metric_keys = ["net_pnl", "sharpe", "profit_factor", "win_rate", "max_drawdown", "trades"]
+    table = Table("fold", "in-sample window", "OOS window", *param_keys, f"IS {rank_by}", *(f"OOS {m}" for m in metric_keys))
+    for f in report.folds:
+        row = [
+            str(f.fold),
+            f"{f.in_sample_start.date()}..{f.in_sample_end.date()}",
+            f"{f.out_of_sample_start.date()}..{f.out_of_sample_end.date()}",
+        ]
+        row.extend(str(f.best_params.get(k, "—")) for k in param_keys)
+        row.append("—" if f.in_sample_metric is None else f"{f.in_sample_metric:.4f}")
+        for m in metric_keys:
+            v = f.out_of_sample_metrics.get(m)
+            row.append("—" if v is None else (f"{v:.4f}" if isinstance(v, float) else str(v)))
+        table.add_row(*row)
+    console.print(table)
+
+
 # --- data -------------------------------------------------------------------
 
 

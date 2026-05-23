@@ -20,6 +20,7 @@ from stinger_fx.config.models import (
     StrategiesConfig,
     StrategyEntry,
     SweepRunConfig,
+    WalkForwardConfig,
     WebConfig,
 )
 from stinger_fx.config.reload import ConfigReloader, ReloadActions, ReloadResult
@@ -42,6 +43,7 @@ __all__ = [
     "StrategiesConfig",
     "StrategyEntry",
     "SweepRunConfig",
+    "WalkForwardConfig",
     "WebConfig",
     "hash_file",
     "load_all",
