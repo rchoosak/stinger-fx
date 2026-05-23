@@ -131,6 +131,42 @@ def strategy_list(
     console.print(table)
 
 
+@strategy_app.command("scaffold")
+def strategy_scaffold(
+    name: str = typer.Argument(..., help="snake_case strategy id (also the file name)"),
+    target_dir: Path = typer.Option(
+        Path("src/stinger_fx/strategies/user"),
+        "--dir",
+        "-d",
+        help="Directory the new strategy file is written to.",
+    ),
+    force: bool = typer.Option(False, "--force", help="Overwrite if the file exists."),
+) -> None:
+    """Generate a new strategy stub under --dir.
+
+    Prints a YAML snippet to paste into config/strategies.yaml so the strategy
+    can be activated immediately.
+    """
+    from stinger_fx.strategies.scaffold import (
+        ScaffoldError,
+        derive_module_path,
+        scaffold,
+        yaml_snippet,
+    )
+
+    try:
+        out = scaffold(name, target_dir, force=force)
+    except ScaffoldError as e:
+        typer.echo(f"ERROR: {e}", err=True)
+        raise typer.Exit(code=1) from e
+    module_path = derive_module_path(out, repo_root=Path.cwd())
+    typer.echo(f"wrote {out}")
+    typer.echo("")
+    typer.echo("Add this to config/strategies.yaml:")
+    typer.echo("")
+    typer.echo(yaml_snippet(name, module_path))
+
+
 # --- backtest ---------------------------------------------------------------
 
 
