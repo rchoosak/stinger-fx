@@ -34,6 +34,8 @@ dependencies = [
     "pyzmq>=26.0",
     # Numeric
     "numpy>=1.26",
+    # Observability
+    "prometheus-client>=0.20",
 ]
 
 [project.optional-dependencies]

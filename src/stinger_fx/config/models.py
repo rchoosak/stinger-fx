@@ -64,6 +64,14 @@ class RiskConfig(BaseModel):
     kill_switch_drawdown_pct: float = Field(20.0, ge=0)
 
 
+class MetricsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = Field(9100, gt=0, lt=65536)
+
+
 class AppConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -74,6 +82,7 @@ class AppConfig(BaseModel):
     timezone: str = "UTC"
     web: WebConfig = WebConfig()
     risk: RiskConfig = RiskConfig()
+    metrics: MetricsConfig = MetricsConfig()
 
 
 # --- Strategies ---------------------------------------------------------------
