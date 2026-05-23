@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block title %}{{ run_id }} · Replay · Stinger-Fx{% endblock %}
+{% block content %}
+<section class="panel widest">
+  <h2>{{ run_id }} · {{ meta.strategy_id }} · {{ meta.symbol }} {{ meta.timeframe }}</h2>
+  <p class="muted">
+    {{ meta.start[:19] | replace("T", " ") }} → {{ meta.end[:19] | replace("T", " ") }}
+    · trades: {{ meta.trades | length }}
+    · initial: {{ meta.initial_balance }}
+    · final: {{ meta.final_balance }}
+  </p>
+  <div class="chart-wrap">
+    <canvas id="replay-chart" height="380"></canvas>
+  </div>
+</section>
+<p class="muted"><a href="/backtest">← back to backtest list</a></p>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script>
+(async function () {
+  const resp = await fetch(`/backtest/{{ run_id }}/data.json`);
+  if (!resp.ok) { console.error("data fetch failed"); return; }
+  const data = await resp.json();
+
+  // Equity curve → main line
+  const equityPoints = (data.equity || []).map(p => ({ x: p.time, y: p.equity }));
+
+  // Trade markers: green ▲ at entry, red ▼ at exit (relative to where the
+  // equity curve sits at that timestamp — we don't know the equity at the
+  // exact trade timestamp without interpolation; use the trade's own
+  // close_price baseline as the marker y if the equity curve is empty,
+  // otherwise linearly interpolate the equity value at the trade time).
+  function interpEquity(tIso) {
+    const t = new Date(tIso).getTime();
+    if (!equityPoints.length) return null;
+    let prev = equityPoints[0];
+    for (let i = 1; i < equityPoints.length; i++) {
+      const cur = equityPoints[i];
+      const tPrev = new Date(prev.x).getTime();
+      const tCur  = new Date(cur.x).getTime();
+      if (t >= tPrev && t <= tCur) {
+        const frac = tCur === tPrev ? 0 : (t - tPrev) / (tCur - tPrev);
+        return prev.y + frac * (cur.y - prev.y);
+      }
+      prev = cur;
+    }
+    return prev.y;
+  }
+
+  const entries = [];
+  const exitsProfit = [];
+  const exitsLoss = [];
+  for (const tr of data.meta.trades || []) {
+    const entryY = interpEquity(tr.open_ts);
+    const exitY  = interpEquity(tr.close_ts);
+    if (entryY != null) entries.push({ x: tr.open_ts, y: entryY, side: tr.side });
+    if (exitY != null) {
+      const pt = { x: tr.close_ts, y: exitY, pnl: tr.pnl };
+      (tr.pnl >= 0 ? exitsProfit : exitsLoss).push(pt);
+    }
+  }
+
+  const ctx = document.getElementById("replay-chart").getContext("2d");
+  new Chart(ctx, {
+    type: "line",
+    data: {
+      datasets: [
+        {
+          label: "Equity",
+          data: equityPoints,
+          borderColor: "#58a6ff",
+          backgroundColor: "rgba(88,166,255,0.08)",
+          fill: true,
+          tension: 0,
+          pointRadius: 0,
+          borderWidth: 1.5,
+          parsing: false,
+        },
+        {
+          label: "Entry",
+          type: "scatter",
+          data: entries,
+          backgroundColor: "#3fb950",
+          pointStyle: "triangle",
+          radius: 6,
+          parsing: false,
+        },
+        {
+          label: "Exit (profit)",
+          type: "scatter",
+          data: exitsProfit,
+          backgroundColor: "#3fb950",
+          pointStyle: "rectRot",
+          radius: 5,
+          parsing: false,
+        },
+        {
+          label: "Exit (loss)",
+          type: "scatter",
+          data: exitsLoss,
+          backgroundColor: "#f85149",
+          pointStyle: "rectRot",
+          radius: 5,
+          parsing: false,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        x: {
+          type: "time",
+          ticks: { color: "#8b949e" },
+          grid: { color: "#21262d" },
+        },
+        y: {
+          ticks: { color: "#8b949e" },
+          grid: { color: "#21262d" },
+        },
+      },
+      plugins: {
+        legend: { labels: { color: "#e6edf3" } },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const r = ctx.raw;
+              if (ctx.dataset.label === "Equity") return `equity: ${r.y.toFixed(2)}`;
+              if (ctx.dataset.label === "Entry") return `entry · ${r.side.toUpperCase()}`;
+              return `exit · pnl ${r.pnl >= 0 ? "+" : ""}${r.pnl}`;
+            },
+          },
+        },
+      },
+    },
+  });
+})();
+</script>
+{% endblock %}

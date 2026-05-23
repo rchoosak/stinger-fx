@@ -52,7 +52,11 @@ def _money(value: float | None, currency: str = "USD") -> str:
 TEMPLATES.env.filters["money"] = _money
 
 
-def create_app(handle: EngineHandle) -> FastAPI:
+def create_app(
+    handle: EngineHandle,
+    *,
+    data_dir: Path | None = None,
+) -> FastAPI:
     from stinger_fx.core.events import AccountSnapshotEvent
 
     @asynccontextmanager
@@ -80,6 +84,8 @@ def create_app(handle: EngineHandle) -> FastAPI:
     # Tiny in-memory cache for the most-recent account snapshot so partial
     # GETs don't have to await the broker every refresh.
     app.state.latest_snapshot = None
+    # data_dir lets the backtest views resolve <run_id>_trades.json etc.
+    app.state.data_dir = Path(data_dir or "./data")
 
     app.mount("/static", StaticFiles(directory=str(_HERE / "static")), name="static")
 
@@ -258,6 +264,35 @@ def create_app(handle: EngineHandle) -> FastAPI:
 
         return EventSourceResponse(gen())
 
+    # --- Backtest trade-replay views --------------------------------------
+
+    @app.get("/backtest", response_class=HTMLResponse)
+    async def backtest_list(request: Request):
+        runs = _list_backtest_runs(app.state.data_dir)
+        return TEMPLATES.TemplateResponse(
+            request=request, name="backtest_list.html", context={"runs": runs}
+        )
+
+    @app.get("/backtest/{run_id}", response_class=HTMLResponse)
+    async def backtest_replay(run_id: str, request: Request):
+        data = _load_replay_data(app.state.data_dir, run_id)
+        if data is None:
+            raise HTTPException(404, f"no backtest run with id {run_id!r}")
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="backtest_replay.html",
+            context={"run_id": run_id, "meta": data["meta"]},
+        )
+
+    @app.get("/backtest/{run_id}/data.json")
+    async def backtest_data(run_id: str):
+        from fastapi.responses import JSONResponse
+
+        data = _load_replay_data(app.state.data_dir, run_id)
+        if data is None:
+            raise HTTPException(404, f"no backtest run with id {run_id!r}")
+        return JSONResponse(data)
+
     return app
 
 
@@ -265,3 +300,75 @@ def _li(level: str, message: str) -> str:
     ts = datetime.now().strftime("%H:%M:%S")
     safe = json.dumps(message)[1:-1]  # crude HTML-safe-ish: avoid injecting raw tags
     return f"<li class='level-{level}'>[{ts}] {safe}</li>"
+
+
+# --- Backtest replay data helpers ---------------------------------------------
+
+
+def _list_backtest_runs(data_dir: Path) -> list[dict]:
+    """Enumerate `<data_dir>/backtests/*_trades.json` and return a list of
+    summary dicts sorted by `end` descending.
+
+    Bare metrics-only runs (no trades.json sidecar) are skipped so the
+    replay list only shows runs the view can actually render.
+    """
+    bt_dir = data_dir / "backtests"
+    if not bt_dir.is_dir():
+        return []
+    out: list[dict] = []
+    for path in sorted(bt_dir.glob("*_trades.json")):
+        try:
+            meta = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        out.append(
+            {
+                "run_id": meta.get("run_id", path.stem.removesuffix("_trades")),
+                "strategy_id": meta.get("strategy_id", "—"),
+                "symbol": meta.get("symbol", "—"),
+                "timeframe": meta.get("timeframe", "—"),
+                "start": meta.get("start", ""),
+                "end": meta.get("end", ""),
+                "trade_count": len(meta.get("trades", [])),
+                "net_pnl": round(
+                    meta.get("final_balance", 0) - meta.get("initial_balance", 0), 2
+                ),
+            }
+        )
+    # Most-recently-finished first
+    out.sort(key=lambda r: r["end"], reverse=True)
+    return out
+
+
+def _load_replay_data(data_dir: Path, run_id: str) -> dict | None:
+    """Read trades + equity curve for `run_id`. Returns None if not found."""
+    bt_dir = data_dir / "backtests"
+    trades_path = bt_dir / f"{run_id}_trades.json"
+    equity_path = bt_dir / f"{run_id}_equity.parquet"
+    metrics_path = bt_dir / f"{run_id}_metrics.json"
+    if not trades_path.exists():
+        return None
+    meta = json.loads(trades_path.read_text())
+    metrics: dict = {}
+    if metrics_path.exists():
+        try:
+            metrics = json.loads(metrics_path.read_text())
+        except json.JSONDecodeError:
+            metrics = {}
+    equity: list[dict] = []
+    if equity_path.exists():
+        try:
+            import pyarrow.parquet as pq
+
+            tbl = pq.read_table(equity_path)
+            for row in tbl.to_pylist():
+                ts = row["time"]
+                equity.append(
+                    {
+                        "time": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+                        "equity": row["equity"],
+                    }
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("equity curve read failed run_id=%s err=%s", run_id, e)
+    return {"meta": meta, "metrics": metrics, "equity": equity}

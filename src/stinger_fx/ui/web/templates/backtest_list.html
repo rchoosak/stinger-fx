@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Backtests · Stinger-Fx{% endblock %}
+{% block content %}
+<section class="panel widest">
+  <h2>Backtest runs</h2>
+  {% if runs %}
+  <table>
+    <thead>
+      <tr>
+        <th>run_id</th><th>strategy</th><th>symbol</th><th>tf</th>
+        <th>range</th><th>trades</th><th>net P/L</th><th></th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for r in runs %}
+      <tr>
+        <td><code>{{ r.run_id }}</code></td>
+        <td>{{ r.strategy_id }}</td>
+        <td>{{ r.symbol }}</td>
+        <td>{{ r.timeframe }}</td>
+        <td>{{ r.start[:10] }} .. {{ r.end[:10] }}</td>
+        <td>{{ r.trade_count }}</td>
+        <td class="{{ 'profit' if r.net_pnl > 0 else 'loss' if r.net_pnl < 0 else '' }}">
+          {{ "%+.2f" | format(r.net_pnl) }}
+        </td>
+        <td><a class="btn-link" href="/backtest/{{ r.run_id }}">Replay →</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="loading">
+    No completed backtest runs found under <code>{{ "data/backtests/" }}</code>.
+    Run one with <code>stinger-fx backtest run --run-id &lt;id&gt;</code>.
+  </p>
+  {% endif %}
+</section>
+<p class="muted"><a href="/">← back to dashboard</a></p>
+{% endblock %}

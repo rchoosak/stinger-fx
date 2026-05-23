@@ -145,8 +145,29 @@ class FileBacktester(BaseBacktester):
         self._report_dir.mkdir(parents=True, exist_ok=True)
         equity_path = self._report_dir / f"{cfg.id}_equity.parquet"
         metrics_path = self._report_dir / f"{cfg.id}_metrics.json"
+        trades_path = self._report_dir / f"{cfg.id}_trades.json"
         report.write_equity_curve(equity_path)
         metrics_path.write_text(json.dumps(report.to_metrics_dict(), indent=2))
+        # Trade-replay sidecar — used by the Web UI's /backtest/{run_id} view
+        # to overlay entry/exit markers on the equity curve. Also embeds the
+        # run config so the view doesn't need to re-derive it.
+        trades_path.write_text(
+            json.dumps(
+                {
+                    "run_id": cfg.id,
+                    "strategy_id": strategy_id,
+                    "symbol": cfg.symbol,
+                    "timeframe": cfg.timeframe.value,
+                    "start": cfg.start.isoformat(),
+                    "end": cfg.end.isoformat(),
+                    "initial_balance": cfg.initial_balance,
+                    "final_balance": report.final_balance,
+                    "trades": report.trades_to_jsonable(),
+                },
+                indent=2,
+                default=str,
+            )
+        )
 
         if self._sqlite is not None and repo_row_id is not None:
             BacktestRepo(self._sqlite).finish_run(

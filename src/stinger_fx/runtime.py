@@ -169,8 +169,8 @@ class StingerApp:
 
             from stinger_fx.ui.web import create_app
 
-            assert self.handle is not None
-            web_app = create_app(self.handle)
+            assert self.handle is not None and self.full_cfg is not None
+            web_app = create_app(self.handle, data_dir=self.full_cfg.app.data_dir)
             config = uvicorn.Config(
                 web_app,
                 host=self._web_host,
