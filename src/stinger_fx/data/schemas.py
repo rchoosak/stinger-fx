@@ -128,6 +128,34 @@ class BacktestRunRow(SQLModel, table=True):
     report_path: str = ""
 
 
+class SweepRow(SQLModel, table=True):
+    """One row per `stinger-fx backtest sweep`."""
+
+    __tablename__ = "sweep_runs"
+
+    id: int | None = Field(default=None, primary_key=True)
+    sweep_id: str = Field(index=True)
+    strategy_id: str
+    rank_by: str
+    started_at: datetime
+    finished_at: datetime | None = None
+    total_combos: int = 0
+    best_params_json: str = ""
+    best_metric_value: float | None = None
+
+
+class SweepResultRow(SQLModel, table=True):
+    """One row per cell of the sweep's cartesian product."""
+
+    __tablename__ = "sweep_results"
+
+    id: int | None = Field(default=None, primary_key=True)
+    sweep_id: str = Field(index=True)
+    rank: int = Field(index=True)               # 1 = best, N = worst by rank_by
+    params_json: str
+    metrics_json: str
+
+
 class ConfigAuditRow(SQLModel, table=True):
     __tablename__ = "config_audit"
 

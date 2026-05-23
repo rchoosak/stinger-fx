@@ -17,6 +17,8 @@ from stinger_fx.data.schemas import (
     DecisionRow,
     OrderRow,
     SignalRow,
+    SweepResultRow,
+    SweepRow,
     TradeRow,
 )
 from stinger_fx.data.sqlite_store import SqliteStore
@@ -207,3 +209,58 @@ class ConfigAuditRepo:
             )
             s.add(row)
             s.commit()
+
+
+class SweepRepo:
+    """Persist parameter-sweep summary + per-cell ranked results."""
+
+    def __init__(self, store: SqliteStore) -> None:
+        self._store = store
+
+    def record_sweep(self, sweep_id: str, strategy_id: str, report) -> int:  # noqa: ANN001
+        """Write one SweepRow + len(results) SweepResultRow rows."""
+        best = report.best()
+        with self._store.session() as s:
+            head = SweepRow(
+                sweep_id=sweep_id,
+                strategy_id=strategy_id,
+                rank_by=report.rank_by,
+                started_at=report.started_at,
+                finished_at=report.finished_at,
+                total_combos=report.total_combos,
+                best_params_json=json.dumps(best.params) if best else "",
+                best_metric_value=(best.metrics.get(report.rank_by) if best else None),
+            )
+            s.add(head)
+            for rank, cell in enumerate(report.ranked, start=1):
+                s.add(
+                    SweepResultRow(
+                        sweep_id=sweep_id,
+                        rank=rank,
+                        params_json=json.dumps(cell.params),
+                        metrics_json=json.dumps(cell.metrics),
+                    )
+                )
+            s.commit()
+            s.refresh(head)
+            assert head.id is not None
+            return head.id
+
+    def list_sweeps(self, limit: int = 50) -> list[SweepRow]:
+        from sqlmodel import desc
+
+        with self._store.session() as s:
+            return list(
+                s.exec(select(SweepRow).order_by(desc(SweepRow.started_at)).limit(limit))
+            )
+
+    def top_cells(self, sweep_id: str, n: int = 10) -> list[SweepResultRow]:
+        with self._store.session() as s:
+            return list(
+                s.exec(
+                    select(SweepResultRow)
+                    .where(SweepResultRow.sweep_id == sweep_id)
+                    .order_by(SweepResultRow.rank)
+                    .limit(n)
+                )
+            )

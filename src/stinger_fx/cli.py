@@ -287,6 +287,87 @@ def backtest_show(
     }, indent=2))
 
 
+@backtest_app.command("sweep")
+def backtest_sweep(
+    sweep_id: str = typer.Option(..., "--sweep-id"),
+    config_dir: Path = typer.Option(Path("config"), "--config-dir", "-c"),
+) -> None:
+    """Run a parameter sweep defined in backtest.yaml (sweeps: section)."""
+    from stinger_fx.backtest import ParameterSweep
+    from stinger_fx.config import load_all
+    from stinger_fx.data import SqliteStore
+
+    cfg = load_all(config_dir)
+    sweep_cfg = next((s for s in cfg.backtest.sweeps if s.id == sweep_id), None)
+    if sweep_cfg is None:
+        typer.echo(f"ERROR: no sweep with id {sweep_id!r}", err=True)
+        raise typer.Exit(code=1)
+    strategy = next(
+        (s for s in cfg.strategies.strategies if s.id == sweep_cfg.strategy_id), None
+    )
+    if strategy is None:
+        typer.echo(
+            f"ERROR: sweep references unknown strategy {sweep_cfg.strategy_id!r}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    sqlite = SqliteStore(cfg.app.data_dir / "stinger.db")
+    sqlite.create_all()
+
+    sweep = ParameterSweep(
+        base_strategy=strategy,
+        sqlite_store=sqlite,
+        report_dir=cfg.app.data_dir / "sweeps",
+    )
+    report = asyncio.run(sweep.run(sweep_cfg))
+
+    console = Console()
+    console.print(f"\n=== Sweep [bold]{sweep_id}[/] — top {min(sweep_cfg.top_n, len(report.ranked))} by [bold]{sweep_cfg.rank_by}[/] ===\n")
+    top = report.top(sweep_cfg.top_n)
+    if not top:
+        console.print("[red]no results[/]")
+        return
+    # Build table headers from union of param keys + key metrics
+    param_keys = sorted({k for r in top for k in r.params.keys()})
+    metric_keys = ["net_pnl", "sharpe", "profit_factor", "win_rate", "max_drawdown", "trades"]
+    table = Table("rank", *param_keys, *metric_keys)
+    for rank, r in enumerate(top, start=1):
+        row = [str(rank)]
+        row.extend(str(r.params.get(k, "—")) for k in param_keys)
+        for m in metric_keys:
+            v = r.metrics.get(m)
+            row.append("—" if v is None else (f"{v:.4f}" if isinstance(v, float) else str(v)))
+        table.add_row(*row)
+    console.print(table)
+
+
+@backtest_app.command("sweep-list")
+def backtest_sweep_list(
+    config_dir: Path = typer.Option(Path("config"), "--config-dir", "-c"),
+) -> None:
+    """List all sweep runs from SQLite."""
+    from stinger_fx.config import load_all
+    from stinger_fx.data import SqliteStore, SweepRepo
+
+    cfg = load_all(config_dir)
+    sqlite = SqliteStore(cfg.app.data_dir / "stinger.db")
+    sqlite.create_all()
+    rows = SweepRepo(sqlite).list_sweeps(limit=100)
+    console = Console()
+    table = Table("sweep_id", "strategy", "rank_by", "combos", "best_value", "finished_at")
+    for r in rows:
+        table.add_row(
+            r.sweep_id,
+            r.strategy_id,
+            r.rank_by,
+            str(r.total_combos),
+            f"{r.best_metric_value:.4f}" if r.best_metric_value is not None else "—",
+            str(r.finished_at),
+        )
+    console.print(table)
+
+
 # --- data -------------------------------------------------------------------
 
 
