@@ -51,8 +51,9 @@ logger = logging.getLogger("stinger.runtime")
 class StingerApp:
     """Owns all live-mode singletons. Lifetime = one CLI `run` invocation."""
 
-    def __init__(self, config_dir: Path) -> None:
+    def __init__(self, config_dir: Path, *, mode_override: str | None = None) -> None:
         self.config_dir = config_dir
+        self._mode_override = mode_override
         self.full_cfg: FullConfig | None = None
         self.engine: TradingEngine | None = None
         self.bus: AsyncEventBus | None = None
@@ -66,10 +67,13 @@ class StingerApp:
         self._ui: NormalUI | None = None
         self._broker: BaseBroker | None = None
         self._risk: RiskMonitor | None = None
+        self._mode: str = "normal"
 
     async def setup(self) -> None:
         self.full_cfg = load_all(self.config_dir)
         app_cfg = self.full_cfg.app
+        if self._mode_override is not None:
+            app_cfg = app_cfg.model_copy(update={"mode": self._mode_override})
 
         configure_logs(level=app_cfg.log_level, log_dir=app_cfg.data_dir / "logs")
         logger.info("config loaded mode=%s broker=%s", app_cfg.mode, app_cfg.broker.type)
@@ -112,12 +116,16 @@ class StingerApp:
         self._reloader = ConfigReloader(self._build_reload_actions(broker))
         self._watcher = ConfigWatcher(self.config_dir, self._on_config_change)
 
-        # UI
+        # UI — TUI takes over the asyncio loop in run_until_signal, so we don't
+        # register a NormalUI in that case; otherwise normal mode owns stdout.
+        self._mode = app_cfg.mode
         if app_cfg.mode == "normal":
             self._ui = NormalUI(self.handle)
             self.engine.register(self._ui)
-        elif app_cfg.mode in ("tui", "web"):
-            logger.warning("UI mode %s is a Phase-2 feature; falling back to normal", app_cfg.mode)
+        elif app_cfg.mode == "tui":
+            logger.info("UI mode=tui — Textual dashboard will mount after engine start")
+        elif app_cfg.mode == "web":
+            logger.warning("UI mode web is a Phase-2 feature (next PR); falling back to normal")
             self._ui = NormalUI(self.handle)
             self.engine.register(self._ui)
 
@@ -139,14 +147,26 @@ class StingerApp:
         await self._wire_broker_subscriptions(self._broker)
         await self._watcher.start()
 
-        loop = asyncio.get_running_loop()
-        stop = asyncio.Event()
-        for sig in (signal.SIGINT, signal.SIGTERM):
+        if self._mode == "tui":
+            # Textual takes over the loop until the user quits with 'q'.
+            # Importing lazily so non-TUI runs don't pay the import cost.
+            from stinger_fx.ui.tui import StingerTUI
+
+            assert self.handle is not None
+            tui = StingerTUI(self.handle)
             try:
-                loop.add_signal_handler(sig, stop.set)
-            except NotImplementedError:
-                pass  # not supported on Windows for some signals
-        await stop.wait()
+                await tui.run_async()
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                pass
+        else:
+            loop = asyncio.get_running_loop()
+            stop = asyncio.Event()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(sig, stop.set)
+                except NotImplementedError:
+                    pass  # not supported on Windows for some signals
+            await stop.wait()
 
         await self._watcher.stop()
         if self._router is not None:
@@ -295,7 +315,7 @@ class StingerApp:
             )
 
 
-async def assemble_and_run(config_dir: Path) -> None:
-    app = StingerApp(config_dir)
+async def assemble_and_run(config_dir: Path, *, mode_override: str | None = None) -> None:
+    app = StingerApp(config_dir, mode_override=mode_override)
     await app.setup()
     await app.run_until_signal()
