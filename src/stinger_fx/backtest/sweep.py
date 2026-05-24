@@ -159,12 +159,14 @@ class ParameterSweep:
         cell_strategy = self._base_strategy.model_copy(
             update={"id": f"{self._base_strategy.id}__sweep_{index}", "params": merged_params}
         )
+        # Forward the sweep's full feed list so multi-feed sweeps don't
+        # collapse to a single symbol. The explicit `feeds=` shape mirrors
+        # whatever the sweep config declared (singular, plural, or feeds).
         run_cfg = BacktestRunConfig(
             id=f"{cfg.id}_cell_{index}",
             mode="file",
             strategy_id=cell_strategy.id,
-            symbol=cfg.symbol,
-            timeframe=cfg.timeframe,
+            feeds=cfg.feed_list,
             start=cfg.start,
             end=cfg.end,
             initial_balance=cfg.initial_balance,

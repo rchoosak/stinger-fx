@@ -7,6 +7,7 @@ Only the broker (`SimBroker`) and clock (`SimClock`) are swapped.
 from __future__ import annotations
 
 import asyncio
+import heapq
 import json
 import logging
 from datetime import UTC, datetime
@@ -59,10 +60,16 @@ class FileBacktester(BaseBacktester):
         broker = SimBroker(bus, initial_balance=cfg.initial_balance, slippage_pips=cfg.slippage_pips)
 
         strategy_cls = load_strategy_class(self._strategy_entry.class_path)
-        # Allow the run config to override symbol/timeframe — useful for sweeps.
+        # Allow the run config to override symbol/timeframe for sweep cells —
+        # but only when the strategy's Params model actually declares those
+        # fields. Multi-feed strategies (Phase 4) often don't, since the
+        # backtester drives multiple symbols from cfg.feed_list instead.
         params_dict = dict(self._strategy_entry.params)
-        params_dict.setdefault("symbol", cfg.symbol)
-        params_dict.setdefault("timeframe", cfg.timeframe.value)
+        param_fields = set(strategy_cls.Params.model_fields.keys())
+        if "symbol" in param_fields and cfg.symbol is not None:
+            params_dict.setdefault("symbol", cfg.symbol)
+        if "timeframe" in param_fields and cfg.timeframe is not None:
+            params_dict.setdefault("timeframe", cfg.timeframe.value)
         params = validate_params(strategy_cls, params_dict)
 
         strategy_id = self._strategy_entry.id
@@ -98,12 +105,27 @@ class FileBacktester(BaseBacktester):
         equity_curve: list[tuple[datetime, float]] = []
         bar_count = 0
 
-        for bar in iter_bars(self._parquet_root, cfg.symbol, cfg.timeframe, cfg.start, cfg.end):
+        # Multi-feed: merge per-feed bar iterators in chronological order.
+        # Each iter_bars() already yields ascending by time → heapq.merge is
+        # O(rows · log N), one bar at a time, with O(N) memory. For ties the
+        # feed_list ordering ((symbol, tf.value)) breaks them deterministically.
+        feed_iters = [
+            iter_bars(self._parquet_root, sub.symbol, sub.timeframe, cfg.start, cfg.end)
+            for sub in cfg.feed_list
+        ]
+        merged = heapq.merge(*feed_iters, key=lambda b: b.time)
+
+        # Track last-known close per symbol for the MTM mark across all
+        # open positions on the current event.
+        last_close: dict[str, float] = {}
+
+        for bar in merged:
             sim_clock.advance(bar.time)
             broker.advance_clock(bar.time)
             broker.set_market(bar.symbol, bar.close)
+            last_close[bar.symbol] = bar.close
 
-            # Stop-loss / take-profit check using bar high/low
+            # Stop-loss / take-profit check using this bar's high/low
             for pos in broker.check_sl_tp(bar.symbol, bar.high, bar.low):
                 await broker.close_position(pos.ticket)
 
@@ -112,12 +134,16 @@ class FileBacktester(BaseBacktester):
             for _ in range(3):
                 await asyncio.sleep(0)
 
-            # Mark-to-market equity for the curve
-            mtm = sum(
-                (bar.close - p.open_price) * p.side.sign * p.volume * 100_000.0
-                for p in await broker.get_positions()
-                if p.symbol == bar.symbol
-            )
+            # Mark-to-market equity across ALL open positions, valuing each
+            # position at the last known close for its symbol. Positions whose
+            # symbol hasn't received a bar yet contribute 0 (they would be
+            # opened at the first bar so this only matters at warm-up).
+            mtm = 0.0
+            for p in await broker.get_positions():
+                ref = last_close.get(p.symbol)
+                if ref is None:
+                    continue
+                mtm += (ref - p.open_price) * p.side.sign * p.volume * 100_000.0
             equity_curve.append((bar.time, broker.balance + mtm))
             bar_count += 1
 
