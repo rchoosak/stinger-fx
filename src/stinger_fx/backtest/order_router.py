@@ -16,6 +16,7 @@ from stinger_fx.brokers.base import BaseBroker
 from stinger_fx.brokers.pool import BrokerPool
 from stinger_fx.core.event_bus import AsyncEventBus
 from stinger_fx.core.events import (
+    ClosePositionRequestEvent,
     DecisionEvent,
     ModifyOrderRequestEvent,
     OrderFilledEvent,
@@ -23,6 +24,7 @@ from stinger_fx.core.events import (
     OrderRejectedEvent,
     PartialCloseRequestEvent,
     PartialClosedEvent,
+    PositionClosedEvent,
     SignalEvent,
 )
 from stinger_fx.domain import (
@@ -266,6 +268,39 @@ class OrderRouter:
                 evt.strategy_id, evt.ticket, before_volume, remaining.volume,
             )
 
+    async def handle_close(self, evt: ClosePositionRequestEvent) -> None:
+        """Route a strategy's full-close request to the right broker.
+
+        Ownership check mirrors `handle_modify` / `handle_partial_close`.
+        Emits `PositionClosedEvent` on success; the broker's own
+        `close_position` implementation may also emit one — downstream
+        subscribers should be idempotent.
+        """
+        broker = self._broker_for(evt.strategy_id)
+        positions = await broker.get_positions()
+        pos = next((p for p in positions if p.ticket == evt.ticket), None)
+        if pos is None:
+            logger.warning(
+                "close_unknown_ticket strategy=%s ticket=%s",
+                evt.strategy_id, evt.ticket,
+            )
+            return
+        expected_magic = self.strategy_magic.get(evt.strategy_id, 0)
+        if pos.magic != expected_magic:
+            logger.warning(
+                "close_rejected_cross_strategy strategy=%s ticket=%s "
+                "position_magic=%s expected_magic=%s",
+                evt.strategy_id, evt.ticket, pos.magic, expected_magic,
+            )
+            return
+
+        result = await broker.close_position(evt.ticket)
+        if not result.ok:
+            logger.warning(
+                "close_failed strategy=%s ticket=%s reason=%s",
+                evt.strategy_id, evt.ticket, result.message,
+            )
+
     async def attach(self) -> None:
         async def _on_signal(evt: SignalEvent) -> None:
             await self.handle_signal(evt.signal)
@@ -276,12 +311,18 @@ class OrderRouter:
         async def _on_partial_close(evt: PartialCloseRequestEvent) -> None:
             await self.handle_partial_close(evt)
 
+        async def _on_close(evt: ClosePositionRequestEvent) -> None:
+            await self.handle_close(evt)
+
         self._sub = self.bus.subscribe(SignalEvent, _on_signal, name="order_router")
         self._sub_modify = self.bus.subscribe(
             ModifyOrderRequestEvent, _on_modify, name="order_router.modify"
         )
         self._sub_partial = self.bus.subscribe(
             PartialCloseRequestEvent, _on_partial_close, name="order_router.partial"
+        )
+        self._sub_close = self.bus.subscribe(
+            ClosePositionRequestEvent, _on_close, name="order_router.close"
         )
 
     async def detach(self) -> None:
@@ -291,3 +332,5 @@ class OrderRouter:
             await self._sub_modify.unsubscribe()
         if hasattr(self, "_sub_partial"):
             await self._sub_partial.unsubscribe()
+        if hasattr(self, "_sub_close"):
+            await self._sub_close.unsubscribe()

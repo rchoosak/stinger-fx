@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from stinger_fx.core.clock import Clock
 from stinger_fx.core.events import (
+    ClosePositionRequestEvent,
     ModifyOrderRequestEvent,
     PartialCloseRequestEvent,
 )
@@ -268,6 +269,35 @@ class StrategyContext:
                 strategy_id=self.strategy_id,
                 ticket=ticket,
                 volume=volume,
+                reason=reason,
+            )
+        )
+
+    async def close(
+        self,
+        ticket: int,
+        *,
+        reason: str = "",
+    ) -> None:
+        """Request the broker to fully close an existing position.
+
+        Ownership is enforced by the router — a strategy may only close its
+        own tickets (matched by magic). The router routes to `handle_close`
+        which calls `broker.close_position(ticket)` (full volume).
+
+        This is distinct from `partial_close` which reduces by a specified
+        volume. Use this when you want to exit the whole position immediately
+        (e.g. time-based exits, emergency stop).
+        """
+        if self._bus is None:
+            raise RuntimeError(
+                "StrategyContext was built without a bus — close "
+                "requires ctx.bus= to be set"
+            )
+        await self._bus.publish(
+            ClosePositionRequestEvent(
+                strategy_id=self.strategy_id,
+                ticket=ticket,
                 reason=reason,
             )
         )

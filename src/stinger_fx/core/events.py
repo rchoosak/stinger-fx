@@ -140,6 +140,18 @@ class PartialClosedEvent(Event):
     reason: str = ""
 
 
+class ClosePositionRequestEvent(Event):
+    """Strategy → router request to fully close an existing position.
+
+    Unlike `PartialCloseRequestEvent` (which reduces volume), this always
+    closes 100 % of the position. The router enforces ownership via magic.
+    """
+
+    strategy_id: str
+    ticket: int
+    reason: str = ""
+
+
 # --- Account ------------------------------------------------------------------
 
 

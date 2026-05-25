@@ -205,6 +205,11 @@ class StrategyRunner:
         view.append_bar(evt.bar)
         if not evt.bar.is_closed:
             return
+        # Position managers that implement on_bar (e.g. TimeExitManager with
+        # bar-counting) run before the strategy's own on_bar.
+        for manager in self._ctx.managers:
+            if hasattr(manager, "on_bar"):
+                await self._guarded(manager.on_bar, self._ctx, evt.bar)
         # Fire on_bar for ANY of the strategy's declared feeds. The strategy
         # is responsible for routing by (bar.symbol, bar.timeframe) when it
         # cares. Back-compat for single-feed strategies is preserved because
