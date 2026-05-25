@@ -17,6 +17,10 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from stinger_fx.core.clock import Clock
+from stinger_fx.core.events import (
+    ModifyOrderRequestEvent,
+    PartialCloseRequestEvent,
+)
 from stinger_fx.domain import (
     Bar,
     OrderRequest,
@@ -30,6 +34,7 @@ from stinger_fx.domain import (
 )
 
 if TYPE_CHECKING:
+    from stinger_fx.core.event_bus import AsyncEventBus
     from stinger_fx.strategies.parameters import StrategyParams
 
 SignalSink = Callable[[Signal], Awaitable[None]]
@@ -111,6 +116,7 @@ class StrategyContext:
         signal_sink: SignalSink,
         history_capacity: int = 2000,
         subscriptions: list[Subscription] | None = None,
+        bus: AsyncEventBus | None = None,
     ) -> None:
         self.strategy_id = strategy_id
         self.symbol = symbol
@@ -120,6 +126,9 @@ class StrategyContext:
         self.logger = logger
         self.magic = magic
         self._signal_sink = signal_sink
+        # Bus is needed to publish modify / partial-close requests. Optional
+        # so older callers (tests that build a context manually) keep working.
+        self._bus = bus
         self.position = PositionView(magic)
         # Build a HistoryView per declared subscription so multi-feed strategies
         # can read each feed independently. The primary view stays accessible
@@ -191,6 +200,73 @@ class StrategyContext:
 
     async def submit_signal(self, signal: Signal) -> None:
         await self._signal_sink(signal)
+
+    # --- Position management (Phase 4 — modify / partial close) ---------------
+
+    async def move_stop(
+        self,
+        ticket: int,
+        *,
+        sl: float | None = None,
+        tp: float | None = None,
+        reason: str = "",
+    ) -> None:
+        """Request the broker to update SL / TP on an existing position.
+
+        Ownership is enforced by the router — a strategy may only modify its
+        own tickets (matched by `position.magic == ctx.magic`). Cross-strategy
+        modifications are rejected without touching the broker.
+
+        Pass `sl=None` (or `tp=None`) to leave that stop unchanged. If both
+        are `None` the request is a no-op and is silently dropped here so
+        the bus stays quiet.
+        """
+        if sl is None and tp is None:
+            return
+        if self._bus is None:
+            raise RuntimeError(
+                "StrategyContext was built without a bus — modify primitives "
+                "require ctx.bus= to be set"
+            )
+        await self._bus.publish(
+            ModifyOrderRequestEvent(
+                strategy_id=self.strategy_id,
+                ticket=ticket,
+                sl=sl,
+                tp=tp,
+                reason=reason,
+            )
+        )
+
+    async def partial_close(
+        self,
+        ticket: int,
+        volume: float,
+        *,
+        reason: str = "",
+    ) -> None:
+        """Request the broker to reduce an existing position by `volume`.
+
+        Volume must be positive and ≤ the current position volume; the
+        router refuses both under- and over-close requests. As with
+        `move_stop`, ownership is enforced by magic-number match — a
+        strategy can only shrink its own tickets.
+        """
+        if volume <= 0:
+            raise ValueError(f"partial_close volume must be > 0, got {volume!r}")
+        if self._bus is None:
+            raise RuntimeError(
+                "StrategyContext was built without a bus — partial_close "
+                "requires ctx.bus= to be set"
+            )
+        await self._bus.publish(
+            PartialCloseRequestEvent(
+                strategy_id=self.strategy_id,
+                ticket=ticket,
+                volume=volume,
+                reason=reason,
+            )
+        )
 
     # Used by the reloader to swap params atomically
     def _replace_params(self, new_params: StrategyParams) -> None:

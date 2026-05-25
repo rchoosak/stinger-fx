@@ -97,6 +97,7 @@ class StrategyRunner:
             magic=self._magic,
             signal_sink=self._signal_sink,
             subscriptions=list(subs),
+            bus=self.bus,
         )
 
         # Subscribe to every needed feed; one bus subscription per event type

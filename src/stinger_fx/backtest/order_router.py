@@ -17,8 +17,12 @@ from stinger_fx.brokers.pool import BrokerPool
 from stinger_fx.core.event_bus import AsyncEventBus
 from stinger_fx.core.events import (
     DecisionEvent,
+    ModifyOrderRequestEvent,
     OrderFilledEvent,
+    OrderModifiedEvent,
     OrderRejectedEvent,
+    PartialCloseRequestEvent,
+    PartialClosedEvent,
     SignalEvent,
 )
 from stinger_fx.domain import (
@@ -156,12 +160,134 @@ class OrderRouter:
                 )
             )
 
+    async def handle_modify(self, evt: ModifyOrderRequestEvent) -> None:
+        """Route a strategy's SL/TP modification request to the right broker.
+
+        Ownership check: the strategy can only modify a ticket whose
+        `position.magic` matches the magic derived from its own id. The
+        check uses the same `strategy_magic` mapping the signal path uses
+        to tag fills, so the two ends stay in sync.
+        """
+        broker = self._broker_for(evt.strategy_id)
+        positions = await broker.get_positions()
+        pos = next((p for p in positions if p.ticket == evt.ticket), None)
+        if pos is None:
+            logger.warning(
+                "modify_unknown_ticket strategy=%s ticket=%s",
+                evt.strategy_id, evt.ticket,
+            )
+            return
+        expected_magic = self.strategy_magic.get(evt.strategy_id, 0)
+        if pos.magic != expected_magic:
+            logger.warning(
+                "modify_rejected_cross_strategy strategy=%s ticket=%s "
+                "position_magic=%s expected_magic=%s",
+                evt.strategy_id, evt.ticket, pos.magic, expected_magic,
+            )
+            return
+
+        # Preserve unchanged stops — caller passes None when they don't want
+        # to touch one side. `BaseBroker.modify_order` accepts None to mean
+        # "leave alone" too, but some brokers clear the value; pass the
+        # current value through explicitly when None is requested.
+        new_sl = evt.sl if evt.sl is not None else pos.sl
+        new_tp = evt.tp if evt.tp is not None else pos.tp
+        result = await broker.modify_order(evt.ticket, sl=new_sl, tp=new_tp)
+        if not result.ok:
+            logger.warning(
+                "modify_failed strategy=%s ticket=%s reason=%s",
+                evt.strategy_id, evt.ticket, result.message,
+            )
+            return
+
+        # Re-read the position so the event payload is the post-modify
+        # snapshot (avoids racing on broker internal state).
+        positions = await broker.get_positions()
+        updated = next((p for p in positions if p.ticket == evt.ticket), pos)
+        await self.bus.publish(
+            OrderModifiedEvent(position=updated, reason=evt.reason)
+        )
+
+    async def handle_partial_close(self, evt: PartialCloseRequestEvent) -> None:
+        """Route a strategy's partial-close request to the right broker."""
+        broker = self._broker_for(evt.strategy_id)
+        positions = await broker.get_positions()
+        pos = next((p for p in positions if p.ticket == evt.ticket), None)
+        if pos is None:
+            logger.warning(
+                "partial_close_unknown_ticket strategy=%s ticket=%s",
+                evt.strategy_id, evt.ticket,
+            )
+            return
+        expected_magic = self.strategy_magic.get(evt.strategy_id, 0)
+        if pos.magic != expected_magic:
+            logger.warning(
+                "partial_close_rejected_cross_strategy strategy=%s ticket=%s "
+                "position_magic=%s expected_magic=%s",
+                evt.strategy_id, evt.ticket, pos.magic, expected_magic,
+            )
+            return
+        if evt.volume >= pos.volume:
+            # Over-close → caller probably meant `close_position`. Refuse so
+            # they don't accidentally drop the whole position via this path
+            # (which would also have to publish a different event).
+            logger.warning(
+                "partial_close_volume_too_large strategy=%s ticket=%s "
+                "requested=%s position_volume=%s",
+                evt.strategy_id, evt.ticket, evt.volume, pos.volume,
+            )
+            return
+
+        before_volume = pos.volume
+        result = await broker.close_position(evt.ticket, volume=evt.volume)
+        if not result.ok:
+            logger.warning(
+                "partial_close_failed strategy=%s ticket=%s reason=%s",
+                evt.strategy_id, evt.ticket, result.message,
+            )
+            return
+
+        # The broker emits the canonical PartialClosedEvent when it knows the
+        # realised P&L of the chunk. For brokers that don't, fall back to
+        # publishing here with the remaining-leg snapshot.
+        positions = await broker.get_positions()
+        remaining = next((p for p in positions if p.ticket == evt.ticket), None)
+        if remaining is None:
+            # Position vanished — broker treated it as a full close.
+            logger.info(
+                "partial_close_collapsed_to_full strategy=%s ticket=%s",
+                evt.strategy_id, evt.ticket,
+            )
+            return
+        # If the broker didn't shrink the volume, treat as no-op + log it.
+        if remaining.volume >= before_volume:
+            logger.warning(
+                "partial_close_no_shrink strategy=%s ticket=%s before=%s after=%s",
+                evt.strategy_id, evt.ticket, before_volume, remaining.volume,
+            )
+
     async def attach(self) -> None:
         async def _on_signal(evt: SignalEvent) -> None:
             await self.handle_signal(evt.signal)
 
+        async def _on_modify(evt: ModifyOrderRequestEvent) -> None:
+            await self.handle_modify(evt)
+
+        async def _on_partial_close(evt: PartialCloseRequestEvent) -> None:
+            await self.handle_partial_close(evt)
+
         self._sub = self.bus.subscribe(SignalEvent, _on_signal, name="order_router")
+        self._sub_modify = self.bus.subscribe(
+            ModifyOrderRequestEvent, _on_modify, name="order_router.modify"
+        )
+        self._sub_partial = self.bus.subscribe(
+            PartialCloseRequestEvent, _on_partial_close, name="order_router.partial"
+        )
 
     async def detach(self) -> None:
         if hasattr(self, "_sub"):
             await self._sub.unsubscribe()
+        if hasattr(self, "_sub_modify"):
+            await self._sub_modify.unsubscribe()
+        if hasattr(self, "_sub_partial"):
+            await self._sub_partial.unsubscribe()

@@ -19,6 +19,7 @@ from stinger_fx.brokers.base import BaseBroker
 from stinger_fx.core.event_bus import AsyncEventBus
 from stinger_fx.core.events import (
     OrderFilledEvent,
+    PartialClosedEvent,
     PositionClosedEvent,
 )
 from stinger_fx.domain import (
@@ -226,24 +227,40 @@ class SimBroker(BaseBroker):
         pos = self._positions.get(ticket)
         if pos is None:
             return OrderResult(ok=False, status=OrderStatus.REJECTED, message="not found")
-        # Pydantic frozen — rebuild
-        updated = pos.model_copy(update={"sl": sl, "tp": tp})
+        # Pydantic frozen — rebuild. Pass through current values for fields
+        # the caller didn't supply so we don't accidentally clear an existing
+        # SL when only TP was being moved (and vice-versa).
+        updated = pos.model_copy(
+            update={
+                "sl": sl if sl is not None else pos.sl,
+                "tp": tp if tp is not None else pos.tp,
+            }
+        )
         self._positions[ticket] = updated
         return OrderResult(ok=True, ticket=ticket, status=OrderStatus.SUBMITTED)
 
     async def close_position(
         self, ticket: int, volume: float | None = None
     ) -> OrderResult:
-        pos = self._positions.pop(ticket, None)
+        pos = self._positions.get(ticket)
         if pos is None:
             return OrderResult(ok=False, status=OrderStatus.REJECTED, message="not found")
         mid = self._last_price.get(pos.symbol)
         if mid is None:
             return OrderResult(ok=False, status=OrderStatus.REJECTED, message="no market price")
+
+        # Phase 4: a partial close passes a `volume` strictly less than the
+        # position's current volume. We close that chunk and leave the rest
+        # open with a shrunken `volume`. A None / equal / over-sized volume
+        # request closes the whole position (the over-sized case is filtered
+        # at the router; brokers in the wild typically clamp).
+        full_close = volume is None or volume >= pos.volume
+        close_qty = pos.volume if full_close else float(volume)
+
         close_side = Side.SELL if pos.side is Side.BUY else Side.BUY
         close_price = fixed_pips_slippage(mid, close_side, self._slippage_pips, self._point)
-        # P&L = (close - open) * sign * volume * contract_size, in profit currency.
-        pnl = (close_price - pos.open_price) * pos.side.sign * pos.volume * self._contract
+        # P&L on the closed chunk only.
+        pnl = (close_price - pos.open_price) * pos.side.sign * close_qty * self._contract
         self.balance += pnl
         self._trades.append(
             TradeRecord(
@@ -252,13 +269,26 @@ class SimBroker(BaseBroker):
                 side=pos.side.value,
                 open_price=pos.open_price,
                 close_price=close_price,
-                volume=pos.volume,
+                volume=close_qty,
                 pnl=pnl,
             )
         )
-        await self.bus.publish(
-            PositionClosedEvent(position=pos, realized_pnl=pnl)
-        )
+
+        if full_close:
+            self._positions.pop(ticket, None)
+            await self.bus.publish(
+                PositionClosedEvent(position=pos, realized_pnl=pnl)
+            )
+        else:
+            remaining = pos.model_copy(update={"volume": pos.volume - close_qty})
+            self._positions[ticket] = remaining
+            await self.bus.publish(
+                PartialClosedEvent(
+                    position=remaining,
+                    closed_volume=close_qty,
+                    realized_pnl=pnl,
+                )
+            )
         return OrderResult(ok=True, ticket=ticket, status=OrderStatus.FILLED)
 
     async def cancel_order(self, ticket: int) -> OrderResult:
