@@ -24,14 +24,20 @@ if TYPE_CHECKING:
 class PositionManager(Protocol):
     """Anything with an async `on_tick(ctx, tick)` method qualifies.
 
-    `on_bar(ctx, bar)` is optional — implement it when you need to react to
-    closed bars (e.g. counting bars-in-trade). The runner dispatches it to
-    all managers *before* the strategy's own `on_bar`.
+    Optional hooks (the runner uses `hasattr` to guard dispatch, so they
+    aren't required by the Protocol and existing tick-only managers stay
+    conformant):
+
+    * ``on_bar(ctx, bar)`` — runs before the strategy's ``on_bar`` for any
+      closed bar on a declared feed. Useful for bar-counting (e.g.
+      :class:`TimeExitManager` with ``max_bars``).
+    * ``on_position_closed(ctx, position)`` — runs before the strategy's
+      ``on_position_closed`` whenever a position owned by this strategy
+      closes (SL/TP fired, manager closed it, manual close). Useful for
+      OCO groups, where closing one member cancels the others.
     """
 
     async def on_tick(self, ctx: StrategyContext, tick: Tick) -> None: ...
 
-    # `on_bar` is intentionally not part of the runtime-checkable Protocol so
-    # that existing managers that only implement `on_tick` remain conformant.
-    # The runner uses `hasattr` to guard dispatch.
     # async def on_bar(self, ctx: StrategyContext, bar: Bar) -> None: ...
+    # async def on_position_closed(self, ctx: StrategyContext, position: Position) -> None: ...

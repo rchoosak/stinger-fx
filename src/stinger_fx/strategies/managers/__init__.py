@@ -8,12 +8,14 @@ the strategy's view of the market."""
 from stinger_fx.strategies.managers.base import PositionManager
 from stinger_fx.strategies.managers.break_even import BreakEvenMover
 from stinger_fx.strategies.managers.ladder import LadderManager
+from stinger_fx.strategies.managers.oco import OCOGroupManager
 from stinger_fx.strategies.managers.time_exit import TimeExitManager
 from stinger_fx.strategies.managers.trailing import TrailingStopManager
 
 __all__ = [
     "BreakEvenMover",
     "LadderManager",
+    "OCOGroupManager",
     "PositionManager",
     "TimeExitManager",
     "TrailingStopManager",

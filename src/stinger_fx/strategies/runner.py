@@ -254,6 +254,12 @@ class StrategyRunner:
         if self._ctx is None:
             return
         self._track_remove(evt.position.ticket)
+        # Managers that implement on_position_closed (e.g. OCOGroupManager that
+        # cancels sibling tickets when one member of an OCO group closes) run
+        # before the strategy's own on_position_closed.
+        for manager in self._ctx.managers:
+            if hasattr(manager, "on_position_closed"):
+                await self._guarded(manager.on_position_closed, self._ctx, evt.position)
         await self._guarded(self.strategy.on_position_closed, self._ctx, evt.position)
 
     async def _on_order_modified(self, evt: OrderModifiedEvent) -> None:
