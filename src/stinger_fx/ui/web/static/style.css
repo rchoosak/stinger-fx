@@ -155,3 +155,23 @@ button:hover { background: #30363d; }
   height: 380px;
   width: 100%;
 }
+
+/* Phase 5 — params editor */
+.params-editor h3 { margin: 0 0 12px; color: #58a6ff; }
+.params-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+.params-table th, .params-table td {
+  text-align: left; padding: 6px 8px; border-bottom: 1px solid #21262d;
+}
+.params-table input[type=text],
+.params-table input[type=number] {
+  background: #0d1117; color: #e6edf3;
+  border: 1px solid #30363d; border-radius: 3px;
+  padding: 4px 8px; width: 140px;
+}
+.params-actions { display: flex; gap: 8px; }
+.error-banner {
+  background: #3f1f1f; color: #ffa198; border: 1px solid #f85149;
+  padding: 8px 12px; margin-bottom: 12px; border-radius: 4px;
+  font-size: 13px;
+}
+.muted.small { font-size: 11px; }

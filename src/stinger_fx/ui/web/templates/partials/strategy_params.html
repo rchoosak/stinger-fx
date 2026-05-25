@@ -1,0 +1,50 @@
+<div class="params-editor">
+  <h3>Edit params · <code>{{ sid }}</code></h3>
+  {% if error %}
+    <div class="error-banner">⚠️ {{ error }}</div>
+  {% endif %}
+  <form
+    hx-post="/strategy/{{ sid }}/params"
+    hx-target="#strategies-panel"
+    hx-swap="innerHTML"
+    class="params-form"
+  >
+    <table class="params-table">
+      <thead><tr><th>Field</th><th>Value</th><th>Type</th></tr></thead>
+      <tbody>
+        {% for f in fields %}
+        <tr>
+          <td>
+            <label for="param-{{ f.name }}"><code>{{ f.name }}</code></label>
+            {% if f.description %}<div class="muted small">{{ f.description }}</div>{% endif %}
+          </td>
+          <td>
+            {% if f.type == "bool" %}
+              <input
+                type="checkbox" id="param-{{ f.name }}" name="{{ f.name }}"
+                {% if f.value %}checked{% endif %} value="1"
+              />
+            {% elif f.type == "int" %}
+              <input type="number" step="1" id="param-{{ f.name }}" name="{{ f.name }}" value="{{ f.value }}" />
+            {% elif f.type == "float" %}
+              <input type="number" step="any" id="param-{{ f.name }}" name="{{ f.name }}" value="{{ f.value }}" />
+            {% else %}
+              <input type="text" id="param-{{ f.name }}" name="{{ f.name }}" value="{{ f.value }}" />
+            {% endif %}
+          </td>
+          <td><code class="muted">{{ f.type }}</code></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <div class="params-actions">
+      <button type="submit">Apply</button>
+      <button
+        type="button"
+        hx-get="/partial/strategies"
+        hx-target="#strategies-panel"
+        hx-swap="innerHTML"
+      >Cancel</button>
+    </div>
+  </form>
+</div>
