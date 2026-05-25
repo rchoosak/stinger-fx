@@ -17,11 +17,13 @@ from stinger_fx.backtest.base import BaseBacktester
 from stinger_fx.backtest.order_router import OrderRouter
 from stinger_fx.backtest.replay_broker import SimBroker
 from stinger_fx.backtest.reports import BacktestReport
+from stinger_fx.brokers.bar_aggregator import BarAggregator
 from stinger_fx.config.models import BacktestRunConfig, StrategyEntry
 from stinger_fx.core import AsyncEventBus, SimClock
 from stinger_fx.core.errors import BacktestError
-from stinger_fx.core.events import BarEvent, SignalEvent
-from stinger_fx.data import BacktestRepo, SqliteStore, iter_bars
+from stinger_fx.core.events import BarEvent, SignalEvent, TickEvent
+from stinger_fx.data import BacktestRepo, SqliteStore, iter_bars, iter_ticks
+from stinger_fx.domain import Tick
 from stinger_fx.strategies import (
     StrategyRunner,
     derive_magic,
@@ -103,49 +105,12 @@ class FileBacktester(BaseBacktester):
 
         started_at = datetime.now(UTC)
         equity_curve: list[tuple[datetime, float]] = []
-        bar_count = 0
 
-        # Multi-feed: merge per-feed bar iterators in chronological order.
-        # Each iter_bars() already yields ascending by time → heapq.merge is
-        # O(rows · log N), one bar at a time, with O(N) memory. For ties the
-        # feed_list ordering ((symbol, tf.value)) breaks them deterministically.
-        feed_iters = [
-            iter_bars(self._parquet_root, sub.symbol, sub.timeframe, cfg.start, cfg.end)
-            for sub in cfg.feed_list
-        ]
-        merged = heapq.merge(*feed_iters, key=lambda b: b.time)
-
-        # Track last-known close per symbol for the MTM mark across all
-        # open positions on the current event.
-        last_close: dict[str, float] = {}
-
-        for bar in merged:
-            sim_clock.advance(bar.time)
-            broker.advance_clock(bar.time)
-            broker.set_market(bar.symbol, bar.close)
-            last_close[bar.symbol] = bar.close
-
-            # Stop-loss / take-profit check using this bar's high/low
-            for pos in broker.check_sl_tp(bar.symbol, bar.high, bar.low):
-                await broker.close_position(pos.ticket)
-
-            await bus.publish(BarEvent(bar=bar))
-            # Let queues drain so the strategy reacts before we move to the next bar.
-            for _ in range(3):
-                await asyncio.sleep(0)
-
-            # Mark-to-market equity across ALL open positions, valuing each
-            # position at the last known close for its symbol. Positions whose
-            # symbol hasn't received a bar yet contribute 0 (they would be
-            # opened at the first bar so this only matters at warm-up).
-            mtm = 0.0
-            for p in await broker.get_positions():
-                ref = last_close.get(p.symbol)
-                if ref is None:
-                    continue
-                mtm += (ref - p.open_price) * p.side.sign * p.volume * 100_000.0
-            equity_curve.append((bar.time, broker.balance + mtm))
-            bar_count += 1
+        if cfg.granularity == "tick":
+            event_count = await self._replay_ticks(cfg, bus, broker, sim_clock, equity_curve)
+        else:
+            event_count = await self._replay_bars(cfg, bus, broker, sim_clock, equity_curve)
+        bar_count = event_count
 
         # Close any remaining positions at the last bar's close
         for pos in list(await broker.get_positions()):
@@ -200,5 +165,129 @@ class FileBacktester(BaseBacktester):
                 repo_row_id, report.to_metrics_dict(), str(equity_path)
             )
 
-        logger.info("backtest done bars=%s trades=%s", bar_count, len(report.trades))
+        logger.info(
+            "backtest done granularity=%s events=%s trades=%s",
+            cfg.granularity, bar_count, len(report.trades),
+        )
         return report
+
+    # --- Replay paths --------------------------------------------------------
+
+    async def _replay_bars(
+        self,
+        cfg: BacktestRunConfig,
+        bus: AsyncEventBus,
+        broker: SimBroker,
+        sim_clock: SimClock,
+        equity_curve: list[tuple[datetime, float]],
+    ) -> int:
+        """Bar-mode replay (legacy). Same logic as before Batch B; merges
+        per-feed iter_bars() in chronological order."""
+        feed_iters = [
+            iter_bars(self._parquet_root, sub.symbol, sub.timeframe, cfg.start, cfg.end)
+            for sub in cfg.feed_list
+        ]
+        merged = heapq.merge(*feed_iters, key=lambda b: b.time)
+        last_close: dict[str, float] = {}
+        count = 0
+        for bar in merged:
+            sim_clock.advance(bar.time)
+            broker.advance_clock(bar.time)
+            broker.set_market(bar.symbol, bar.close)
+            last_close[bar.symbol] = bar.close
+            for pos in broker.check_sl_tp(bar.symbol, bar.high, bar.low):
+                await broker.close_position(pos.ticket)
+            await bus.publish(BarEvent(bar=bar))
+            for _ in range(3):
+                await asyncio.sleep(0)
+            mtm = 0.0
+            for p in await broker.get_positions():
+                ref = last_close.get(p.symbol)
+                if ref is None:
+                    continue
+                mtm += (ref - p.open_price) * p.side.sign * p.volume * 100_000.0
+            equity_curve.append((bar.time, broker.balance + mtm))
+            count += 1
+        return count
+
+    async def _replay_ticks(
+        self,
+        cfg: BacktestRunConfig,
+        bus: AsyncEventBus,
+        broker: SimBroker,
+        sim_clock: SimClock,
+        equity_curve: list[tuple[datetime, float]],
+    ) -> int:
+        """Tick-mode replay (Phase 4 A.1).
+
+        Reads ticks per-symbol (timeframe is ignored for the data source,
+        since ticks aren't keyed by tf), merges chronologically, publishes
+        TickEvent. BarAggregators per (symbol, tf) listen on the bus and
+        synthesise BarEvent so strategies keep getting on_bar exactly as
+        in bar mode. Equity is sampled once per minute-boundary to keep
+        the curve compact.
+        """
+        # Build per-feed aggregators so the strategy gets BarEvent for each
+        # (symbol, tf) it subscribed to. Each one subscribes to TickEvent on
+        # the bus and self-filters by symbol.
+        aggregators: list[BarAggregator] = []
+        agg_subs = []
+        for sub in cfg.feed_list:
+            agg = BarAggregator(sub.symbol, sub.timeframe, bus)
+            aggregators.append(agg)
+            agg_subs.append(
+                bus.subscribe(TickEvent, agg.on_tick, name=f"bt.agg.{sub.symbol}.{sub.timeframe.value}")
+            )
+
+        # Unique symbols from feed_list — ticks aren't tf-keyed
+        symbols = sorted({sub.symbol for sub in cfg.feed_list})
+        tick_iters = [
+            iter_ticks(self._parquet_root, sym, cfg.start, cfg.end)
+            for sym in symbols
+        ]
+        merged = heapq.merge(*tick_iters, key=lambda t: t.time)
+
+        last_mid: dict[str, float] = {}
+        count = 0
+        last_equity_minute: int | None = None
+        last_tick: Tick | None = None
+        for tick in merged:
+            sim_clock.advance(tick.time)
+            broker.advance_clock(tick.time)
+            # Use bid for the broker's last-known price (long P&L marks at bid)
+            broker.set_market(tick.symbol, tick.bid)
+            last_mid[tick.symbol] = (tick.bid + tick.ask) / 2.0
+
+            # Tick-precise SL/TP — fires before strategy sees the event so
+            # the strategy can't try to act on a position that's about to close.
+            for pos in broker.check_sl_tp_tick(tick.symbol, tick.bid, tick.ask):
+                await broker.close_position(pos.ticket)
+
+            await bus.publish(TickEvent(tick=tick))
+            # Drain — fewer than bar mode because per-tick strategy work is
+            # usually a no-op until the aggregator publishes a closed bar.
+            for _ in range(2):
+                await asyncio.sleep(0)
+
+            # Sample equity once per minute boundary to keep the curve compact
+            tick_minute = int(tick.time.timestamp()) // 60
+            if last_equity_minute is None or tick_minute > last_equity_minute:
+                mtm = 0.0
+                for p in await broker.get_positions():
+                    ref = last_mid.get(p.symbol)
+                    if ref is None:
+                        continue
+                    mtm += (ref - p.open_price) * p.side.sign * p.volume * 100_000.0
+                equity_curve.append((tick.time, broker.balance + mtm))
+                last_equity_minute = tick_minute
+            last_tick = tick
+            count += 1
+
+        # Ensure at least one equity point on a non-empty replay
+        if not equity_curve and last_tick is not None:
+            equity_curve.append((last_tick.time, broker.balance))
+
+        for sub in agg_subs:
+            await sub.unsubscribe()
+        del aggregators  # keep references alive until subs unsub
+        return count

@@ -274,7 +274,11 @@ class SimBroker(BaseBroker):
     # --- Backtest helpers ---------------------------------------------------
 
     def check_sl_tp(self, symbol: str, bar_high: float, bar_low: float) -> list[Position]:
-        """Returns positions that should be closed (one of SL/TP is breached this bar)."""
+        """Returns positions that should be closed (one of SL/TP is breached this bar).
+
+        Bar-mode check: scans bar high/low. Ambiguous when a wick touches both
+        SL and TP — `tick`-mode uses `check_sl_tp_tick` for unambiguous timing.
+        """
         to_close: list[Position] = []
         for pos in list(self._positions.values()):
             if pos.symbol != symbol:
@@ -290,5 +294,38 @@ class SimBroker(BaseBroker):
                     to_close.append(pos)
                     continue
                 if pos.tp is not None and bar_low <= pos.tp:
+                    to_close.append(pos)
+        return to_close
+
+    def check_sl_tp_tick(self, symbol: str, bid: float, ask: float) -> list[Position]:
+        """Tick-mode SL/TP check (Phase 4).
+
+        Conservative quoting model — a long position closes on:
+          • SL when **bid** ≤ sl   (we sell at bid, so SL fires when bid hits)
+          • TP when **bid** ≥ tp   (same logic — we sell at bid for profit)
+
+        A short position closes on:
+          • SL when **ask** ≥ sl   (we buy back at ask)
+          • TP when **ask** ≤ tp
+
+        Unlike bar-mode `check_sl_tp`, this is unambiguous chronologically:
+        each tick reveals one bid/ask snapshot, so SL and TP can't both fire
+        on the same event.
+        """
+        to_close: list[Position] = []
+        for pos in list(self._positions.values()):
+            if pos.symbol != symbol:
+                continue
+            if pos.side is Side.BUY:
+                if pos.sl is not None and bid <= pos.sl:
+                    to_close.append(pos)
+                    continue
+                if pos.tp is not None and bid >= pos.tp:
+                    to_close.append(pos)
+            else:
+                if pos.sl is not None and ask >= pos.sl:
+                    to_close.append(pos)
+                    continue
+                if pos.tp is not None and ask <= pos.tp:
                     to_close.append(pos)
         return to_close

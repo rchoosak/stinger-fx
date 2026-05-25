@@ -270,6 +270,7 @@ class BacktestRunConfig(BaseModel):
     initial_balance: float = Field(10_000.0, gt=0)
     data_source: Path | None = None
     slippage_pips: float = Field(0.0, ge=0)
+    granularity: Literal["bar", "tick"] = "bar"
 
     @field_validator("start", "end")
     @classmethod
@@ -350,6 +351,7 @@ class SweepRunConfig(BaseModel):
     parameter_grid: dict[str, list[Any]] = Field(default_factory=dict)
     rank_by: MetricName = "net_pnl"
     top_n: int = Field(10, ge=1, le=1000)
+    granularity: Literal["bar", "tick"] = "bar"
 
     @field_validator("start", "end")
     @classmethod
