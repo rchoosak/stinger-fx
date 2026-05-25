@@ -17,6 +17,7 @@ from stinger_fx.backtest.base import BaseBacktester
 from stinger_fx.backtest.order_router import OrderRouter
 from stinger_fx.backtest.replay_broker import SimBroker
 from stinger_fx.backtest.reports import BacktestReport
+from stinger_fx.backtest.slippage import build_slippage_model
 from stinger_fx.brokers.bar_aggregator import BarAggregator
 from stinger_fx.config.models import BacktestRunConfig, StrategyEntry
 from stinger_fx.core import AsyncEventBus, SimClock
@@ -59,7 +60,17 @@ class FileBacktester(BaseBacktester):
 
         bus = AsyncEventBus()
         sim_clock = SimClock(cfg.start)
-        broker = SimBroker(bus, initial_balance=cfg.initial_balance, slippage_pips=cfg.slippage_pips)
+        slippage_fn = build_slippage_model(
+            cfg.slippage_model,
+            pips=cfg.slippage_pips,
+            volatility_factor=cfg.slippage_volatility_factor,
+        )
+        broker = SimBroker(
+            bus,
+            initial_balance=cfg.initial_balance,
+            slippage_pips=cfg.slippage_pips,
+            slippage_fn=slippage_fn,
+        )
 
         strategy_cls = load_strategy_class(self._strategy_entry.class_path)
         # Allow the run config to override symbol/timeframe for sweep cells —
@@ -254,8 +265,9 @@ class FileBacktester(BaseBacktester):
         for tick in merged:
             sim_clock.advance(tick.time)
             broker.advance_clock(tick.time)
-            # Use bid for the broker's last-known price (long P&L marks at bid)
-            broker.set_market(tick.symbol, tick.bid)
+            # Store both bid AND ask so spread/volatility slippage models have
+            # accurate data; long P&L marks at bid (consistent with bar mode).
+            broker.set_market_tick(tick.symbol, tick.bid, tick.ask)
             last_mid[tick.symbol] = (tick.bid + tick.ask) / 2.0
 
             # Tick-precise SL/TP — fires before strategy sees the event so

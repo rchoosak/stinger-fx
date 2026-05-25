@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 import pyarrow as pa
 
 from stinger_fx.backtest.reports import TradeRecord
-from stinger_fx.backtest.slippage import fixed_pips_slippage
+from stinger_fx.backtest.slippage import SlippageModel, fixed_pips_model, fixed_pips_slippage
 from stinger_fx.brokers.base import BaseBroker
 from stinger_fx.core.event_bus import AsyncEventBus
 from stinger_fx.core.events import (
@@ -48,6 +48,7 @@ class SimBroker(BaseBroker):
         *,
         initial_balance: float,
         slippage_pips: float = 0.0,
+        slippage_fn: SlippageModel | None = None,
         contract_size: float = 100_000.0,
         point: float = 0.0001,
     ) -> None:
@@ -59,8 +60,16 @@ class SimBroker(BaseBroker):
         self._next_ticket = 1
         self._positions: dict[int, Position] = {}
         self._sim_time: datetime = datetime.now(UTC)
+        # Per-symbol bid/ask — set by advance_market(). `_last_price` kept for
+        # backward compat (check_sl_tp uses it as a mark-to-market reference).
         self._last_price: dict[str, float] = {}
+        self._last_bid: dict[str, float] = {}
+        self._last_ask: dict[str, float] = {}
         self._trades: list[TradeRecord] = []
+        # Slippage callable — if not supplied, fall back to the legacy fixed-pips model.
+        self._slippage_fn: SlippageModel = slippage_fn or fixed_pips_model(
+            pips=slippage_pips, point=point
+        )
 
     # --- For the file backtester to drive the sim ---------------------------
 
@@ -68,7 +77,16 @@ class SimBroker(BaseBroker):
         self._sim_time = t
 
     def set_market(self, symbol: str, price: float) -> None:
+        """Set both bid and ask to *price* (no spread).  Bar-mode entry point."""
         self._last_price[symbol] = price
+        self._last_bid[symbol] = price
+        self._last_ask[symbol] = price
+
+    def set_market_tick(self, symbol: str, bid: float, ask: float) -> None:
+        """Set bid and ask independently.  Tick-mode entry point."""
+        self._last_bid[symbol] = bid
+        self._last_ask[symbol] = ask
+        self._last_price[symbol] = bid  # mark-to-market reference = bid
 
     @property
     def trades(self) -> list[TradeRecord]:
@@ -170,14 +188,16 @@ class SimBroker(BaseBroker):
                 status=OrderStatus.REJECTED,
                 message=f"sim broker supports MARKET only (got {req.type})",
             )
-        mid = self._last_price.get(req.symbol)
-        if mid is None:
+        bid = self._last_bid.get(req.symbol)
+        ask = self._last_ask.get(req.symbol)
+        if bid is None or ask is None:
             return OrderResult(
                 ok=False,
                 status=OrderStatus.REJECTED,
                 message=f"no market price for {req.symbol}",
             )
-        fill_price = fixed_pips_slippage(mid, req.side, self._slippage_pips, self._point)
+        fill_price = self._slippage_fn(req.side, bid=bid, ask=ask)
+        mid = (bid + ask) / 2
         ticket = self._next_ticket
         self._next_ticket += 1
         pos = Position(
@@ -257,8 +277,11 @@ class SimBroker(BaseBroker):
         full_close = volume is None or volume >= pos.volume
         close_qty = pos.volume if full_close else float(volume)
 
+        # When closing a BUY we exit at bid (sell side), and vice versa.
         close_side = Side.SELL if pos.side is Side.BUY else Side.BUY
-        close_price = fixed_pips_slippage(mid, close_side, self._slippage_pips, self._point)
+        bid = self._last_bid.get(pos.symbol, mid)
+        ask = self._last_ask.get(pos.symbol, mid)
+        close_price = self._slippage_fn(close_side, bid=bid, ask=ask)
         # P&L on the closed chunk only.
         pnl = (close_price - pos.open_price) * pos.side.sign * close_qty * self._contract
         self.balance += pnl

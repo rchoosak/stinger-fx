@@ -270,6 +270,8 @@ class BacktestRunConfig(BaseModel):
     initial_balance: float = Field(10_000.0, gt=0)
     data_source: Path | None = None
     slippage_pips: float = Field(0.0, ge=0)
+    slippage_model: Literal["fixed", "spread", "volatility"] = "fixed"
+    slippage_volatility_factor: float = Field(0.25, gt=0)
     granularity: Literal["bar", "tick"] = "bar"
 
     @field_validator("start", "end")
@@ -347,6 +349,8 @@ class SweepRunConfig(BaseModel):
     end: datetime
     initial_balance: float = Field(10_000.0, gt=0)
     slippage_pips: float = Field(0.0, ge=0)
+    slippage_model: Literal["fixed", "spread", "volatility"] = "fixed"
+    slippage_volatility_factor: float = Field(0.25, gt=0)
     data_source: Path
     parameter_grid: dict[str, list[Any]] = Field(default_factory=dict)
     rank_by: MetricName = "net_pnl"
