@@ -55,10 +55,16 @@ class RiskMonitor:
         # decremented on PositionClosed.
         self._open_positions: dict[str, int] = {}
 
+        # Per-symbol open-position counter (for per_symbol.max_open_positions).
+        self._open_positions_by_symbol: dict[str, int] = {}
+
         # Daily realised P&L. Reset when the UTC date changes.
         self._daily_anchor_date: datetime | None = None
         self._daily_opening_balance: float = 0.0
         self._daily_realized_pnl: float = 0.0
+
+        # Per-symbol daily realized P&L (for per_symbol.max_daily_loss_usd).
+        self._daily_pnl_by_symbol: dict[str, float] = {}
 
         # Peak / drawdown tracker.
         self._peak_equity: float | None = None
@@ -123,7 +129,7 @@ class RiskMonitor:
                     f"(strategy {signal.strategy_id} has {open_n} open)",
                 )
 
-        # Daily loss limit
+        # Daily loss limit (account-wide)
         if cfg.max_daily_loss_pct > 0 and self._daily_opening_balance > 0:
             loss_pct = max(0.0, -self._daily_realized_pnl) / self._daily_opening_balance * 100
             if loss_pct >= cfg.max_daily_loss_pct:
@@ -131,6 +137,27 @@ class RiskMonitor:
                     False,
                     f"max_daily_loss_pct={cfg.max_daily_loss_pct} hit (today loss {loss_pct:.2f}%)",
                 )
+
+        # Per-symbol checks
+        sym_cfg = cfg.per_symbol.get(signal.symbol)
+        if sym_cfg is not None:
+            if sym_cfg.max_open_positions > 0:
+                sym_open = self._open_positions_by_symbol.get(signal.symbol, 0)
+                if sym_open >= sym_cfg.max_open_positions:
+                    return RiskVerdict(
+                        False,
+                        f"per_symbol.max_open_positions={sym_cfg.max_open_positions} reached "
+                        f"({signal.symbol} has {sym_open} open)",
+                    )
+            if sym_cfg.max_daily_loss_usd > 0:
+                sym_pnl = self._daily_pnl_by_symbol.get(signal.symbol, 0.0)
+                sym_loss = max(0.0, -sym_pnl)
+                if sym_loss >= sym_cfg.max_daily_loss_usd:
+                    return RiskVerdict(
+                        False,
+                        f"per_symbol.max_daily_loss_usd={sym_cfg.max_daily_loss_usd} hit "
+                        f"({signal.symbol} today loss ${sym_loss:.2f})",
+                    )
 
         return RiskVerdict(True)
 
@@ -145,6 +172,8 @@ class RiskMonitor:
             "daily_opening_balance": self._daily_opening_balance,
             "daily_realized_pnl": self._daily_realized_pnl,
             "open_positions": dict(self._open_positions),
+            "open_positions_by_symbol": dict(self._open_positions_by_symbol),
+            "daily_pnl_by_symbol": dict(self._daily_pnl_by_symbol),
         }
 
     # --- Internals ---------------------------------------------------------
@@ -163,12 +192,15 @@ class RiskMonitor:
             if self._current_balance is not None:
                 self._daily_opening_balance = self._current_balance
             self._daily_realized_pnl = 0.0
+            self._daily_pnl_by_symbol.clear()
 
     # --- Event handlers ----------------------------------------------------
 
     async def _on_filled(self, evt: OrderFilledEvent) -> None:
         sid = evt.order.strategy_id
         self._open_positions[sid] = self._open_positions.get(sid, 0) + 1
+        sym = evt.order.symbol
+        self._open_positions_by_symbol[sym] = self._open_positions_by_symbol.get(sym, 0) + 1
 
     async def _on_closed(self, evt: PositionClosedEvent) -> None:
         # PositionClosedEvent carries strategy attribution via the position's
@@ -181,8 +213,12 @@ class RiskMonitor:
             if self._open_positions[sid] > 0:
                 self._open_positions[sid] -= 1
                 break
+        sym = evt.position.symbol
+        if self._open_positions_by_symbol.get(sym, 0) > 0:
+            self._open_positions_by_symbol[sym] -= 1
         self._maybe_roll_daily()
         self._daily_realized_pnl += evt.realized_pnl
+        self._daily_pnl_by_symbol[sym] = self._daily_pnl_by_symbol.get(sym, 0.0) + evt.realized_pnl
 
     async def _on_snapshot(self, evt: AccountSnapshotEvent) -> None:
         snap = evt.snapshot

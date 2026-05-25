@@ -62,12 +62,27 @@ class WebConfig(BaseModel):
     port: int = Field(8765, gt=0, lt=65536)
 
 
+class SymbolRiskConfig(BaseModel):
+    """Per-symbol risk overrides (nested inside `RiskConfig.per_symbol`)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_open_positions: int = Field(0, ge=0)
+    """Maximum concurrent positions for this symbol. 0 = unlimited."""
+
+    max_daily_loss_usd: float = Field(0.0, ge=0)
+    """Maximum realized loss in USD for this symbol per UTC day. 0 = unlimited."""
+
+
 class RiskConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_open_positions_per_strategy: int = Field(5, ge=0)
     max_daily_loss_pct: float = Field(5.0, ge=0)
     kill_switch_drawdown_pct: float = Field(20.0, ge=0)
+
+    per_symbol: dict[str, SymbolRiskConfig] = Field(default_factory=dict)
+    """Per-symbol overrides.  Keys are symbol names (e.g. ``"EURUSD"``)."""
 
 
 class MetricsConfig(BaseModel):

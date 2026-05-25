@@ -15,6 +15,7 @@ from stinger_fx.data.schemas import (
     BacktestRunRow,
     ConfigAuditRow,
     DecisionRow,
+    OrderModificationRow,
     OrderRow,
     SignalRow,
     SweepResultRow,
@@ -262,5 +263,84 @@ class SweepRepo:
                     .where(SweepResultRow.sweep_id == sweep_id)
                     .order_by(SweepResultRow.rank)
                     .limit(n)
+                )
+            )
+
+
+class OrderModificationRepo:
+    """Persist SL/TP modifications and partial-close events to SQLite.
+
+    Call ``record_modify`` when the bus emits an ``OrderModifiedEvent`` and
+    ``record_partial_close`` when it emits a ``PartialClosedEvent``.
+    """
+
+    def __init__(self, store: SqliteStore) -> None:
+        self._store = store
+
+    def record_modify(
+        self,
+        ts: datetime,
+        ticket: int,
+        strategy_id: str,
+        *,
+        old_sl: float | None,
+        new_sl: float | None,
+        old_tp: float | None,
+        new_tp: float | None,
+        reason: str = "",
+    ) -> int:
+        with self._store.session() as s:
+            row = OrderModificationRow(
+                ts=ts,
+                ticket=ticket,
+                strategy_id=strategy_id,
+                modification_type="modify_sl_tp",
+                old_sl=old_sl,
+                new_sl=new_sl,
+                old_tp=old_tp,
+                new_tp=new_tp,
+                reason=reason,
+            )
+            s.add(row)
+            s.commit()
+            s.refresh(row)
+            assert row.id is not None
+            return row.id
+
+    def record_partial_close(
+        self,
+        ts: datetime,
+        ticket: int,
+        strategy_id: str,
+        *,
+        closed_volume: float,
+        realized_pnl: float,
+        reason: str = "",
+    ) -> int:
+        with self._store.session() as s:
+            row = OrderModificationRow(
+                ts=ts,
+                ticket=ticket,
+                strategy_id=strategy_id,
+                modification_type="partial_close",
+                closed_volume=closed_volume,
+                realized_pnl=realized_pnl,
+                reason=reason,
+            )
+            s.add(row)
+            s.commit()
+            s.refresh(row)
+            assert row.id is not None
+            return row.id
+
+    def recent(self, limit: int = 100) -> list[OrderModificationRow]:
+        from sqlmodel import desc
+
+        with self._store.session() as s:
+            return list(
+                s.exec(
+                    select(OrderModificationRow)
+                    .order_by(desc(OrderModificationRow.ts))
+                    .limit(limit)
                 )
             )
