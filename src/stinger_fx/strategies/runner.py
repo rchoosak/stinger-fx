@@ -17,7 +17,8 @@ from collections import deque
 
 from stinger_fx.core.clock import Clock
 from stinger_fx.core.errors import StrategyQuarantinedError
-from stinger_fx.core.event_bus import AsyncEventBus, Subscription
+from stinger_fx.core.event_bus import AsyncEventBus
+from stinger_fx.core.event_bus import Subscription as BusSubscription
 from stinger_fx.core.events import (
     BarEvent,
     OrderFilledEvent,
@@ -26,6 +27,7 @@ from stinger_fx.core.events import (
     StrategyStateChangedEvent,
     TickEvent,
 )
+from stinger_fx.domain import Subscription
 from stinger_fx.log import get_logger
 from stinger_fx.strategies.base import BaseStrategy
 from stinger_fx.strategies.context import SignalSink, StrategyContext
@@ -66,7 +68,7 @@ class StrategyRunner:
         self._params = params
         self._magic = derive_magic(strategy_id)
         self._logger = get_logger(f"stinger.strategy.{strategy_id}")
-        self._subscriptions: list[Subscription] = []
+        self._subscriptions: list[BusSubscription] = []
         self._errors: deque[float] = deque()
         self._paused = False
         self._stopped = False
@@ -78,8 +80,8 @@ class StrategyRunner:
 
     async def start(self) -> None:
         # The strategy can declare multiple subscriptions; the first is primary
-        # and drives ctx.symbol/timeframe. Additional subs deliver events but
-        # the strategy is responsible for keying state by symbol if it cares.
+        # and drives ctx.symbol/timeframe. Additional subs get their own
+        # HistoryView so the strategy can read each feed via ctx.history_for().
         subs = self.strategy.subscriptions(self._params)
         if not subs:
             self._logger.warning("strategy declared no subscriptions; nothing to do")
@@ -94,6 +96,7 @@ class StrategyRunner:
             logger=self._logger,
             magic=self._magic,
             signal_sink=self._signal_sink,
+            subscriptions=list(subs),
         )
 
         # Subscribe to every needed feed; one bus subscription per event type
@@ -154,25 +157,41 @@ class StrategyRunner:
     # --- Event dispatch -----------------------------------------------------
 
     async def _on_tick(self, evt: TickEvent) -> None:
-        if not self._active():
+        if not self._active() or self._ctx is None:
             return
-        if self._ctx is None or evt.tick.symbol != self._ctx.symbol:
+        # Update any HistoryView whose symbol matches this tick. Multi-feed
+        # strategies with several timeframes for the same symbol get every
+        # view's last_tick refreshed in one event.
+        any_match = False
+        for sub, view in self._ctx.histories.items():
+            if sub.symbol == evt.tick.symbol:
+                view.update_tick(evt.tick)
+                any_match = True
+        if not any_match:
             return
-        self._ctx.history.update_tick(evt.tick)
-        await self._guarded(self.strategy.on_tick, self._ctx, evt.tick)
+        # on_tick fires only for the primary feed to preserve single-feed
+        # strategy ergonomics; multi-feed strategies that need every tick can
+        # iterate ctx.histories themselves on each bar.
+        if evt.tick.symbol == self._ctx.symbol:
+            await self._guarded(self.strategy.on_tick, self._ctx, evt.tick)
 
     async def _on_bar(self, evt: BarEvent) -> None:
-        if not self._active():
+        if not self._active() or self._ctx is None:
             return
-        if (
-            self._ctx is None
-            or evt.bar.symbol != self._ctx.symbol
-            or evt.bar.timeframe != self._ctx.timeframe
-        ):
+        sub = Subscription(symbol=evt.bar.symbol, timeframe=evt.bar.timeframe)
+        view = self._ctx.histories.get(sub)
+        if view is None:
+            # Not a feed this strategy declared — ignore. (Other strategies
+            # on the same bus may care.)
             return
-        self._ctx.history.append_bar(evt.bar)
-        if evt.bar.is_closed:
-            await self._guarded(self.strategy.on_bar, self._ctx, evt.bar)
+        view.append_bar(evt.bar)
+        if not evt.bar.is_closed:
+            return
+        # Fire on_bar for ANY of the strategy's declared feeds. The strategy
+        # is responsible for routing by (bar.symbol, bar.timeframe) when it
+        # cares. Back-compat for single-feed strategies is preserved because
+        # only the primary feed's bars ever arrive.
+        await self._guarded(self.strategy.on_bar, self._ctx, evt.bar)
 
     async def _on_order_filled(self, evt: OrderFilledEvent) -> None:
         if not self._active() or evt.order.strategy_id != self.id:

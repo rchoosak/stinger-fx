@@ -17,6 +17,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from stinger_fx.domain.symbols import Subscription
 from stinger_fx.domain.timeframes import Timeframe
 
 # --- App ----------------------------------------------------------------------
@@ -186,14 +187,84 @@ class StrategiesConfig(BaseModel):
 # --- Backtest -----------------------------------------------------------------
 
 
+def _coerce_feed_list(
+    *,
+    symbol: str | None,
+    timeframe: Timeframe | None,
+    symbols: list[str] | None,
+    timeframes: list[Timeframe] | None,
+    feeds: list[Subscription] | None,
+) -> list[Subscription]:
+    """Normalise a config's feed shape into a deterministic list of subscriptions.
+
+    Accepts exactly ONE of these three input shapes:
+
+      • `symbol` + `timeframe`            — legacy single-feed (Phase 1–3)
+      • `symbols` + `timeframes`          — cross product (every symbol × every tf)
+      • `feeds`                           — explicit list (mixed symbol × tf)
+
+    Mixing shapes is an error. The returned list is sorted by `(symbol, tf.value)`
+    so backtest replay is deterministic across runs.
+    """
+    sources: list[str] = []
+    if symbol is not None and timeframe is not None:
+        sources.append("singular")
+    if symbols or timeframes:
+        if not (symbols and timeframes):
+            raise ValueError(
+                "`symbols` and `timeframes` must both be supplied together"
+            )
+        sources.append("plural")
+    if feeds:
+        sources.append("feeds")
+    if not sources:
+        raise ValueError(
+            "config must declare ONE of: `symbol`+`timeframe`, "
+            "`symbols`+`timeframes`, or `feeds`"
+        )
+    if len(sources) > 1:
+        raise ValueError(
+            f"config mixes feed shapes {sources!r}; keep exactly one"
+        )
+
+    if sources == ["singular"]:
+        assert symbol is not None and timeframe is not None
+        out = [Subscription(symbol=symbol, timeframe=timeframe)]
+    elif sources == ["plural"]:
+        assert symbols is not None and timeframes is not None
+        out = [Subscription(symbol=s, timeframe=tf) for s in symbols for tf in timeframes]
+    else:
+        assert feeds is not None
+        out = list(feeds)
+
+    # Deterministic ordering for backtest replay tie-breaks.
+    out.sort(key=lambda f: (f.symbol, f.timeframe.value))
+    # Dedupe — same (symbol, tf) declared twice would only confuse the merge.
+    seen: set[tuple[str, str]] = set()
+    deduped: list[Subscription] = []
+    for f in out:
+        key = (f.symbol, f.timeframe.value)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(f)
+    return deduped
+
+
 class BacktestRunConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]+$")
     mode: Literal["file", "mt5_tester", "mt4_tester"] = "file"
     strategy_id: str
-    symbol: str
-    timeframe: Timeframe
+    # Singular (legacy, Phase 1–3) — keep optional so plural/feeds configs can omit.
+    symbol: str | None = None
+    timeframe: Timeframe | None = None
+    # Plural (Phase 4) — cross product
+    symbols: list[str] | None = None
+    timeframes: list[Timeframe] | None = None
+    # Explicit list (Phase 4) — mixed symbol/tf
+    feeds: list[Subscription] | None = None
     start: datetime
     end: datetime
     initial_balance: float = Field(10_000.0, gt=0)
@@ -206,6 +277,42 @@ class BacktestRunConfig(BaseModel):
         if v.tzinfo is None:
             raise ValueError("start/end must include a timezone (e.g. ...T00:00:00Z)")
         return v
+
+    @model_validator(mode="after")
+    def _normalise_feeds(self) -> BacktestRunConfig:
+        # Compute and stash on a private attribute; expose via `feed_list`.
+        feeds = _coerce_feed_list(
+            symbol=self.symbol,
+            timeframe=self.timeframe,
+            symbols=self.symbols,
+            timeframes=self.timeframes,
+            feeds=self.feeds,
+        )
+        # Back-fill `symbol`/`timeframe` with the primary feed so code that
+        # still reads them directly (MT5 tester, sidecar JSON, web viewer)
+        # keeps working. Pydantic frozen=False allows this; we set via
+        # __dict__ to bypass the model_validator running again.
+        object.__setattr__(self, "symbol", feeds[0].symbol)
+        object.__setattr__(self, "timeframe", feeds[0].timeframe)
+        object.__setattr__(self, "_feed_list", feeds)
+        return self
+
+    @property
+    def feed_list(self) -> list[Subscription]:
+        """Unified accessor — returns the normalised feed list regardless of
+        which input shape was supplied (singular / plural / explicit)."""
+        # `_feed_list` is set by the model_validator; if we're called before
+        # validation (shouldn't happen in practice) fall back to recomputation.
+        existing = getattr(self, "_feed_list", None)
+        if existing is not None:
+            return list(existing)
+        return _coerce_feed_list(
+            symbol=self.symbol,
+            timeframe=self.timeframe,
+            symbols=self.symbols,
+            timeframes=self.timeframes,
+            feeds=self.feeds,
+        )
 
 
 MetricName = Literal[
@@ -227,8 +334,14 @@ class SweepRunConfig(BaseModel):
 
     id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]+$")
     strategy_id: str
-    symbol: str
-    timeframe: Timeframe
+    # Singular (legacy) — optional so plural/feeds configs can omit
+    symbol: str | None = None
+    timeframe: Timeframe | None = None
+    # Plural (Phase 4)
+    symbols: list[str] | None = None
+    timeframes: list[Timeframe] | None = None
+    # Explicit list (Phase 4)
+    feeds: list[Subscription] | None = None
     start: datetime
     end: datetime
     initial_balance: float = Field(10_000.0, gt=0)
@@ -254,6 +367,33 @@ class SweepRunConfig(BaseModel):
             if not values:
                 raise ValueError(f"parameter_grid['{name}'] is empty — list one value at minimum")
         return v
+
+    @model_validator(mode="after")
+    def _normalise_feeds(self) -> SweepRunConfig:
+        feeds = _coerce_feed_list(
+            symbol=self.symbol,
+            timeframe=self.timeframe,
+            symbols=self.symbols,
+            timeframes=self.timeframes,
+            feeds=self.feeds,
+        )
+        object.__setattr__(self, "symbol", feeds[0].symbol)
+        object.__setattr__(self, "timeframe", feeds[0].timeframe)
+        object.__setattr__(self, "_feed_list", feeds)
+        return self
+
+    @property
+    def feed_list(self) -> list[Subscription]:
+        existing = getattr(self, "_feed_list", None)
+        if existing is not None:
+            return list(existing)
+        return _coerce_feed_list(
+            symbol=self.symbol,
+            timeframe=self.timeframe,
+            symbols=self.symbols,
+            timeframes=self.timeframes,
+            feeds=self.feeds,
+        )
 
 
 class BacktestConfig(BaseModel):

@@ -24,6 +24,7 @@ from stinger_fx.domain import (
     Side,
     Signal,
     SignalStrength,
+    Subscription,
     Tick,
     Timeframe,
 )
@@ -89,7 +90,13 @@ class PositionView:
 
 
 class StrategyContext:
-    """Handed to every strategy hook. One per strategy instance."""
+    """Handed to every strategy hook. One per strategy instance.
+
+    `symbol` / `timeframe` / `history` reference the *primary* feed (first
+    subscription returned by `strategy.subscriptions(params)`). Multi-feed
+    strategies access additional feeds via `ctx.history_for(symbol, tf)`
+    or by iterating `ctx.histories`.
+    """
 
     def __init__(
         self,
@@ -103,6 +110,7 @@ class StrategyContext:
         magic: int,
         signal_sink: SignalSink,
         history_capacity: int = 2000,
+        subscriptions: list[Subscription] | None = None,
     ) -> None:
         self.strategy_id = strategy_id
         self.symbol = symbol
@@ -112,8 +120,28 @@ class StrategyContext:
         self.logger = logger
         self.magic = magic
         self._signal_sink = signal_sink
-        self.history = HistoryView(symbol, timeframe, capacity=history_capacity)
         self.position = PositionView(magic)
+        # Build a HistoryView per declared subscription so multi-feed strategies
+        # can read each feed independently. The primary view stays accessible
+        # via `.history` for back-compat with single-feed strategies.
+        subs = subscriptions or [Subscription(symbol=symbol, timeframe=timeframe)]
+        self.histories: dict[Subscription, HistoryView] = {
+            sub: HistoryView(sub.symbol, sub.timeframe, capacity=history_capacity)
+            for sub in subs
+        }
+        primary_sub = Subscription(symbol=symbol, timeframe=timeframe)
+        self.history = self.histories.get(
+            primary_sub,
+            HistoryView(symbol, timeframe, capacity=history_capacity),
+        )
+        # If the primary sub wasn't in the declared subscriptions list, also
+        # register it so `_route_bar` and direct primary-feed access still work.
+        if primary_sub not in self.histories:
+            self.histories[primary_sub] = self.history
+
+    def history_for(self, symbol: str, timeframe: Timeframe) -> HistoryView | None:
+        """Look up the HistoryView for any declared (symbol, timeframe)."""
+        return self.histories.get(Subscription(symbol=symbol, timeframe=timeframe))
 
     # --- Trading helpers ----------------------------------------------------
 
