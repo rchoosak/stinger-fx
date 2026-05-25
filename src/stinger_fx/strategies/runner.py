@@ -22,12 +22,14 @@ from stinger_fx.core.event_bus import Subscription as BusSubscription
 from stinger_fx.core.events import (
     BarEvent,
     OrderFilledEvent,
+    OrderModifiedEvent,
     OrderRejectedEvent,
+    PartialClosedEvent,
     PositionClosedEvent,
     StrategyStateChangedEvent,
     TickEvent,
 )
-from stinger_fx.domain import Subscription
+from stinger_fx.domain import Position, Subscription
 from stinger_fx.log import get_logger
 from stinger_fx.strategies.base import BaseStrategy
 from stinger_fx.strategies.context import SignalSink, StrategyContext
@@ -113,6 +115,13 @@ class StrategyRunner:
         self._subscriptions.append(
             self.bus.subscribe(PositionClosedEvent, self._on_position_closed, name=f"{self.id}.close")
         )
+        # Position-state tracking for ctx.position / position managers (Phase 4)
+        self._subscriptions.append(
+            self.bus.subscribe(OrderModifiedEvent, self._on_order_modified, name=f"{self.id}.modify")
+        )
+        self._subscriptions.append(
+            self.bus.subscribe(PartialClosedEvent, self._on_partial_closed, name=f"{self.id}.partial")
+        )
 
         # User hook
         await self._guarded(self.strategy.on_start, self._ctx)
@@ -170,6 +179,14 @@ class StrategyRunner:
                 any_match = True
         if not any_match:
             return
+        # Position managers (trailing stop, break-even, …) run BEFORE the
+        # strategy's own on_tick so they can move SL before the strategy
+        # reacts to this tick. They get every same-symbol tick regardless
+        # of whether the strategy's `on_tick` would fire — managers may
+        # care about non-primary symbols (e.g. trailing on a secondary
+        # feed where the entry signal came from a different symbol).
+        for manager in self._ctx.managers:
+            await self._guarded(manager.on_tick, self._ctx, evt.tick)
         # on_tick fires only for the primary feed to preserve single-feed
         # strategy ergonomics; multi-feed strategies that need every tick can
         # iterate ctx.histories themselves on each bar.
@@ -199,6 +216,24 @@ class StrategyRunner:
             return
         if self._ctx is None:
             return
+        # Materialise an open position from the fill so ctx.position
+        # (and any attached managers) can see it.
+        o = evt.order
+        if o.fill_price is not None and o.filled_at is not None:
+            self._track_open(
+                Position(
+                    ticket=o.ticket,
+                    symbol=o.symbol,
+                    side=o.side,
+                    volume=o.filled_volume or o.volume,
+                    open_price=o.fill_price,
+                    open_time=o.filled_at,
+                    sl=o.sl,
+                    tp=o.tp,
+                    comment=o.comment,
+                    magic=o.magic,
+                )
+            )
         await self._guarded(self.strategy.on_order_filled, self._ctx, evt.order)
 
     async def _on_order_rejected(self, evt: OrderRejectedEvent) -> None:
@@ -213,7 +248,44 @@ class StrategyRunner:
             return
         if self._ctx is None:
             return
+        self._track_remove(evt.position.ticket)
         await self._guarded(self.strategy.on_position_closed, self._ctx, evt.position)
+
+    async def _on_order_modified(self, evt: OrderModifiedEvent) -> None:
+        if not self._active() or evt.position.magic != self._magic:
+            return
+        if self._ctx is None:
+            return
+        # Refresh the tracked snapshot so trailing-stop comparisons see the
+        # new SL on the next tick.
+        self._track_open(evt.position)
+
+    async def _on_partial_closed(self, evt: PartialClosedEvent) -> None:
+        if not self._active() or evt.position.magic != self._magic:
+            return
+        if self._ctx is None:
+            return
+        # `evt.position` is the remaining leg with the shrunken volume.
+        self._track_open(evt.position)
+
+    # --- Position tracking --------------------------------------------------
+
+    def _track_open(self, pos: Position) -> None:
+        """Add or refresh a tracked position. Filters by magic — only the
+        strategy's own positions go into ctx.position."""
+        if self._ctx is None or pos.magic != self._magic:
+            return
+        existing = list(self._ctx.position.all())
+        # Replace any existing entry with the same ticket
+        replaced = [p for p in existing if p.ticket != pos.ticket]
+        replaced.append(pos)
+        self._ctx.position.update(replaced)
+
+    def _track_remove(self, ticket: int) -> None:
+        if self._ctx is None:
+            return
+        existing = list(self._ctx.position.all())
+        self._ctx.position.update([p for p in existing if p.ticket != ticket])
 
     # --- Internals ----------------------------------------------------------
 

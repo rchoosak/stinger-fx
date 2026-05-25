@@ -35,6 +35,7 @@ from stinger_fx.domain import (
 
 if TYPE_CHECKING:
     from stinger_fx.core.event_bus import AsyncEventBus
+    from stinger_fx.strategies.managers.base import PositionManager
     from stinger_fx.strategies.parameters import StrategyParams
 
 SignalSink = Callable[[Signal], Awaitable[None]]
@@ -129,6 +130,9 @@ class StrategyContext:
         # Bus is needed to publish modify / partial-close requests. Optional
         # so older callers (tests that build a context manually) keep working.
         self._bus = bus
+        # Managers attached via ctx.attach_manager() — the runner dispatches
+        # on_tick to each one before the strategy's own on_tick.
+        self._managers: list[PositionManager] = []
         self.position = PositionView(magic)
         # Build a HistoryView per declared subscription so multi-feed strategies
         # can read each feed independently. The primary view stays accessible
@@ -267,6 +271,20 @@ class StrategyContext:
                 reason=reason,
             )
         )
+
+    # --- Position managers (Phase 4 C.2) --------------------------------------
+
+    def attach_manager(self, manager: PositionManager) -> None:
+        """Attach a position manager (trailing stop, break-even, …) to this
+        context. The runner forwards every `on_tick` to every attached manager
+        in attachment order *before* the strategy's own `on_tick`, so a manager
+        can move SL via `ctx.move_stop()` before the strategy sees the tick.
+        """
+        self._managers.append(manager)
+
+    @property
+    def managers(self) -> list[PositionManager]:
+        return list(self._managers)
 
     # Used by the reloader to swap params atomically
     def _replace_params(self, new_params: StrategyParams) -> None:
