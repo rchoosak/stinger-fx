@@ -97,15 +97,26 @@ class PositionClosedEvent(Event):
 
 
 class ModifyOrderRequestEvent(Event):
-    """Strategy → router request to move an existing position's SL / TP.
+    """Strategy → router request to modify an existing order.
 
-    `sl` / `tp` are the *new* absolute prices. `None` means "leave unchanged".
+    For open positions the relevant fields are ``sl`` / ``tp`` (price /
+    volume / stop_price are ignored — you can't change a position's
+    entry price post-fill).
+
+    For pending orders (Phase 6.2.D) ``price`` / ``volume`` /
+    ``stop_price`` adjust the unfilled order. ``sl`` / ``tp`` work too
+    (they'll attach to the eventual position when the order triggers).
+
+    Every field is independent: ``None`` means "leave unchanged".
     """
 
     strategy_id: str
     ticket: int
     sl: float | None = None
     tp: float | None = None
+    price: float | None = None
+    stop_price: float | None = None
+    volume: float | None = None
     reason: str = ""
 
 

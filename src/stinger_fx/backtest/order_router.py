@@ -183,14 +183,50 @@ class OrderRouter:
             )
 
     async def handle_modify(self, evt: ModifyOrderRequestEvent) -> None:
-        """Route a strategy's SL/TP modification request to the right broker.
+        """Route a strategy's modification request to the right broker.
 
-        Ownership check: the strategy can only modify a ticket whose
-        `position.magic` matches the magic derived from its own id. The
-        check uses the same `strategy_magic` mapping the signal path uses
-        to tag fills, so the two ends stay in sync.
+        Targets either an open position (SL/TP only) or a pending order
+        (price/volume/SL/TP — Phase 6.2.D). Ownership is enforced by magic.
         """
         broker = self._broker_for(evt.strategy_id)
+        expected_magic = self.strategy_magic.get(evt.strategy_id, 0)
+
+        # Phase 6.2.D — check pending orders first; if the ticket is pending
+        # we go through the broker.modify_order(price=, volume=) path.
+        pendings = await broker.get_open_orders()
+        pending = next((o for o in pendings if o.ticket == evt.ticket), None)
+        if pending is not None:
+            if pending.magic != expected_magic:
+                logger.warning(
+                    "modify_rejected_cross_strategy strategy=%s ticket=%s "
+                    "pending_magic=%s expected_magic=%s",
+                    evt.strategy_id, evt.ticket, pending.magic, expected_magic,
+                )
+                return
+            new_sl = evt.sl if evt.sl is not None else pending.sl
+            new_tp = evt.tp if evt.tp is not None else pending.tp
+            new_price = evt.price if evt.price is not None else pending.price
+            new_volume = evt.volume if evt.volume is not None else pending.volume
+            result = await broker.modify_order(
+                evt.ticket,
+                sl=new_sl,
+                tp=new_tp,
+                price=new_price,
+                volume=new_volume,
+            )
+            if not result.ok:
+                logger.warning(
+                    "modify_pending_failed strategy=%s ticket=%s reason=%s",
+                    evt.strategy_id, evt.ticket, result.message,
+                )
+                return
+            # Don't publish OrderModifiedEvent for pending modifications —
+            # that event carries a Position, which doesn't exist yet.
+            # Position-state managers care about open positions; the audit
+            # log records the request itself.
+            return
+
+        # Open position path (Phase 4 — unchanged)
         positions = await broker.get_positions()
         pos = next((p for p in positions if p.ticket == evt.ticket), None)
         if pos is None:
@@ -199,7 +235,6 @@ class OrderRouter:
                 evt.strategy_id, evt.ticket,
             )
             return
-        expected_magic = self.strategy_magic.get(evt.strategy_id, 0)
         if pos.magic != expected_magic:
             logger.warning(
                 "modify_rejected_cross_strategy strategy=%s ticket=%s "

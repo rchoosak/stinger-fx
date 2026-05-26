@@ -368,6 +368,56 @@ class StrategyContext:
             )
         )
 
+    async def move_pending(
+        self,
+        ticket: int,
+        *,
+        price: float | None = None,
+        stop_price: float | None = None,
+        volume: float | None = None,
+        sl: float | None = None,
+        tp: float | None = None,
+        reason: str = "",
+    ) -> None:
+        """Adjust a pending order's trigger price, volume, SL, or TP.
+
+        Common use cases:
+          * Chase a moving level — e.g. trail a BUY_STOP higher as the
+            underlying trend confirms
+          * Scale up/down the size of a yet-to-trigger order based on
+            updated risk budget
+          * Tighten a pending order's protective SL before it triggers
+
+        Has no effect on positions that have already filled — use
+        :meth:`move_stop` for SL/TP adjustments to open positions.
+
+        Pass any subset of fields; ``None`` means "leave unchanged".
+        Raises :class:`ValueError` when no field is supplied so the bus
+        stays quiet.
+        """
+        if all(v is None for v in (price, stop_price, volume, sl, tp)):
+            raise ValueError(
+                "move_pending requires at least one of: price, stop_price, "
+                "volume, sl, tp"
+            )
+        if self._bus is None:
+            raise RuntimeError(
+                "StrategyContext was built without a bus — move_pending "
+                "requires ctx.bus= to be set"
+            )
+        await self._bus.publish(
+            ModifyOrderRequestEvent(
+                strategy_id=self.strategy_id,
+                ticket=ticket,
+                price=price,
+                stop_price=stop_price,
+                volume=volume,
+                sl=sl,
+                tp=tp,
+                reason=reason,
+            )
+        )
+
     async def partial_close(
         self,
         ticket: int,
