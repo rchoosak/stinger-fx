@@ -57,6 +57,7 @@ def create_app(
     *,
     data_dir: Path | None = None,
     sqlite_store=None,
+    user_strategies_dir: Path | None = None,
 ) -> FastAPI:
     from stinger_fx.core.events import AccountSnapshotEvent
 
@@ -90,6 +91,12 @@ def create_app(
     # sqlite_store, if provided, enables the /audit page to read recent
     # decisions / order modifications / reconciliation mismatches.
     app.state.sqlite_store = sqlite_store
+    # user_strategies_dir, if provided, enables the /editor pages that let
+    # the operator create / edit / save Python strategy files in the
+    # browser. Defaults to None → editor returns 503 with a clear message.
+    app.state.user_strategies_dir = (
+        Path(user_strategies_dir) if user_strategies_dir is not None else None
+    )
     # Best-known time the engine entered service — used by /health.
     app.state.started_at = datetime.now().isoformat()
 
@@ -526,6 +533,130 @@ def create_app(
                 "has_store": store is not None,
             },
         )
+
+    # --- Strategy code editor (Phase 6.4.D) ------------------------------
+
+    def _require_editor_dir() -> Path:
+        d = app.state.user_strategies_dir
+        if d is None:
+            raise HTTPException(
+                503,
+                "strategy editor disabled: pass user_strategies_dir to create_app",
+            )
+        return d
+
+    @app.get("/editor", response_class=HTMLResponse)
+    async def editor_index(request: Request):
+        from stinger_fx.ui.web.strategy_editor import list_strategies
+
+        d = _require_editor_dir()
+        # Create on first access so the directory exists for new scaffolds
+        d.mkdir(parents=True, exist_ok=True)
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="editor_list.html",
+            context={
+                "names": list_strategies(d),
+                "user_dir": str(d),
+            },
+        )
+
+    @app.get("/editor/{name}", response_class=HTMLResponse)
+    async def editor_view(name: str, request: Request):
+        from stinger_fx.ui.web.strategy_editor import is_safe_name, resolve_path
+
+        d = _require_editor_dir()
+        if not is_safe_name(name):
+            raise HTTPException(400, f"invalid strategy name: {name!r}")
+        try:
+            path = resolve_path(d, name)
+        except ValueError as e:
+            raise HTTPException(403, str(e)) from e
+        if not path.exists():
+            raise HTTPException(404, f"strategy file not found: {name}")
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="editor_view.html",
+            context={"name": name, "filename": path.name},
+        )
+
+    @app.get("/editor/{name}/source")
+    async def editor_get_source(name: str):
+        from fastapi.responses import PlainTextResponse
+
+        from stinger_fx.ui.web.strategy_editor import is_safe_name, resolve_path
+
+        d = _require_editor_dir()
+        if not is_safe_name(name):
+            raise HTTPException(400, f"invalid strategy name: {name!r}")
+        try:
+            path = resolve_path(d, name)
+        except ValueError as e:
+            raise HTTPException(403, str(e)) from e
+        if not path.exists():
+            raise HTTPException(404, f"strategy file not found: {name}")
+        return PlainTextResponse(path.read_text())
+
+    @app.put("/editor/{name}/source")
+    async def editor_put_source(name: str, request: Request):
+        from fastapi.responses import JSONResponse
+
+        from stinger_fx.ui.web.strategy_editor import (
+            is_safe_name,
+            resolve_path,
+            validate_source,
+        )
+
+        d = _require_editor_dir()
+        if not is_safe_name(name):
+            raise HTTPException(400, f"invalid strategy name: {name!r}")
+        try:
+            path = resolve_path(d, name)
+        except ValueError as e:
+            raise HTTPException(403, str(e)) from e
+        body = (await request.body()).decode("utf-8")
+        err = validate_source(body)
+        if err is not None:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": err.message,
+                    "line": err.line,
+                    "column": err.column,
+                },
+                status_code=400,
+            )
+        d.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+        return JSONResponse({"ok": True, "name": name, "bytes": len(body)})
+
+    @app.post("/editor/new")
+    async def editor_new(request: Request):
+        from fastapi.responses import JSONResponse
+
+        from stinger_fx.ui.web.strategy_editor import (
+            is_safe_name,
+            resolve_path,
+            scaffold_source,
+        )
+
+        d = _require_editor_dir()
+        form = await request.form()
+        name = str(form.get("name", "")).strip().lower()
+        if not is_safe_name(name):
+            raise HTTPException(
+                400,
+                "name must match [a-z][a-z0-9_]* (lowercase letters / digits / underscores)",
+            )
+        try:
+            path = resolve_path(d, name)
+        except ValueError as e:
+            raise HTTPException(403, str(e)) from e
+        if path.exists():
+            raise HTTPException(409, f"strategy {name!r} already exists")
+        d.mkdir(parents=True, exist_ok=True)
+        path.write_text(scaffold_source(name))
+        return JSONResponse({"ok": True, "name": name, "path": str(path)})
 
     # --- Control plane ---------------------------------------------------
     # Two tiny endpoints the `--detach` flow leans on. They're broker- and

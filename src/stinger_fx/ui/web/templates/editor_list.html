@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Strategy editor · Stinger-Fx{% endblock %}
+{% block content %}
+<section class="panel widest">
+  <h2>Strategy editor</h2>
+  <p class="muted">Files in <code>{{ user_dir }}</code>. Hot-reload picks up saved changes automatically.</p>
+
+  <div style="margin: 16px 0;">
+    <form id="new-form" onsubmit="event.preventDefault(); newStrategy();">
+      <input id="new-name" type="text" placeholder="new_strategy_name"
+             pattern="[a-z][a-z0-9_]*" required
+             style="background: #0d1117; color: #e6edf3; border: 1px solid #30363d;
+                    padding: 4px 8px; border-radius: 3px; width: 240px;" />
+      <button type="submit">Create new</button>
+      <span class="muted small">name: lowercase letters / digits / underscores</span>
+    </form>
+    <div id="new-error" class="error-banner" style="display: none; margin-top: 8px;"></div>
+  </div>
+
+  {% if names %}
+  <table class="audit-table">
+    <thead><tr><th>Name</th><th></th></tr></thead>
+    <tbody>
+      {% for name in names %}
+      <tr>
+        <td><code>{{ name }}</code></td>
+        <td><a class="btn-link" href="/editor/{{ name }}">Edit →</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No strategies yet. Create one above to get started.</p>
+  {% endif %}
+</section>
+
+<script>
+async function newStrategy() {
+  const name = document.getElementById("new-name").value.trim();
+  const errBox = document.getElementById("new-error");
+  errBox.style.display = "none";
+  const fd = new FormData();
+  fd.append("name", name);
+  const r = await fetch("/editor/new", { method: "POST", body: fd });
+  if (r.ok) {
+    window.location.href = `/editor/${name}`;
+  } else {
+    const t = await r.text();
+    errBox.textContent = `⚠️ ${t}`;
+    errBox.style.display = "block";
+  }
+}
+</script>
+{% endblock %}
