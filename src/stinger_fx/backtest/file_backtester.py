@@ -275,6 +275,11 @@ class FileBacktester(BaseBacktester):
             for pos in broker.check_sl_tp_tick(tick.symbol, tick.bid, tick.ask):
                 await broker.close_position(pos.ticket)
 
+            # Phase 6.2.A — pending orders (BUY/SELL STOP & LIMIT). Triggered
+            # orders are promoted to positions and emit OrderFilledEvent —
+            # the strategy sees them via its on_order_filled hook.
+            await broker.check_pending(tick.symbol, tick.bid, tick.ask)
+
             await bus.publish(TickEvent(tick=tick))
             # Drain — fewer than bar mode because per-tick strategy work is
             # usually a no-op until the aggregator publishes a closed bar.

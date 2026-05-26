@@ -18,7 +18,9 @@ from stinger_fx.backtest.slippage import SlippageModel, fixed_pips_model, fixed_
 from stinger_fx.brokers.base import BaseBroker
 from stinger_fx.core.event_bus import AsyncEventBus
 from stinger_fx.core.events import (
+    OrderCancelledEvent,
     OrderFilledEvent,
+    OrderSubmittedEvent,
     PartialClosedEvent,
     PositionClosedEvent,
 )
@@ -37,6 +39,27 @@ from stinger_fx.domain import (
 )
 
 logger = logging.getLogger("stinger.backtest.sim_broker")
+
+
+def _pending_triggered(order: "Order", bid: float, ask: float) -> bool:
+    """Return True when current bid/ask triggers this pending order."""
+    if order.price is None:
+        return False
+    if order.type is OrderType.STOP:
+        if order.side is Side.BUY:
+            return ask >= order.price
+        return bid <= order.price
+    if order.type is OrderType.LIMIT:
+        if order.side is Side.BUY:
+            return ask <= order.price
+        return bid >= order.price
+    if order.type is OrderType.STOP_LIMIT:
+        # Phase 6.2.A treats STOP_LIMIT like STOP — full two-stage behaviour
+        # (stop triggers a limit order) is deferred since MT5 brokers vary.
+        if order.side is Side.BUY:
+            return ask >= order.price
+        return bid <= order.price
+    return False
 
 
 class SimBroker(BaseBroker):
@@ -59,6 +82,10 @@ class SimBroker(BaseBroker):
         self._point = point
         self._next_ticket = 1
         self._positions: dict[int, Position] = {}
+        # Phase 6.2.A — pending orders (BUY/SELL STOP & LIMIT) waiting on a
+        # trigger price. Key is ticket; check_pending() iterates this dict
+        # every tick and promotes triggered orders into open positions.
+        self._pending: dict[int, Order] = {}
         self._sim_time: datetime = datetime.now(UTC)
         # Per-symbol bid/ask — set by advance_market(). `_last_price` kept for
         # backward compat (check_sl_tp uses it as a mark-to-market reference).
@@ -182,12 +209,6 @@ class SimBroker(BaseBroker):
         return TICK_SCHEMA.empty_table()
 
     async def place_order(self, req: OrderRequest) -> OrderResult:
-        if req.type != OrderType.MARKET:
-            return OrderResult(
-                ok=False,
-                status=OrderStatus.REJECTED,
-                message=f"sim broker supports MARKET only (got {req.type})",
-            )
         bid = self._last_bid.get(req.symbol)
         ask = self._last_ask.get(req.symbol)
         if bid is None or ask is None:
@@ -196,6 +217,43 @@ class SimBroker(BaseBroker):
                 status=OrderStatus.REJECTED,
                 message=f"no market price for {req.symbol}",
             )
+
+        # --- Pending orders (Phase 6.2.A) -----------------------------------
+        # Anything that's not MARKET gets parked in self._pending and lives
+        # until either check_pending() triggers it (price crossed) or
+        # cancel_order() removes it.
+        if req.type != OrderType.MARKET:
+            if req.price is None:
+                return OrderResult(
+                    ok=False,
+                    status=OrderStatus.REJECTED,
+                    message=f"{req.type.value} order requires a price",
+                )
+            ticket = self._next_ticket
+            self._next_ticket += 1
+            pending = Order(
+                ticket=ticket,
+                strategy_id=req.strategy_id,
+                symbol=req.symbol,
+                side=req.side,
+                type=req.type,
+                volume=req.volume,
+                price=req.price,
+                sl=req.sl,
+                tp=req.tp,
+                status=OrderStatus.SUBMITTED,
+                comment=req.comment,
+                magic=req.magic,
+                client_order_id=req.client_order_id,
+                requested_at=self._sim_time,
+            )
+            self._pending[ticket] = pending
+            await self.bus.publish(OrderSubmittedEvent(order=pending))
+            return OrderResult(
+                ok=True, ticket=ticket, status=OrderStatus.SUBMITTED, order=pending
+            )
+
+        # --- Market orders (unchanged) --------------------------------------
         fill_price = self._slippage_fn(req.side, bid=bid, ask=ask)
         mid = (bid + ask) / 2
         ticket = self._next_ticket
@@ -235,6 +293,60 @@ class SimBroker(BaseBroker):
         )
         await self.bus.publish(OrderFilledEvent(order=order))
         return OrderResult(ok=True, ticket=ticket, status=OrderStatus.FILLED, order=order)
+
+    async def check_pending(self, symbol: str, bid: float, ask: float) -> list[Order]:
+        """Trigger any pending orders whose conditions are met by the current
+        bid/ask. Returns the list of orders that fired (for telemetry / tests).
+
+        Trigger semantics (consistent with MT5 conventions):
+          * BUY_STOP   — fires when ask reaches/exceeds the stop price
+          * SELL_STOP  — fires when bid falls to/below the stop price
+          * BUY_LIMIT  — fires when ask falls to/below the limit price
+          * SELL_LIMIT — fires when bid rises to/exceeds the limit price
+
+        Fill price:
+          * STOP orders convert to MARKET on trigger → slippage applied
+          * LIMIT orders fill exactly at the limit price (the strategy
+            specified that as their worst acceptable price)
+        """
+        triggered: list[Order] = []
+        for ticket, pending in list(self._pending.items()):
+            if pending.symbol != symbol:
+                continue
+            if not _pending_triggered(pending, bid, ask):
+                continue
+            # Compute fill price
+            if pending.type in (OrderType.LIMIT, OrderType.STOP_LIMIT):
+                fill_price = pending.price or bid
+            else:
+                # STOP → market-style fill with slippage
+                fill_price = self._slippage_fn(pending.side, bid=bid, ask=ask)
+
+            # Promote to position
+            pos = Position(
+                ticket=ticket,
+                symbol=pending.symbol,
+                side=pending.side,
+                volume=pending.volume,
+                open_price=fill_price,
+                open_time=self._sim_time,
+                sl=pending.sl,
+                tp=pending.tp,
+                comment=pending.comment,
+                magic=pending.magic,
+            )
+            self._positions[ticket] = pos
+            del self._pending[ticket]
+
+            filled = pending.model_copy(update={
+                "status": OrderStatus.FILLED,
+                "filled_volume": pending.volume,
+                "fill_price": fill_price,
+                "filled_at": self._sim_time,
+            })
+            triggered.append(filled)
+            await self.bus.publish(OrderFilledEvent(order=filled))
+        return triggered
 
     async def modify_order(
         self,
@@ -315,14 +427,22 @@ class SimBroker(BaseBroker):
         return OrderResult(ok=True, ticket=ticket, status=OrderStatus.FILLED)
 
     async def cancel_order(self, ticket: int) -> OrderResult:
-        # No pending orders in the sim — only market fills.
-        return OrderResult(ok=False, status=OrderStatus.REJECTED, message="no pending orders")
+        pending = self._pending.pop(ticket, None)
+        if pending is None:
+            return OrderResult(
+                ok=False, status=OrderStatus.REJECTED, message="no pending order with that ticket"
+            )
+        cancelled = pending.model_copy(update={"status": OrderStatus.CANCELLED})
+        await self.bus.publish(OrderCancelledEvent(order=cancelled))
+        return OrderResult(
+            ok=True, ticket=ticket, status=OrderStatus.CANCELLED, order=cancelled
+        )
 
     async def get_positions(self) -> list[Position]:
         return list(self._positions.values())
 
     async def get_open_orders(self) -> list[Order]:
-        return []
+        return list(self._pending.values())
 
     # --- Backtest helpers ---------------------------------------------------
 
