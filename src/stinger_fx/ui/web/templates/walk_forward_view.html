@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}{{ wf_id }} · Walk-forward · Stinger-Fx{% endblock %}
+{% block content %}
+<section class="panel widest">
+  <h2>{{ wf_id }} · {{ summary.strategy_id }}</h2>
+  <p class="muted">
+    {{ summary.scheme }} scheme · {{ summary.n_folds }} folds ·
+    rank by <span class="badge">{{ summary.rank_by }}</span> ·
+    finished {{ summary.finished_at[:19] | replace("T", " ") }}
+  </p>
+  <p>
+    <strong>Consistency score:</strong>
+    {% if summary.consistency_score is not none %}
+      <span class="{% if summary.consistency_score >= 0.5 %}badge badge-placed{% elif summary.consistency_score < 0 %}badge badge-warn{% else %}badge{% endif %}">
+        {{ "%+.3f"|format(summary.consistency_score) }}
+      </span>
+    {% else %}—{% endif %}
+    <span class="muted small">(IS↔OOS Pearson; +1 = generalises, &lt;0 = overfit)</span>
+  </p>
+  <p>
+    <strong>Avg OOS {{ summary.rank_by }}:</strong>
+    {% if summary.avg_oos_metric is not none %}{{ "%.4f"|format(summary.avg_oos_metric) }}{% else %}—{% endif %}
+  </p>
+</section>
+
+<section class="panel widest">
+  <h3>Folds</h3>
+  <table class="audit-table">
+    <thead><tr>
+      <th>#</th><th>In-sample window</th><th>OOS window</th>
+      <th>Best params</th><th>IS {{ summary.rank_by }}</th><th>OOS {{ summary.rank_by }}</th>
+    </tr></thead>
+    <tbody>
+      {% for f in summary.folds %}
+      <tr>
+        <td><code>{{ f.index }}</code></td>
+        <td class="muted small">{{ f.in_sample[0][:19] | replace("T", " ") }} → {{ f.in_sample[1][:19] | replace("T", " ") }}</td>
+        <td class="muted small">{{ f.out_of_sample[0][:19] | replace("T", " ") }} → {{ f.out_of_sample[1][:19] | replace("T", " ") }}</td>
+        <td>{% for k, v in f.best_params.items() %}<code>{{ k }}={{ v }}</code>{% if not loop.last %} · {% endif %}{% endfor %}</td>
+        <td>{{ "%.4f"|format(f.in_sample_metrics[summary.rank_by]) if f.in_sample_metrics[summary.rank_by] is not none else "—" }}</td>
+        <td>{{ "%.4f"|format(f.oos_metrics[summary.rank_by]) if f.oos_metrics[summary.rank_by] is not none else "—" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel widest">
+  <h3>IS vs OOS · {{ summary.rank_by }} per fold</h3>
+  <div class="chart-wrap">
+    <canvas id="wf-chart" height="300"></canvas>
+  </div>
+</section>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script>
+(function () {
+  const folds = {{ summary.folds | tojson | safe }};
+  const rank = {{ summary.rank_by | tojson | safe }};
+  const labels = folds.map(f => `Fold ${f.index}`);
+  const isVals = folds.map(f => f.in_sample_metrics[rank]);
+  const oosVals = folds.map(f => f.oos_metrics[rank]);
+  const ctx = document.getElementById("wf-chart").getContext("2d");
+  new Chart(ctx, {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [
+        { label: "In-sample", data: isVals, backgroundColor: "#58a6ff" },
+        { label: "Out-of-sample", data: oosVals, backgroundColor: "#3fb950" },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        x: { ticks: { color: "#8b949e" }, grid: { color: "#21262d" } },
+        y: { ticks: { color: "#8b949e" }, grid: { color: "#21262d" } },
+      },
+      plugins: { legend: { labels: { color: "#e6edf3" } } },
+    },
+  });
+})();
+</script>
+
+<p class="muted"><a href="/walkforward">← back to walk-forward list</a></p>
+{% endblock %}

@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Walk-forward · Stinger-Fx{% endblock %}
+{% block content %}
+<section class="panel widest">
+  <h2>Walk-forward runs</h2>
+  <p class="muted">Out-of-sample consistency of strategies — high score = generalises.</p>
+  {% if runs %}
+  <table class="audit-table">
+    <thead><tr>
+      <th>Run</th><th>Strategy</th><th>Scheme</th><th>Folds</th>
+      <th>Rank by</th><th>Consistency</th><th>Avg OOS</th><th>Finished</th>
+    </tr></thead>
+    <tbody>
+      {% for r in runs %}
+      <tr>
+        <td><a href="/walkforward/{{ r.wf_id }}"><code>{{ r.wf_id }}</code></a></td>
+        <td>{{ r.strategy_id }}</td>
+        <td><span class="badge">{{ r.scheme }}</span></td>
+        <td>{{ r.n_folds }}</td>
+        <td>{{ r.rank_by }}</td>
+        <td>
+          {% if r.consistency_score is not none %}
+            {{ "%+.2f"|format(r.consistency_score) }}
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          {% if r.avg_oos_metric is not none %}
+            {{ "%.2f"|format(r.avg_oos_metric) }}
+          {% else %}—{% endif %}
+        </td>
+        <td class="muted small">{{ r.finished_at[:19] | replace("T", " ") }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No walk-forward runs yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

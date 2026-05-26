@@ -382,6 +382,82 @@ def create_app(
         candles = _load_replay_candles(app.state.data_dir, run_id)
         return JSONResponse({"candles": candles})
 
+    @app.get("/backtest/{run_id}/monte_carlo.json")
+    async def backtest_monte_carlo(run_id: str, n: int = 500, seed: int | None = None):
+        """Run a Monte Carlo bootstrap over this run's trade list (Phase 6.3.D).
+
+        Returns percentile bands for net_pnl, max_drawdown, sharpe plus
+        an equity-curve envelope (5th/50th/95th). The result isn't cached
+        — each call re-runs the simulation. ``n`` capped at 5000 to keep
+        latency bounded; ``seed`` lets the operator reproduce a band.
+        """
+        from fastapi.responses import JSONResponse
+
+        from stinger_fx.backtest.monte_carlo import run_monte_carlo
+
+        data = _load_replay_data(app.state.data_dir, run_id)
+        if data is None:
+            raise HTTPException(404, f"no backtest run with id {run_id!r}")
+        trades = data["meta"].get("trades", [])
+        if not trades:
+            return JSONResponse({"error": "no trades to bootstrap", "n_trades": 0})
+        pnls = [float(t.get("pnl", 0.0)) for t in trades]
+        n_sims = min(max(n, 10), 5000)
+        result = run_monte_carlo(
+            pnls,
+            n_simulations=n_sims,
+            initial_balance=float(data["meta"].get("initial_balance", 10_000.0)),
+            random_seed=seed,
+        )
+        return JSONResponse(result.to_json())
+
+    # --- Sweep + walk-forward viewers (Phase 6.3.D) ----------------------
+
+    @app.get("/sweep", response_class=HTMLResponse)
+    async def sweep_list(request: Request):
+        runs = _list_sweep_runs(app.state.data_dir)
+        return TEMPLATES.TemplateResponse(
+            request=request, name="sweep_list.html", context={"runs": runs}
+        )
+
+    @app.get("/sweep/{sweep_id}", response_class=HTMLResponse)
+    async def sweep_view(sweep_id: str, request: Request):
+        data = _load_sweep_summary(app.state.data_dir, sweep_id)
+        if data is None:
+            raise HTTPException(404, f"no sweep run with id {sweep_id!r}")
+        # Detect 2-param case — enables a heatmap; otherwise show ranked table only
+        best = data.get("best_params") or {}
+        param_keys = sorted(best.keys()) if best else []
+        is_2d = len(param_keys) == 2
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="sweep_view.html",
+            context={
+                "sweep_id": sweep_id,
+                "summary": data,
+                "is_2d": is_2d,
+                "param_keys": param_keys,
+            },
+        )
+
+    @app.get("/walkforward", response_class=HTMLResponse)
+    async def wf_list(request: Request):
+        runs = _list_walk_forward_runs(app.state.data_dir)
+        return TEMPLATES.TemplateResponse(
+            request=request, name="walk_forward_list.html", context={"runs": runs}
+        )
+
+    @app.get("/walkforward/{wf_id}", response_class=HTMLResponse)
+    async def wf_view(wf_id: str, request: Request):
+        data = _load_walk_forward_summary(app.state.data_dir, wf_id)
+        if data is None:
+            raise HTTPException(404, f"no walk-forward run with id {wf_id!r}")
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="walk_forward_view.html",
+            context={"wf_id": wf_id, "summary": data},
+        )
+
     # --- Audit / reconciliation (Phase 6.1.D) ----------------------------
 
     @app.get("/audit", response_class=HTMLResponse)
@@ -678,3 +754,77 @@ def _load_replay_data(data_dir: Path, run_id: str) -> dict | None:
         except Exception as e:  # noqa: BLE001
             logger.warning("equity curve read failed run_id=%s err=%s", run_id, e)
     return {"meta": meta, "metrics": metrics, "equity": equity}
+
+
+# --- Sweep + walk-forward summary helpers (Phase 6.3.D) ---------------------
+
+
+def _list_sweep_runs(data_dir: Path) -> list[dict]:
+    """Enumerate ``<data_dir>/sweeps/*_summary.json`` files."""
+    sweep_dir = data_dir / "sweeps"
+    if not sweep_dir.is_dir():
+        return []
+    out: list[dict] = []
+    for path in sorted(sweep_dir.glob("*_summary.json")):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        out.append(
+            {
+                "sweep_id": data.get("sweep_id", path.stem.removesuffix("_summary")),
+                "strategy_id": data.get("strategy_id", "—"),
+                "total_combos": data.get("total_combos", 0),
+                "rank_by": data.get("rank_by", "—"),
+                "best_metric_value": data.get("best_metric_value"),
+                "finished_at": data.get("finished_at", ""),
+            }
+        )
+    out.sort(key=lambda r: r["finished_at"], reverse=True)
+    return out
+
+
+def _load_sweep_summary(data_dir: Path, sweep_id: str) -> dict | None:
+    path = data_dir / "sweeps" / f"{sweep_id}_summary.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _list_walk_forward_runs(data_dir: Path) -> list[dict]:
+    wf_dir = data_dir / "walk_forward"
+    if not wf_dir.is_dir():
+        return []
+    out: list[dict] = []
+    for path in sorted(wf_dir.glob("*_summary.json")):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        out.append(
+            {
+                "wf_id": data.get("id", path.stem.removesuffix("_summary")),
+                "strategy_id": data.get("strategy_id", "—"),
+                "scheme": data.get("scheme", "—"),
+                "n_folds": data.get("n_folds", 0),
+                "rank_by": data.get("rank_by", "—"),
+                "consistency_score": data.get("consistency_score"),
+                "avg_oos_metric": data.get("avg_oos_metric"),
+                "finished_at": data.get("finished_at", ""),
+            }
+        )
+    out.sort(key=lambda r: r["finished_at"], reverse=True)
+    return out
+
+
+def _load_walk_forward_summary(data_dir: Path, wf_id: str) -> dict | None:
+    path = data_dir / "walk_forward" / f"{wf_id}_summary.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
