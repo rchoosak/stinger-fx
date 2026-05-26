@@ -128,8 +128,9 @@ class OrderRouter:
             strategy_id=signal.strategy_id,
             symbol=signal.symbol,
             side=signal.side,
-            type=OrderType.MARKET,
+            type=signal.order_type,
             volume=volume,
+            price=signal.suggested_price,
             sl=signal.suggested_sl,
             tp=signal.suggested_tp,
             comment=signal.comment,
@@ -150,9 +151,15 @@ class OrderRouter:
             result = await self.queue.submit(req, broker)
         else:
             result = await broker.place_order(req)
-        if result.ok and result.order is not None:
+        if result.ok and result.order is not None and result.status == OrderStatus.FILLED:
+            # Market orders fill immediately — emit OrderFilledEvent.
             await self.bus.publish(OrderFilledEvent(order=result.order))
-        else:
+        elif result.ok and result.status == OrderStatus.SUBMITTED:
+            # Pending order placed (Phase 6.2.B) — the broker already emitted
+            # OrderSubmittedEvent. Strategy will see OrderFilledEvent later
+            # when check_pending() promotes it to a position. Nothing to do here.
+            pass
+        elif not result.ok:
             await self.bus.publish(
                 OrderRejectedEvent(
                     order=Order(
@@ -160,8 +167,9 @@ class OrderRouter:
                         strategy_id=signal.strategy_id,
                         symbol=signal.symbol,
                         side=signal.side,
-                        type=OrderType.MARKET,
+                        type=signal.order_type,
                         volume=volume,
+                        price=signal.suggested_price,
                         sl=signal.suggested_sl,
                         tp=signal.suggested_tp,
                         status=OrderStatus.REJECTED,

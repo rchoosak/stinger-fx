@@ -25,6 +25,7 @@ from stinger_fx.core.events import (
 from stinger_fx.domain import (
     Bar,
     OrderRequest,
+    OrderType,
     Position,
     Side,
     Signal,
@@ -205,6 +206,129 @@ class StrategyContext:
 
     async def submit_signal(self, signal: Signal) -> None:
         await self._signal_sink(signal)
+
+    # --- Pending-order helpers (Phase 6.2.B) --------------------------------
+
+    async def buy_stop(
+        self,
+        price: float,
+        volume: float,
+        *,
+        sl: float | None = None,
+        tp: float | None = None,
+        comment: str = "",
+    ) -> None:
+        """Place a BUY STOP — fills when ask reaches/exceeds ``price``.
+
+        Used for breakout entries: buy above resistance once price confirms
+        the move.  The pending order survives across ticks until either
+        ``price`` is crossed or the strategy cancels it.
+        """
+        await self.submit_signal(
+            Signal(
+                strategy_id=self.strategy_id,
+                time=self.clock.now(),
+                symbol=self.symbol,
+                side=Side.BUY,
+                strength=SignalStrength.NORMAL,
+                suggested_volume=volume,
+                suggested_sl=sl,
+                suggested_tp=tp,
+                order_type=OrderType.STOP,
+                suggested_price=price,
+                comment=comment,
+            )
+        )
+
+    async def sell_stop(
+        self,
+        price: float,
+        volume: float,
+        *,
+        sl: float | None = None,
+        tp: float | None = None,
+        comment: str = "",
+    ) -> None:
+        """Place a SELL STOP — fills when bid falls to/below ``price``.
+
+        Used for breakdown entries: sell below support once price confirms.
+        """
+        await self.submit_signal(
+            Signal(
+                strategy_id=self.strategy_id,
+                time=self.clock.now(),
+                symbol=self.symbol,
+                side=Side.SELL,
+                strength=SignalStrength.NORMAL,
+                suggested_volume=volume,
+                suggested_sl=sl,
+                suggested_tp=tp,
+                order_type=OrderType.STOP,
+                suggested_price=price,
+                comment=comment,
+            )
+        )
+
+    async def buy_limit(
+        self,
+        price: float,
+        volume: float,
+        *,
+        sl: float | None = None,
+        tp: float | None = None,
+        comment: str = "",
+    ) -> None:
+        """Place a BUY LIMIT — fills when ask falls to/below ``price``.
+
+        Used for pullback entries: buy at a target price below the
+        current market.  Fills exactly at ``price`` (limit guarantees
+        worst-case execution).
+        """
+        await self.submit_signal(
+            Signal(
+                strategy_id=self.strategy_id,
+                time=self.clock.now(),
+                symbol=self.symbol,
+                side=Side.BUY,
+                strength=SignalStrength.NORMAL,
+                suggested_volume=volume,
+                suggested_sl=sl,
+                suggested_tp=tp,
+                order_type=OrderType.LIMIT,
+                suggested_price=price,
+                comment=comment,
+            )
+        )
+
+    async def sell_limit(
+        self,
+        price: float,
+        volume: float,
+        *,
+        sl: float | None = None,
+        tp: float | None = None,
+        comment: str = "",
+    ) -> None:
+        """Place a SELL LIMIT — fills when bid rises to/exceeds ``price``.
+
+        Used for sell-the-rally entries: sell at a target price above
+        the current market.  Fills exactly at ``price``.
+        """
+        await self.submit_signal(
+            Signal(
+                strategy_id=self.strategy_id,
+                time=self.clock.now(),
+                symbol=self.symbol,
+                side=Side.SELL,
+                strength=SignalStrength.NORMAL,
+                suggested_volume=volume,
+                suggested_sl=sl,
+                suggested_tp=tp,
+                order_type=OrderType.LIMIT,
+                suggested_price=price,
+                comment=comment,
+            )
+        )
 
     # --- Position management (Phase 4 — modify / partial close) ---------------
 

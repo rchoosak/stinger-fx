@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from stinger_fx.domain.orders import OrderType
 from stinger_fx.domain.positions import Side
 
 
@@ -21,6 +22,14 @@ class Signal(BaseModel):
     """A strategy's recommendation — not yet an order.
 
     The OrderRouter validates risk + dedupes, then turns this into an OrderRequest.
+
+    Pending-order fields (Phase 6.2.B):
+      * ``order_type``           — defaults to MARKET; set to STOP / LIMIT /
+                                   STOP_LIMIT to request a pending order
+      * ``suggested_price``      — trigger price for STOP / LIMIT orders
+                                   (required when ``order_type != MARKET``)
+      * ``suggested_stop_price`` — extra price for STOP_LIMIT (the "limit"
+                                   leg that activates after the stop fires)
     """
 
     model_config = ConfigDict(frozen=True)
@@ -33,6 +42,9 @@ class Signal(BaseModel):
     suggested_volume: float | None = None
     suggested_sl: float | None = None
     suggested_tp: float | None = None
+    order_type: OrderType = OrderType.MARKET
+    suggested_price: float | None = None
+    suggested_stop_price: float | None = None
     comment: str = ""
     extra: dict[str, Any] = Field(default_factory=dict)
 
