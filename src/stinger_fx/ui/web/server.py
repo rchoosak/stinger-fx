@@ -56,6 +56,7 @@ def create_app(
     handle: EngineHandle,
     *,
     data_dir: Path | None = None,
+    sqlite_store=None,
 ) -> FastAPI:
     from stinger_fx.core.events import AccountSnapshotEvent
 
@@ -86,6 +87,9 @@ def create_app(
     app.state.latest_snapshot = None
     # data_dir lets the backtest views resolve <run_id>_trades.json etc.
     app.state.data_dir = Path(data_dir or "./data")
+    # sqlite_store, if provided, enables the /audit page to read recent
+    # decisions / order modifications / reconciliation mismatches.
+    app.state.sqlite_store = sqlite_store
     # Best-known time the engine entered service — used by /health.
     app.state.started_at = datetime.now().isoformat()
 
@@ -377,6 +381,75 @@ def create_app(
 
         candles = _load_replay_candles(app.state.data_dir, run_id)
         return JSONResponse({"candles": candles})
+
+    # --- Audit / reconciliation (Phase 6.1.D) ----------------------------
+
+    @app.get("/audit", response_class=HTMLResponse)
+    async def audit(request: Request):
+        """Render decisions + modifications + reconciliation mismatches.
+
+        Read-only operator view. Pulls recent rows from each table; HTMX
+        polls the page periodically. When no SqliteStore is configured the
+        tables show "—".
+        """
+        store = getattr(app.state, "sqlite_store", None)
+        decisions: list[dict] = []
+        modifications: list[dict] = []
+        mismatches: list[dict] = []
+        if store is not None:
+            from stinger_fx.data.repositories import (
+                OrderModificationRepo,
+                ReconciliationRepo,
+            )
+            from stinger_fx.data.schemas import DecisionRow
+            from sqlmodel import desc, select as _select
+
+            with store.session() as s:
+                d_rows = list(
+                    s.exec(
+                        _select(DecisionRow).order_by(desc(DecisionRow.ts)).limit(50)
+                    )
+                )
+                decisions = [
+                    {
+                        "ts": r.ts.isoformat() if hasattr(r.ts, "isoformat") else str(r.ts),
+                        "action": r.action,
+                        "reason": r.reason,
+                    }
+                    for r in d_rows
+                ]
+            for row in OrderModificationRepo(store).recent(50):
+                modifications.append(
+                    {
+                        "ts": row.ts.isoformat() if hasattr(row.ts, "isoformat") else str(row.ts),
+                        "ticket": row.ticket,
+                        "strategy_id": row.strategy_id,
+                        "type": row.modification_type,
+                        "reason": row.reason,
+                    }
+                )
+            for row in ReconciliationRepo(store).recent(50):
+                mismatches.append(
+                    {
+                        "ts": row.ts.isoformat() if hasattr(row.ts, "isoformat") else str(row.ts),
+                        "ticket": row.ticket,
+                        "strategy_id": row.strategy_id,
+                        "type": row.mismatch_type,
+                        "expected": row.expected_value,
+                        "actual": row.actual_value,
+                        "details": row.details,
+                    }
+                )
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="audit.html",
+            context={
+                "decisions": decisions,
+                "modifications": modifications,
+                "mismatches": mismatches,
+                "has_store": store is not None,
+            },
+        )
 
     # --- Control plane ---------------------------------------------------
     # Two tiny endpoints the `--detach` flow leans on. They're broker- and

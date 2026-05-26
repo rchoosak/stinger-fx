@@ -184,6 +184,36 @@ class PendingOrderRequestRow(SQLModel, table=True):
     completed_at: datetime | None = None
 
 
+class ReconciliationRow(SQLModel, table=True):
+    """One row per detected mismatch between broker state and internal DB.
+
+    Written by the ``Reconciler`` after every OrderFilledEvent. ``mismatch_type``
+    is one of:
+
+      * ``"position_missing"`` — the order filled but broker doesn't show the
+        position (broker amnesia, partial-fill rounding, or our magic-number
+        mismatch — needs investigation)
+      * ``"volume_drift"``     — broker reports a different volume than what
+        we filled (partial close we missed, broker rejected fill silently)
+      * ``"price_drift"``      — open_price on broker side differs from our
+        ``fill_price`` by more than the tolerance (rare; usually a sign of
+        timezone or rounding mismatch)
+      * ``"position_unexpected"`` — broker has a position we have no record
+        of (cross-contamination from another EA on the same account)
+    """
+
+    __tablename__ = "reconciliations"
+
+    id: int | None = Field(default=None, primary_key=True)
+    ts: datetime = Field(index=True)
+    ticket: int = Field(index=True)
+    strategy_id: str = Field(index=True)
+    mismatch_type: str = Field(index=True)
+    expected_value: float | None = None
+    actual_value: float | None = None
+    details: str = ""
+
+
 class OrderModificationRow(SQLModel, table=True):
     """One row per SL/TP modification or partial-close event.
 

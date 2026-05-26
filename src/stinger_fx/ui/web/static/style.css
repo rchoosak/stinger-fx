@@ -175,3 +175,18 @@ button:hover { background: #30363d; }
   font-size: 13px;
 }
 .muted.small { font-size: 11px; }
+
+/* Phase 6.1.D — audit page */
+.audit-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+.audit-table th, .audit-table td {
+  text-align: left; padding: 6px 8px; border-bottom: 1px solid #21262d;
+}
+.audit-table th { color: #8b949e; font-weight: normal; font-size: 12px; }
+.badge {
+  display: inline-block; padding: 2px 8px; border-radius: 3px;
+  background: #21262d; color: #e6edf3; font-size: 11px;
+}
+.badge-warn { background: #3f2f1f; color: #ffa500; }
+.badge-rejected { background: #3f1f1f; color: #ffa198; }
+.badge-placed { background: #1f3f2f; color: #3fb950; }
+.row-mismatch { background: rgba(248, 81, 73, 0.05); }

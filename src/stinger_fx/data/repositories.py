@@ -17,6 +17,7 @@ from stinger_fx.data.schemas import (
     DecisionRow,
     OrderModificationRow,
     OrderRow,
+    ReconciliationRow,
     SignalRow,
     SweepResultRow,
     SweepRow,
@@ -342,5 +343,32 @@ class OrderModificationRepo:
                     select(OrderModificationRow)
                     .order_by(desc(OrderModificationRow.ts))
                     .limit(limit)
+                )
+            )
+
+
+class ReconciliationRepo:
+    """Read access for the reconciliation log (writes go through Reconciler)."""
+
+    def __init__(self, store: SqliteStore) -> None:
+        self._store = store
+
+    def recent(self, limit: int = 100) -> list[ReconciliationRow]:
+        from sqlmodel import desc
+
+        with self._store.session() as s:
+            return list(
+                s.exec(
+                    select(ReconciliationRow)
+                    .order_by(desc(ReconciliationRow.ts))
+                    .limit(limit)
+                )
+            )
+
+    def by_ticket(self, ticket: int) -> list[ReconciliationRow]:
+        with self._store.session() as s:
+            return list(
+                s.exec(
+                    select(ReconciliationRow).where(ReconciliationRow.ticket == ticket)
                 )
             )
