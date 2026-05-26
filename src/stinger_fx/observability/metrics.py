@@ -19,11 +19,14 @@ from __future__ import annotations
 
 import logging
 
+from datetime import UTC, datetime
+
 from prometheus_client import (
     REGISTRY,
     CollectorRegistry,
     Counter,
     Gauge,
+    Histogram,
     start_http_server,
 )
 
@@ -31,6 +34,8 @@ from stinger_fx.core.event_bus import AsyncEventBus, Subscription
 from stinger_fx.core.events import (
     AccountSnapshotEvent,
     BarEvent,
+    BrokerDisconnectedEvent,
+    BrokerReconnectedEvent,
     DecisionEvent,
     EngineStartedEvent,
     EngineStoppedEvent,
@@ -117,6 +122,55 @@ def make_metrics(registry: CollectorRegistry | None = None) -> dict[str, object]
             ["account_id"],
             registry=r,
         ),
+        # --- Phase 6.1.B: Latency telemetry ----------------------------------
+        "order_submission_seconds": Histogram(
+            "stinger_order_submission_seconds",
+            "Time from order requested_at to filled_at (broker round-trip)",
+            ["strategy_id", "symbol"],
+            # Buckets tuned for typical FX broker latencies (50ms typical, 5s slow)
+            buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
+            registry=r,
+        ),
+        "tick_e2e_seconds": Histogram(
+            "stinger_tick_e2e_seconds",
+            "End-to-end tick latency: tick.time → MetricsCollector receipt",
+            ["symbol"],
+            # Tick lag buckets — sub-second is the normal range; >5s means trouble.
+            buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0),
+            registry=r,
+        ),
+        "mt5_call_seconds": Histogram(
+            "stinger_mt5_call_seconds",
+            "Latency of individual MetaTrader5 SDK calls",
+            ["method"],
+            buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 5.0),
+            registry=r,
+        ),
+        "broker_disconnects_total": Counter(
+            "stinger_broker_disconnects_total",
+            "BrokerDisconnectedEvent count",
+            ["broker"],
+            registry=r,
+        ),
+        "broker_reconnects_total": Counter(
+            "stinger_broker_reconnects_total",
+            "BrokerReconnectedEvent count",
+            ["broker"],
+            registry=r,
+        ),
+        "broker_downtime_seconds": Histogram(
+            "stinger_broker_downtime_seconds",
+            "Recovery time per disconnect (from BrokerReconnectedEvent.downtime_seconds)",
+            ["broker"],
+            buckets=(1.0, 5.0, 10.0, 30.0, 60.0, 300.0, 600.0, 1800.0),
+            registry=r,
+        ),
+        "tick_pump_lag_seconds": Gauge(
+            "stinger_tick_pump_lag_seconds",
+            "Current staleness of the latest tick per symbol (now - tick.time)",
+            ["symbol"],
+            registry=r,
+        ),
     }
 
 
@@ -153,6 +207,17 @@ class MetricsCollector:
                 self._on_strategy_state,
                 name="metrics.strategy",
             ),
+            # Phase 6.1.B — broker connectivity telemetry
+            self._bus.subscribe(
+                BrokerDisconnectedEvent,
+                self._on_broker_disconnected,
+                name="metrics.broker_dc",
+            ),
+            self._bus.subscribe(
+                BrokerReconnectedEvent,
+                self._on_broker_reconnected,
+                name="metrics.broker_rc",
+            ),
         ]
         logger.info("metrics_collector_started")
 
@@ -172,7 +237,17 @@ class MetricsCollector:
         self.metrics["engine_up"].set(0)  # type: ignore[union-attr]
 
     async def _on_tick(self, evt: TickEvent) -> None:
-        self.metrics["ticks_received_total"].labels(symbol=evt.tick.symbol).inc()  # type: ignore[union-attr]
+        symbol = evt.tick.symbol
+        self.metrics["ticks_received_total"].labels(symbol=symbol).inc()  # type: ignore[union-attr]
+        # Phase 6.1.B — tick latency telemetry.  `tick.time` is broker-server
+        # time stamped at the source; `now()` is the moment the collector
+        # observed the bus event. The delta captures every hop the tick made.
+        try:
+            lag = max(0.0, (datetime.now(UTC) - evt.tick.time).total_seconds())
+        except Exception:  # noqa: BLE001 — tz mismatch shouldn't crash metrics
+            return
+        self.metrics["tick_e2e_seconds"].labels(symbol=symbol).observe(lag)  # type: ignore[union-attr]
+        self.metrics["tick_pump_lag_seconds"].labels(symbol=symbol).set(lag)  # type: ignore[union-attr]
 
     async def _on_bar(self, evt: BarEvent) -> None:
         if not evt.bar.is_closed:
@@ -191,6 +266,17 @@ class MetricsCollector:
         self.metrics["orders_filled_total"].labels(  # type: ignore[union-attr]
             strategy_id=o.strategy_id, symbol=o.symbol, side=o.side.value
         ).inc()
+        # Phase 6.1.B — order submission latency (broker round-trip).
+        # Both timestamps come from the broker side; skip if either missing.
+        if o.requested_at is not None and o.filled_at is not None:
+            try:
+                rt = (o.filled_at - o.requested_at).total_seconds()
+            except Exception:  # noqa: BLE001
+                return
+            if rt >= 0:
+                self.metrics["order_submission_seconds"].labels(  # type: ignore[union-attr]
+                    strategy_id=o.strategy_id, symbol=o.symbol
+                ).observe(rt)
 
     async def _on_rejected(self, evt: OrderRejectedEvent) -> None:
         o = evt.order
@@ -219,6 +305,15 @@ class MetricsCollector:
         # Reset gauge for this state and increment current state. Cheap because
         # state cardinality is tiny (started/paused/quarantined/stopped).
         self.metrics["strategies_total"].labels(state=evt.state).inc()  # type: ignore[union-attr]
+
+    async def _on_broker_disconnected(self, evt: BrokerDisconnectedEvent) -> None:
+        self.metrics["broker_disconnects_total"].labels(broker=evt.broker_name).inc()  # type: ignore[union-attr]
+
+    async def _on_broker_reconnected(self, evt: BrokerReconnectedEvent) -> None:
+        self.metrics["broker_reconnects_total"].labels(broker=evt.broker_name).inc()  # type: ignore[union-attr]
+        self.metrics["broker_downtime_seconds"].labels(  # type: ignore[union-attr]
+            broker=evt.broker_name
+        ).observe(evt.downtime_seconds)
 
 
 def _rule_label(reason: str) -> str:

@@ -78,7 +78,13 @@ RETRYABLE_RETCODES: frozenset[int] = frozenset({
 class MT5Broker(BaseBroker):
     name = "mt5"
 
-    def __init__(self, bus: AsyncEventBus, cfg: MT5Config) -> None:
+    def __init__(
+        self,
+        bus: AsyncEventBus,
+        cfg: MT5Config,
+        *,
+        metrics: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(bus)
         self._cfg = cfg
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mt5-sync")
@@ -89,6 +95,11 @@ class MT5Broker(BaseBroker):
         self._tick_thread: threading.Thread | None = None
         self._tick_stop = threading.Event()
         self._last_tick_time: dict[str, datetime] = {}
+        # Phase 6.1.B — optional Prometheus metrics dict (from MetricsCollector).
+        # When supplied, _sdk() records per-method call latency into the
+        # `mt5_call_seconds` histogram. Decoupled so unit tests don't pull
+        # prometheus_client.
+        self._metrics = metrics
         # Phase 6.1.A reconnection state ----------------------------------
         # Health-check task runs in the asyncio loop; tick pump (in a thread)
         # observes self._connected and pauses iteration while False.
@@ -103,9 +114,29 @@ class MT5Broker(BaseBroker):
     # --- helpers ------------------------------------------------------------
 
     async def _sdk(self, fn, *args, **kwargs):
-        """Run a synchronous SDK call on the dedicated executor."""
+        """Run a synchronous SDK call on the dedicated executor.
+
+        When a `metrics` dict is attached, time the call and record the
+        latency in the `mt5_call_seconds` histogram labelled by SDK method.
+        """
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._executor, lambda: fn(*args, **kwargs))
+        if self._metrics is None:
+            return await loop.run_in_executor(self._executor, lambda: fn(*args, **kwargs))
+        # Lazy import to avoid taking a hard dep on prometheus_client here.
+        import time as _time
+
+        method = getattr(fn, "__name__", "anon")
+        start = _time.perf_counter()
+        try:
+            return await loop.run_in_executor(self._executor, lambda: fn(*args, **kwargs))
+        finally:
+            elapsed = _time.perf_counter() - start
+            hist = self._metrics.get("mt5_call_seconds")
+            if hist is not None:
+                try:
+                    hist.labels(method=method).observe(elapsed)
+                except Exception:  # noqa: BLE001 — never let metrics crash trading
+                    pass
 
     @staticmethod
     def _mt5():
