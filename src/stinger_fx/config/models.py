@@ -371,10 +371,15 @@ class SweepRunConfig(BaseModel):
     rank_by: MetricName = "net_pnl"
     top_n: int = Field(10, ge=1, le=1000)
     granularity: Literal["bar", "tick"] = "bar"
-    # Phase 6.3.A — pluggable search backend
-    algo: Literal["grid", "optuna", "random"] = "grid"
-    n_trials: int = Field(100, ge=1)        # ignored for grid (uses cartesian)
+    # Phase 6.3.A/B — pluggable search backend
+    algo: Literal["grid", "optuna", "random", "genetic"] = "grid"
+    n_trials: int = Field(100, ge=1)        # for optuna/random; grid uses cartesian; genetic uses pop×gen
     random_seed: int | None = None          # reproducibility for adaptive algos
+    # Genetic-specific knobs (ignored by other algos)
+    population_size: int = Field(20, ge=2)
+    generations: int = Field(10, ge=1)
+    elite_size: int = Field(2, ge=0)
+    mutation_rate: float = Field(0.1, ge=0.0, le=1.0)
 
     @field_validator("start", "end")
     @classmethod
