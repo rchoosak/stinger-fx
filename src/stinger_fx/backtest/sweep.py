@@ -119,6 +119,10 @@ class ParameterSweep:
             parameter_grid=cfg.parameter_grid,
             n_trials=cfg.n_trials,
             random_seed=cfg.random_seed,
+            population_size=cfg.population_size,
+            generations=cfg.generations,
+            elite_size=cfg.elite_size,
+            mutation_rate=cfg.mutation_rate,
         )
         started_at = datetime.now(UTC)
         report = SweepReport(
