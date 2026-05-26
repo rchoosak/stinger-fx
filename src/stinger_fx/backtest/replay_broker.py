@@ -359,7 +359,31 @@ class SimBroker(BaseBroker):
         sl: float | None = None,
         tp: float | None = None,
         price: float | None = None,
+        volume: float | None = None,
     ) -> OrderResult:
+        # Phase 6.2.D — pending orders can have their trigger price and
+        # volume adjusted as well as SL/TP. Open positions can only have
+        # SL/TP changed (entry price is immutable post-fill).
+        pending = self._pending.get(ticket)
+        if pending is not None:
+            if volume is not None and volume <= 0:
+                return OrderResult(
+                    ok=False, status=OrderStatus.REJECTED,
+                    message=f"modify pending volume must be > 0 (got {volume})",
+                )
+            updated = pending.model_copy(
+                update={
+                    "sl": sl if sl is not None else pending.sl,
+                    "tp": tp if tp is not None else pending.tp,
+                    "price": price if price is not None else pending.price,
+                    "volume": volume if volume is not None else pending.volume,
+                }
+            )
+            self._pending[ticket] = updated
+            return OrderResult(
+                ok=True, ticket=ticket, status=OrderStatus.SUBMITTED, order=updated
+            )
+
         pos = self._positions.get(ticket)
         if pos is None:
             return OrderResult(ok=False, status=OrderStatus.REJECTED, message="not found")
