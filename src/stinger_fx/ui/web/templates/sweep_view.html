@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}{{ sweep_id }} · Sweep · Stinger-Fx{% endblock %}
+{% block content %}
+<section class="panel widest">
+  <h2>{{ sweep_id }} · {{ summary.strategy_id }}</h2>
+  <p class="muted">
+    rank by <span class="badge">{{ summary.rank_by }}</span> ·
+    {{ summary.total_combos }} combos ·
+    finished {{ summary.finished_at[:19] | replace("T", " ") }}
+  </p>
+  {% if summary.best_params %}
+  <p>
+    <strong>Best:</strong>
+    {% for k, v in summary.best_params.items() %}<code>{{ k }}={{ v }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+    → {{ summary.rank_by }} = {{ "%.4f"|format(summary.best_metric_value) }}
+  </p>
+  {% endif %}
+</section>
+
+{% if is_2d %}
+<section class="panel widest">
+  <h3>Heatmap · {{ param_keys[0] }} × {{ param_keys[1] }}</h3>
+  <div class="chart-wrap">
+    <canvas id="heatmap" height="380"></canvas>
+  </div>
+</section>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-matrix@2.0.1/dist/chartjs-chart-matrix.min.js"></script>
+<script>
+(function () {
+  const all = {{ summary.all | tojson | safe }};
+  const rankBy = {{ summary.rank_by | tojson | safe }};
+  const kx = {{ param_keys[0] | tojson | safe }};
+  const ky = {{ param_keys[1] | tojson | safe }};
+  // Unique values for each axis, sorted numerically when possible
+  const xs = Array.from(new Set(all.map(r => r.params[kx]))).sort((a, b) => (a > b ? 1 : -1));
+  const ys = Array.from(new Set(all.map(r => r.params[ky]))).sort((a, b) => (a > b ? 1 : -1));
+  // Build matrix points
+  const data = all.map(r => ({ x: r.params[kx], y: r.params[ky], v: r.metrics[rankBy] }));
+  const values = data.map(d => d.v);
+  const vmin = Math.min(...values), vmax = Math.max(...values);
+  function colorFor(v) {
+    const t = vmax === vmin ? 0.5 : (v - vmin) / (vmax - vmin);
+    const r = Math.round(248 - t * 200);
+    const g = Math.round(81 + t * 100);
+    const b = Math.round(73 + t * 30);
+    return `rgba(${r}, ${g}, ${b}, 0.85)`;
+  }
+  const ctx = document.getElementById("heatmap").getContext("2d");
+  new Chart(ctx, {
+    type: "matrix",
+    data: {
+      datasets: [{
+        label: rankBy,
+        data,
+        backgroundColor: c => colorFor(c.raw.v),
+        borderColor: "#21262d",
+        borderWidth: 1,
+        width: ({chart}) => (chart.chartArea || {}).width / xs.length - 2,
+        height: ({chart}) => (chart.chartArea || {}).height / ys.length - 2,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        x: { type: "category", labels: xs, title: { display: true, text: kx, color: "#e6edf3" },
+             ticks: { color: "#8b949e" }, grid: { color: "#21262d" } },
+        y: { type: "category", labels: ys, title: { display: true, text: ky, color: "#e6edf3" },
+             ticks: { color: "#8b949e" }, grid: { color: "#21262d" } },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: c => `${kx}=${c.raw.x}, ${ky}=${c.raw.y} → ${rankBy}=${c.raw.v.toFixed(4)}` } },
+      },
+    },
+  });
+})();
+</script>
+{% endif %}
+
+<section class="panel widest">
+  <h3>Top-N ranked</h3>
+  <table class="audit-table">
+    <thead><tr>
+      <th>Rank</th><th>Parameters</th><th>{{ summary.rank_by }}</th>
+    </tr></thead>
+    <tbody>
+      {% for cell in summary.top_n %}
+      <tr>
+        <td><code>#{{ loop.index }}</code></td>
+        <td>
+          {% for k, v in cell.params.items() %}<code>{{ k }}={{ v }}</code>{% if not loop.last %} · {% endif %}{% endfor %}
+        </td>
+        <td>{{ "%.4f"|format(cell.metrics[summary.rank_by]) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<p class="muted"><a href="/sweep">← back to sweep list</a></p>
+{% endblock %}

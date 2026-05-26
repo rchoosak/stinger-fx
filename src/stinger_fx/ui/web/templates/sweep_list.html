@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Sweeps · Stinger-Fx{% endblock %}
+{% block content %}
+<section class="panel widest">
+  <h2>Parameter sweeps</h2>
+  <p class="muted">Top-ranked parameter combinations across each sweep run.</p>
+  {% if runs %}
+  <table class="audit-table">
+    <thead><tr>
+      <th>Sweep</th><th>Strategy</th><th>Combos</th>
+      <th>Rank metric</th><th>Best value</th><th>Finished</th>
+    </tr></thead>
+    <tbody>
+      {% for r in runs %}
+      <tr>
+        <td><a href="/sweep/{{ r.sweep_id }}"><code>{{ r.sweep_id }}</code></a></td>
+        <td>{{ r.strategy_id }}</td>
+        <td>{{ r.total_combos }}</td>
+        <td><span class="badge">{{ r.rank_by }}</span></td>
+        <td>{{ "%.4f"|format(r.best_metric_value) if r.best_metric_value is not none else "—" }}</td>
+        <td class="muted small">{{ r.finished_at[:19] | replace("T", " ") }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No sweep runs found.  Run <code>stinger-fx backtest sweep</code> to populate this view.</p>
+  {% endif %}
+</section>
+{% endblock %}
