@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}{{ name }} · Editor · Stinger-Fx{% endblock %}
+{% block content %}
+<section class="panel widest">
+  <h2>Edit <code>{{ filename }}</code></h2>
+  <p class="muted">
+    Saved files are immediately picked up by the config-reload watcher.
+    Syntax errors are blocked at save time — your existing version stays
+    on disk if AST parsing fails.
+  </p>
+
+  <div id="editor-host" style="border: 1px solid #30363d; border-radius: 4px;
+                              min-height: 480px; background: #0d1117;"></div>
+
+  <div style="margin-top: 12px; display: flex; gap: 8px; align-items: center;">
+    <button type="button" onclick="saveSource()">Save</button>
+    <a class="btn-link" href="/editor">← back to list</a>
+    <span id="status" class="muted small"></span>
+  </div>
+  <div id="error-banner" class="error-banner" style="display: none; margin-top: 8px;"></div>
+</section>
+
+<link rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.min.css" />
+<link rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/theme/material-darker.min.css" />
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/python/python.min.js"></script>
+<script>
+const NAME = {{ name | tojson | safe }};
+let editor;
+
+(async function init() {
+  const src = await fetch(`/editor/${NAME}/source`).then(r => r.text());
+  editor = CodeMirror(document.getElementById("editor-host"), {
+    value: src,
+    mode: "python",
+    theme: "material-darker",
+    lineNumbers: true,
+    indentUnit: 4,
+    tabSize: 4,
+    indentWithTabs: false,
+    viewportMargin: Infinity,
+  });
+})();
+
+async function saveSource() {
+  const status = document.getElementById("status");
+  const errBox = document.getElementById("error-banner");
+  errBox.style.display = "none";
+  status.textContent = "Saving…";
+  const body = editor.getValue();
+  const r = await fetch(`/editor/${NAME}/source`, {
+    method: "PUT",
+    headers: { "Content-Type": "text/plain" },
+    body,
+  });
+  const data = await r.json().catch(() => ({}));
+  if (r.ok) {
+    status.textContent = `Saved (${data.bytes} bytes)`;
+  } else {
+    status.textContent = "";
+    const where = data.line ? ` (line ${data.line}` + (data.column ? `, col ${data.column})` : ")") : "";
+    errBox.textContent = `⚠️ ${data.error || "save failed"}${where}`;
+    errBox.style.display = "block";
+  }
+}
+</script>
+{% endblock %}
