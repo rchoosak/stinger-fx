@@ -21,6 +21,7 @@ from typing import Any
 
 from stinger_fx.backtest.file_backtester import FileBacktester
 from stinger_fx.backtest.reports import BacktestReport
+from stinger_fx.backtest.search import build_search_strategy
 from stinger_fx.config.models import (
     BacktestRunConfig,
     MetricName,
@@ -111,7 +112,14 @@ class ParameterSweep:
         self._report_dir = report_dir or Path("./data/sweeps")
 
     async def run(self, cfg: SweepRunConfig) -> SweepReport:
-        combos = enumerate_grid(cfg.parameter_grid)
+        # Phase 6.3.A — pluggable search backend.  Grid is the default and
+        # behaves identically to the original cartesian enumeration.
+        search = build_search_strategy(
+            cfg.algo,
+            parameter_grid=cfg.parameter_grid,
+            n_trials=cfg.n_trials,
+            random_seed=cfg.random_seed,
+        )
         started_at = datetime.now(UTC)
         report = SweepReport(
             sweep_id=cfg.id,
@@ -119,29 +127,41 @@ class ParameterSweep:
             started_at=started_at,
             finished_at=started_at,  # filled at end
             rank_by=cfg.rank_by,
-            total_combos=len(combos),
+            total_combos=search.total_trials or 0,
         )
         logger.info(
-            "sweep_started sweep_id=%s combos=%d strategy=%s",
-            cfg.id,
-            len(combos),
-            cfg.strategy_id,
+            "sweep_started sweep_id=%s algo=%s expected_trials=%s strategy=%s",
+            cfg.id, cfg.algo, search.total_trials, cfg.strategy_id,
         )
 
-        for i, overrides in enumerate(combos, start=1):
+        # Whether the rank metric is smaller-is-better. We invert the score
+        # before reporting so adaptive search backends (Optuna, GA) can use
+        # "maximize" uniformly.
+        minimize = cfg.rank_by in _SMALLER_IS_BETTER
+
+        i = 0
+        while True:
+            overrides = search.suggest()
+            if overrides is None:
+                break
+            i += 1
             cell_report = await self._run_cell(cfg, overrides, i)
+            metrics = cell_report.to_metrics_dict()
+            raw_score = metrics.get(cfg.rank_by, 0.0)
+            # Optuna handles None/nan poorly; coerce to a finite worst-case
+            if raw_score is None or (isinstance(raw_score, float) and raw_score != raw_score):
+                raw_score = float("-inf") if not minimize else float("inf")
+            search.report(overrides, -raw_score if minimize else raw_score)
             report.results.append(
-                SweepCellResult(
-                    params=overrides,
-                    metrics=cell_report.to_metrics_dict(),
-                )
+                SweepCellResult(params=overrides, metrics=metrics)
             )
             logger.info(
-                "sweep_cell_done sweep_id=%s i=%d/%d params=%s %s=%s",
-                cfg.id, i, len(combos), overrides, cfg.rank_by,
-                cell_report.to_metrics_dict().get(cfg.rank_by),
+                "sweep_cell_done sweep_id=%s i=%d params=%s %s=%s",
+                cfg.id, i, overrides, cfg.rank_by, raw_score,
             )
 
+        # Now that the search is done we know the actual trial count
+        report.total_combos = i
         report.finished_at = datetime.now(UTC)
         await self._persist(cfg, report)
         return report

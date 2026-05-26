@@ -371,6 +371,10 @@ class SweepRunConfig(BaseModel):
     rank_by: MetricName = "net_pnl"
     top_n: int = Field(10, ge=1, le=1000)
     granularity: Literal["bar", "tick"] = "bar"
+    # Phase 6.3.A — pluggable search backend
+    algo: Literal["grid", "optuna", "random"] = "grid"
+    n_trials: int = Field(100, ge=1)        # ignored for grid (uses cartesian)
+    random_seed: int | None = None          # reproducibility for adaptive algos
 
     @field_validator("start", "end")
     @classmethod
