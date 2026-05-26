@@ -48,6 +48,9 @@ mt5 = [
 optimize = [
     "optuna>=3.5",                          # Bayesian (TPE) parameter sweep
 ]
+pairs = [
+    "statsmodels>=0.14",                    # ADF test for Engle-Granger cointegration
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.23",
