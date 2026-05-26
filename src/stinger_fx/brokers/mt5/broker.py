@@ -28,7 +28,11 @@ from stinger_fx.brokers.base import BaseBroker
 from stinger_fx.config.models import MT5Config
 from stinger_fx.core.errors import BrokerError, BrokerNotConnectedError
 from stinger_fx.core.event_bus import AsyncEventBus
-from stinger_fx.core.events import TickEvent
+from stinger_fx.core.events import (
+    BrokerDisconnectedEvent,
+    BrokerReconnectedEvent,
+    TickEvent,
+)
 from stinger_fx.domain import (
     AccountInfo,
     AccountSnapshot,
@@ -49,6 +53,27 @@ logger = logging.getLogger("stinger.broker.mt5")
 # Tick poller interval — MT5 doesn't push, we pull.
 TICK_POLL_INTERVAL = 0.05  # 50ms — broker-friendly while still responsive
 
+# How often the reconnect loop probes terminal_info() while connected.
+HEALTH_CHECK_INTERVAL = 5.0  # seconds
+
+# Reconnect backoff schedule (seconds). Capped at the last value for further attempts.
+RECONNECT_BACKOFF = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0]
+
+# How many times to re-attempt order_send on retryable broker errors.
+ORDER_MAX_RETRIES = 3
+ORDER_RETRY_BACKOFF = [0.1, 0.5, 1.0]  # seconds between attempts
+
+# MT5 retcodes treated as transient (re-attempt makes sense). Reference:
+# https://www.mql5.com/en/docs/constants/structures/mqltraderequest
+# We intentionally keep this list short and conservative — permanent errors
+# (invalid volume, no money, market closed) must NOT be retried.
+RETRYABLE_RETCODES: frozenset[int] = frozenset({
+    10004,  # TRADE_RETCODE_REQUOTE — price moved during request
+    10006,  # TRADE_RETCODE_REJECT — generic broker reject (transient on busy servers)
+    10021,  # TRADE_RETCODE_PRICE_OFF — no prices to process the request
+    10024,  # TRADE_RETCODE_TIMEOUT — server didn't respond in time
+})
+
 
 class MT5Broker(BaseBroker):
     name = "mt5"
@@ -64,6 +89,16 @@ class MT5Broker(BaseBroker):
         self._tick_thread: threading.Thread | None = None
         self._tick_stop = threading.Event()
         self._last_tick_time: dict[str, datetime] = {}
+        # Phase 6.1.A reconnection state ----------------------------------
+        # Health-check task runs in the asyncio loop; tick pump (in a thread)
+        # observes self._connected and pauses iteration while False.
+        self._health_task: asyncio.Task[None] | None = None
+        self._reconnecting = False
+        self._disconnect_time: datetime | None = None
+        # Allow tests to override pacing constants for fast simulations.
+        self._reconnect_backoff: list[float] = list(RECONNECT_BACKOFF)
+        self._health_check_interval: float = HEALTH_CHECK_INTERVAL
+        self._order_retry_backoff: list[float] = list(ORDER_RETRY_BACKOFF)
 
     # --- helpers ------------------------------------------------------------
 
@@ -107,15 +142,32 @@ class MT5Broker(BaseBroker):
             raise BrokerError(f"MT5 initialize() failed: {err}")
         self._connected = True
         logger.info("mt5 connected")
+        # Start the health-check task that detects unannounced disconnects
+        # and drives the reconnect loop. Test fixtures that don't want the
+        # background task running can call disconnect() right away or set
+        # `_health_check_interval` to a large value before connect().
+        if self._health_task is None or self._health_task.done():
+            self._health_task = asyncio.create_task(
+                self._health_loop(), name="mt5-health"
+            )
 
     async def disconnect(self) -> None:
-        if not self._connected:
+        if not self._connected and self._health_task is None:
             return
+        # Stop the health task first so it doesn't try to reconnect during shutdown.
+        if self._health_task is not None:
+            self._health_task.cancel()
+            try:
+                await self._health_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            self._health_task = None
         self._tick_stop.set()
         if self._tick_thread is not None:
             self._tick_thread.join(timeout=2)
             self._tick_thread = None
-        await self._sdk(self._mt5().shutdown)
+        if self._connected:
+            await self._sdk(self._mt5().shutdown)
         self._executor.shutdown(wait=True, cancel_futures=True)
         self._connected = False
         logger.info("mt5 disconnected")
@@ -224,6 +276,113 @@ class MT5Broker(BaseBroker):
         else:
             self._bar_subs.discard((symbol, tf))
 
+    # --- Health-check + reconnect (Phase 6.1.A) -----------------------------
+
+    async def _health_loop(self) -> None:
+        """Periodic probe — detect MT5 disconnects and drive reconnect.
+
+        Runs in the asyncio loop. Every `_health_check_interval` seconds it
+        checks `terminal_info()`; if that returns None (or raises) while we
+        believe we are connected, we mark the broker disconnected, publish
+        a `BrokerDisconnectedEvent`, and enter the reconnect loop with
+        exponential backoff. While reconnecting the tick pump pauses
+        because it observes `self._connected == False`.
+        """
+        mt5 = self._mt5()
+        while True:
+            try:
+                await asyncio.sleep(self._health_check_interval)
+                if not self._connected:
+                    # Already in reconnect mode (or never connected) — nothing
+                    # to detect; the reconnect loop is driving us.
+                    continue
+                try:
+                    info = await self._sdk(mt5.terminal_info)
+                except Exception as e:  # noqa: BLE001
+                    info = None
+                    err_reason = str(e)
+                else:
+                    err_reason = "terminal_info() returned None"
+                if info is None:
+                    await self._handle_disconnect(reason=err_reason)
+            except asyncio.CancelledError:
+                raise
+
+    async def _handle_disconnect(self, *, reason: str) -> None:
+        """Switch broker to disconnected state and launch reconnect attempts."""
+        if self._reconnecting:
+            return
+        self._reconnecting = True
+        self._connected = False
+        self._disconnect_time = datetime.now(UTC)
+        logger.warning("mt5 disconnect detected reason=%s", reason)
+        await self.bus.publish(
+            BrokerDisconnectedEvent(broker_name=self.name, reason=reason)
+        )
+        try:
+            await self._reconnect_with_backoff()
+        finally:
+            self._reconnecting = False
+
+    async def _reconnect_with_backoff(self) -> None:
+        """Re-initialise MT5 with exponential backoff until success."""
+        mt5 = self._mt5()
+        attempt = 0
+        while True:
+            delay = self._reconnect_backoff[min(attempt, len(self._reconnect_backoff) - 1)]
+            attempt += 1
+            await asyncio.sleep(delay)
+            logger.info("mt5 reconnect attempt=%s after_sleep=%.1fs", attempt, delay)
+            try:
+                # shutdown() before re-initialize so the SDK's internal state
+                # is clean. Best-effort — may itself error if SDK is wedged.
+                try:
+                    await self._sdk(mt5.shutdown)
+                except Exception:  # noqa: BLE001
+                    pass
+
+                def _do_init() -> bool:
+                    kwargs: dict[str, Any] = {"timeout": self._cfg.timeout_ms}
+                    if self._cfg.terminal_path:
+                        kwargs["path"] = self._cfg.terminal_path
+                    if self._cfg.login:
+                        kwargs.update(
+                            login=self._cfg.login,
+                            password=self._cfg.password,
+                            server=self._cfg.server,
+                        )
+                    return bool(mt5.initialize(**kwargs))
+
+                ok = await self._sdk(_do_init)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("mt5 reconnect attempt failed attempt=%s err=%s", attempt, e)
+                continue
+            if not ok:
+                continue
+            # Reconnected.
+            downtime = (
+                (datetime.now(UTC) - self._disconnect_time).total_seconds()
+                if self._disconnect_time
+                else 0.0
+            )
+            self._connected = True
+            self._disconnect_time = None
+            logger.info(
+                "mt5 reconnected attempts=%s downtime_seconds=%.1f", attempt, downtime
+            )
+            await self.bus.publish(
+                BrokerReconnectedEvent(broker_name=self.name, downtime_seconds=downtime)
+            )
+            # Re-arm any symbol subscriptions so the tick pump keeps working
+            # after a reconnect — symbol_select is needed because MT5 forgets
+            # MarketWatch state across SDK shutdown/initialize cycles.
+            for sym in tuple(self._tick_subs):
+                try:
+                    await self._sdk(mt5.symbol_select, sym, True)
+                except Exception:  # noqa: BLE001
+                    logger.warning("mt5 resubscribe failed symbol=%s", sym)
+            return
+
     def _tick_pump(self) -> None:
         """Background thread: poll the latest tick for each subscribed symbol."""
         mt5 = self._mt5()
@@ -231,6 +390,12 @@ class MT5Broker(BaseBroker):
         if loop is None:
             return
         while not self._tick_stop.is_set():
+            # Pause during reconnect — the health loop drives recovery; we
+            # just wait. This avoids spinning calls into a dead SDK and
+            # avoids stomping the reconnect attempt.
+            if not self._connected:
+                self._tick_stop.wait(self._health_check_interval)
+                continue
             for symbol in tuple(self._tick_subs):
                 try:
                     raw = mt5.symbol_info_tick(symbol)
@@ -349,11 +514,49 @@ class MT5Broker(BaseBroker):
         if req.tp is not None:
             request_dict["tp"] = req.tp
 
-        result = await self._sdk(mt5.order_send, request_dict)
+        # --- Retry loop (Phase 6.1.A) ---------------------------------------
+        # Retryable retcodes (REQUOTE, REJECT, PRICE_OFF, TIMEOUT) get up to
+        # ORDER_MAX_RETRIES attempts with exponential backoff. Permanent
+        # errors (INVALID_VOLUME, NO_MONEY, MARKET_CLOSED) exit immediately.
+        result = None
+        last_attempt = 0
+        for attempt in range(ORDER_MAX_RETRIES):
+            last_attempt = attempt
+            # On a retry for a MARKET order, re-fetch the live tick so we're
+            # not chasing stale prices. Pending orders use the requested
+            # price as-is — that's the whole point of a limit/stop.
+            if attempt > 0 and req.type == OrderType.MARKET:
+                tick = await self._sdk(mt5.symbol_info_tick, req.symbol)
+                if tick is not None:
+                    request_dict["price"] = (
+                        tick.ask if req.side is Side.BUY else tick.bid
+                    )
+            result = await self._sdk(mt5.order_send, request_dict)
+            if result is None:
+                # SDK call failure (terminal dead?) — don't retry inside the
+                # retry loop; surface as a single rejection. The health loop
+                # will detect the disconnect separately.
+                break
+            retcode = int(result.retcode)
+            if retcode == mt5.TRADE_RETCODE_DONE:
+                break
+            if retcode not in RETRYABLE_RETCODES:
+                break
+            if attempt + 1 < ORDER_MAX_RETRIES:
+                backoff = self._order_retry_backoff[
+                    min(attempt, len(self._order_retry_backoff) - 1)
+                ]
+                logger.info(
+                    "order_send retryable retcode=%s attempt=%s sleeping=%.2fs",
+                    retcode, attempt + 1, backoff,
+                )
+                await asyncio.sleep(backoff)
+
         if result is None:
             err = await self._sdk(mt5.last_error)
             return OrderResult(
-                ok=False, status=OrderStatus.REJECTED, message=f"order_send() returned None: {err}"
+                ok=False, status=OrderStatus.REJECTED,
+                message=f"order_send() returned None after {last_attempt + 1} attempt(s): {err}",
             )
         ok = int(result.retcode) == mt5.TRADE_RETCODE_DONE
         status = OrderStatus.FILLED if ok else OrderStatus.REJECTED
