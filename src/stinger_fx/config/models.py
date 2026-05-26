@@ -426,11 +426,90 @@ class SweepRunConfig(BaseModel):
         )
 
 
+class WalkForwardConfig(BaseModel):
+    """Walk-forward optimization config — fit on rolling/expanding windows,
+    evaluate on the trailing out-of-sample slice of each fold (Phase 6.3.C)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]+$")
+    strategy_id: str
+    # Feed shape — same singular/plural/feeds normalisation as sweep configs.
+    symbol: str | None = None
+    timeframe: Timeframe | None = None
+    symbols: list[str] | None = None
+    timeframes: list[Timeframe] | None = None
+    feeds: list[Subscription] | None = None
+    start: datetime
+    end: datetime
+    initial_balance: float = Field(10_000.0, gt=0)
+    data_source: Path
+    # Walk-forward specific
+    n_folds: int = Field(5, ge=2)
+    in_sample_pct: float = Field(0.7, gt=0.0, lt=1.0)
+    scheme: Literal["rolling", "expanding"] = "rolling"
+    # Inner-sweep configuration (same algos / knobs as SweepRunConfig)
+    parameter_grid: dict[str, list[Any]] = Field(default_factory=dict)
+    rank_by: MetricName = "net_pnl"
+    algo: Literal["grid", "optuna", "random", "genetic"] = "grid"
+    n_trials: int = Field(100, ge=1)
+    random_seed: int | None = None
+    population_size: int = Field(20, ge=2)
+    generations: int = Field(10, ge=1)
+    elite_size: int = Field(2, ge=0)
+    mutation_rate: float = Field(0.1, ge=0.0, le=1.0)
+
+    @field_validator("start", "end")
+    @classmethod
+    def _require_tz(cls, v: datetime) -> datetime:
+        if v.tzinfo is None:
+            raise ValueError("start/end must include a timezone (e.g. ...T00:00:00Z)")
+        return v
+
+    @field_validator("parameter_grid")
+    @classmethod
+    def _grid_nonempty(cls, v: dict[str, list[Any]]) -> dict[str, list[Any]]:
+        if not v:
+            raise ValueError("parameter_grid must declare at least one parameter")
+        for name, values in v.items():
+            if not values:
+                raise ValueError(f"parameter_grid['{name}'] is empty")
+        return v
+
+    @model_validator(mode="after")
+    def _normalise_feeds(self) -> WalkForwardConfig:
+        feeds = _coerce_feed_list(
+            symbol=self.symbol,
+            timeframe=self.timeframe,
+            symbols=self.symbols,
+            timeframes=self.timeframes,
+            feeds=self.feeds,
+        )
+        object.__setattr__(self, "symbol", feeds[0].symbol)
+        object.__setattr__(self, "timeframe", feeds[0].timeframe)
+        object.__setattr__(self, "_feed_list", feeds)
+        return self
+
+    @property
+    def feed_list(self) -> list[Subscription]:
+        existing = getattr(self, "_feed_list", None)
+        if existing is not None:
+            return list(existing)
+        return _coerce_feed_list(
+            symbol=self.symbol,
+            timeframe=self.timeframe,
+            symbols=self.symbols,
+            timeframes=self.timeframes,
+            feeds=self.feeds,
+        )
+
+
 class BacktestConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     runs: list[BacktestRunConfig] = Field(default_factory=list)
     sweeps: list[SweepRunConfig] = Field(default_factory=list)
+    walk_forwards: list[WalkForwardConfig] = Field(default_factory=list)
 
     @field_validator("runs")
     @classmethod
