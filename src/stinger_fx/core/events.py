@@ -198,6 +198,22 @@ class BrokerReconnectedEvent(Event):
     downtime_seconds: float = 0.0
 
 
+class ReconciliationMismatchEvent(Event):
+    """A `Reconciler` detected that broker state diverges from internal DB.
+
+    ``mismatch_type`` mirrors :class:`stinger_fx.data.schemas.ReconciliationRow`.
+    Notification sinks subscribe to this so the operator gets paged when
+    the engine and broker disagree.
+    """
+
+    ticket: int
+    strategy_id: str
+    mismatch_type: str
+    expected_value: float | None = None
+    actual_value: float | None = None
+    details: str = ""
+
+
 class ConfigReloadedEvent(Event):
     changes: dict[str, Any] = Field(default_factory=dict)
 

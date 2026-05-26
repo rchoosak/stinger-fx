@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Audit · Stinger-Fx{% endblock %}
+{% block content %}
+<section class="panel widest">
+  <h2>Audit log</h2>
+  <p class="muted">
+    Recent operator-visible events. Refreshes every 5s.
+    {% if not has_store %}<strong>· SQLite store not configured — empty</strong>{% endif %}
+  </p>
+</section>
+
+<section class="panel widest" hx-get="/audit" hx-trigger="every 5s" hx-target="this" hx-swap="outerHTML" hx-select="#mismatches-block">
+  <h3 id="mismatches-block">Reconciliation mismatches</h3>
+  {% if mismatches %}
+  <table class="audit-table">
+    <thead><tr>
+      <th>Time</th><th>Ticket</th><th>Strategy</th><th>Type</th>
+      <th>Expected</th><th>Actual</th><th>Details</th>
+    </tr></thead>
+    <tbody>
+      {% for m in mismatches %}
+      <tr class="row-mismatch">
+        <td>{{ m.ts[:19] | replace("T", " ") }}</td>
+        <td><code>{{ m.ticket }}</code></td>
+        <td>{{ m.strategy_id }}</td>
+        <td><span class="badge badge-warn">{{ m.type }}</span></td>
+        <td>{{ m.expected }}</td>
+        <td>{{ m.actual }}</td>
+        <td class="muted small">{{ m.details }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No reconciliation mismatches.</p>
+  {% endif %}
+</section>
+
+<section class="panel widest">
+  <h3>Recent order modifications</h3>
+  {% if modifications %}
+  <table class="audit-table">
+    <thead><tr>
+      <th>Time</th><th>Ticket</th><th>Strategy</th><th>Type</th><th>Reason</th>
+    </tr></thead>
+    <tbody>
+      {% for m in modifications %}
+      <tr>
+        <td>{{ m.ts[:19] | replace("T", " ") }}</td>
+        <td><code>{{ m.ticket }}</code></td>
+        <td>{{ m.strategy_id }}</td>
+        <td><span class="badge">{{ m.type }}</span></td>
+        <td class="muted small">{{ m.reason }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No order modifications recorded.</p>
+  {% endif %}
+</section>
+
+<section class="panel widest">
+  <h3>Recent decisions</h3>
+  {% if decisions %}
+  <table class="audit-table">
+    <thead><tr>
+      <th>Time</th><th>Action</th><th>Reason</th>
+    </tr></thead>
+    <tbody>
+      {% for d in decisions %}
+      <tr class="row-{{ d.action }}">
+        <td>{{ d.ts[:19] | replace("T", " ") }}</td>
+        <td><span class="badge badge-{{ d.action }}">{{ d.action }}</span></td>
+        <td class="muted small">{{ d.reason }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No decisions recorded.</p>
+  {% endif %}
+</section>
+{% endblock %}

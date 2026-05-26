@@ -3,12 +3,14 @@
 from stinger_fx.data.historical import iter_bars, iter_ticks
 from stinger_fx.data.modification_logger import ModificationLogger
 from stinger_fx.data.parquet_store import ParquetStore
+from stinger_fx.data.reconciliation import Reconciler
 from stinger_fx.data.repositories import (
     BacktestRepo,
     ConfigAuditRepo,
     DecisionRepo,
     OrderModificationRepo,
     OrderRepo,
+    ReconciliationRepo,
     SignalRepo,
     SweepRepo,
     TradeRepo,
@@ -23,6 +25,8 @@ __all__ = [
     "OrderModificationRepo",
     "OrderRepo",
     "ParquetStore",
+    "ReconciliationRepo",
+    "Reconciler",
     "SignalRepo",
     "SqliteStore",
     "SweepRepo",
