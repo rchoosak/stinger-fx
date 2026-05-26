@@ -291,7 +291,11 @@ class SimBroker(BaseBroker):
             requested_at=self._sim_time,
             filled_at=self._sim_time,
         )
-        await self.bus.publish(OrderFilledEvent(order=order))
+        # The OrderRouter is responsible for publishing OrderFilledEvent
+        # for market fills — matches MT5Broker's pattern and avoids a
+        # double-emit when the router runs upstream. (Pending orders
+        # are different: check_pending() emits OrderFilledEvent itself
+        # because it runs outside the router's call frame.)
         return OrderResult(ok=True, ticket=ticket, status=OrderStatus.FILLED, order=order)
 
     async def check_pending(self, symbol: str, bid: float, ask: float) -> list[Order]:
