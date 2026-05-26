@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from stinger_fx.core.clock import Clock
 from stinger_fx.core.events import (
+    CancelOrderRequestEvent,
     ClosePositionRequestEvent,
     ModifyOrderRequestEvent,
     PartialCloseRequestEvent,
@@ -393,6 +394,34 @@ class StrategyContext:
                 strategy_id=self.strategy_id,
                 ticket=ticket,
                 volume=volume,
+                reason=reason,
+            )
+        )
+
+    async def cancel_order(
+        self,
+        ticket: int,
+        *,
+        reason: str = "",
+    ) -> None:
+        """Request the broker to cancel a pending order.
+
+        Only affects orders still in the SUBMITTED state (i.e. not yet
+        triggered into a position). For closing an already-open position,
+        use :meth:`close`.
+
+        Ownership is enforced by the router — a strategy can only cancel
+        its own tickets (matched by magic).
+        """
+        if self._bus is None:
+            raise RuntimeError(
+                "StrategyContext was built without a bus — cancel_order "
+                "requires ctx.bus= to be set"
+            )
+        await self._bus.publish(
+            CancelOrderRequestEvent(
+                strategy_id=self.strategy_id,
+                ticket=ticket,
                 reason=reason,
             )
         )

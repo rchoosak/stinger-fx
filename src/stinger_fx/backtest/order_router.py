@@ -17,6 +17,7 @@ from stinger_fx.brokers.order_queue import OrderQueue
 from stinger_fx.brokers.pool import BrokerPool
 from stinger_fx.core.event_bus import AsyncEventBus
 from stinger_fx.core.events import (
+    CancelOrderRequestEvent,
     ClosePositionRequestEvent,
     DecisionEvent,
     ModifyOrderRequestEvent,
@@ -320,6 +321,36 @@ class OrderRouter:
                 evt.strategy_id, evt.ticket, result.message,
             )
 
+    async def handle_cancel(self, evt: CancelOrderRequestEvent) -> None:
+        """Route a strategy's pending-order cancellation request.
+
+        Ownership check uses `get_open_orders()` (pending orders) rather
+        than `get_positions()` — the magic comparison is the same.
+        """
+        broker = self._broker_for(evt.strategy_id)
+        pending = await broker.get_open_orders()
+        order = next((o for o in pending if o.ticket == evt.ticket), None)
+        if order is None:
+            logger.warning(
+                "cancel_unknown_ticket strategy=%s ticket=%s",
+                evt.strategy_id, evt.ticket,
+            )
+            return
+        expected_magic = self.strategy_magic.get(evt.strategy_id, 0)
+        if order.magic != expected_magic:
+            logger.warning(
+                "cancel_rejected_cross_strategy strategy=%s ticket=%s "
+                "order_magic=%s expected_magic=%s",
+                evt.strategy_id, evt.ticket, order.magic, expected_magic,
+            )
+            return
+        result = await broker.cancel_order(evt.ticket)
+        if not result.ok:
+            logger.warning(
+                "cancel_failed strategy=%s ticket=%s reason=%s",
+                evt.strategy_id, evt.ticket, result.message,
+            )
+
     async def attach(self) -> None:
         async def _on_signal(evt: SignalEvent) -> None:
             await self.handle_signal(evt.signal)
@@ -333,6 +364,9 @@ class OrderRouter:
         async def _on_close(evt: ClosePositionRequestEvent) -> None:
             await self.handle_close(evt)
 
+        async def _on_cancel(evt: CancelOrderRequestEvent) -> None:
+            await self.handle_cancel(evt)
+
         self._sub = self.bus.subscribe(SignalEvent, _on_signal, name="order_router")
         self._sub_modify = self.bus.subscribe(
             ModifyOrderRequestEvent, _on_modify, name="order_router.modify"
@@ -342,6 +376,9 @@ class OrderRouter:
         )
         self._sub_close = self.bus.subscribe(
             ClosePositionRequestEvent, _on_close, name="order_router.close"
+        )
+        self._sub_cancel = self.bus.subscribe(
+            CancelOrderRequestEvent, _on_cancel, name="order_router.cancel"
         )
 
     async def detach(self) -> None:
@@ -353,3 +390,5 @@ class OrderRouter:
             await self._sub_partial.unsubscribe()
         if hasattr(self, "_sub_close"):
             await self._sub_close.unsubscribe()
+        if hasattr(self, "_sub_cancel"):
+            await self._sub_cancel.unsubscribe()

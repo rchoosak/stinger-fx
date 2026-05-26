@@ -21,6 +21,7 @@ from stinger_fx.core.event_bus import AsyncEventBus
 from stinger_fx.core.event_bus import Subscription as BusSubscription
 from stinger_fx.core.events import (
     BarEvent,
+    OrderCancelledEvent,
     OrderFilledEvent,
     OrderModifiedEvent,
     OrderRejectedEvent,
@@ -111,6 +112,9 @@ class StrategyRunner:
         )
         self._subscriptions.append(
             self.bus.subscribe(OrderRejectedEvent, self._on_order_rejected, name=f"{self.id}.reject")
+        )
+        self._subscriptions.append(
+            self.bus.subscribe(OrderCancelledEvent, self._on_order_cancelled, name=f"{self.id}.cancel")
         )
         self._subscriptions.append(
             self.bus.subscribe(PositionClosedEvent, self._on_position_closed, name=f"{self.id}.close")
@@ -239,6 +243,12 @@ class StrategyRunner:
                     magic=o.magic,
                 )
             )
+        # Phase 6.2.C — managers that implement on_order_filled (e.g.
+        # OCOGroupManager, which cancels sibling pendings when one fills)
+        # run before the strategy's own hook.
+        for manager in self._ctx.managers:
+            if hasattr(manager, "on_order_filled"):
+                await self._guarded(manager.on_order_filled, self._ctx, evt.order)
         await self._guarded(self.strategy.on_order_filled, self._ctx, evt.order)
 
     async def _on_order_rejected(self, evt: OrderRejectedEvent) -> None:
@@ -247,6 +257,20 @@ class StrategyRunner:
         if self._ctx is None:
             return
         await self._guarded(self.strategy.on_order_rejected, self._ctx, evt.order, evt.reason)
+
+    async def _on_order_cancelled(self, evt: OrderCancelledEvent) -> None:
+        if not self._active() or self._ctx is None:
+            return
+        # Filter by magic — strategy_id is "" for cancellations from
+        # `get_open_orders()` paths so we can't compare on that.
+        if evt.order.magic != self._magic:
+            return
+        # Phase 6.2.C — managers (specifically OCOGroupManager) need to
+        # know when a pending order they tracked has been removed so they
+        # can clean up their internal state.
+        for manager in self._ctx.managers:
+            if hasattr(manager, "on_order_cancelled"):
+                await self._guarded(manager.on_order_cancelled, self._ctx, evt.order)
 
     async def _on_position_closed(self, evt: PositionClosedEvent) -> None:
         if not self._active() or evt.position.magic != self._magic:

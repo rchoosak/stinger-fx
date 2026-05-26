@@ -131,8 +131,8 @@ async def test_oco_unrelated_close_is_noop() -> None:
         await _drain(bus)
 
         assert close_events == []
-        # Group untouched
-        assert oco.groups == {"g": {1, 2}}
+        # Group untouched (kind defaults to "position" for Phase 5 D API)
+        assert oco.groups == {"g": {1: "position", 2: "position"}}
     finally:
         await sub.unsubscribe()
         await bus.close()
@@ -163,7 +163,7 @@ async def test_oco_two_groups_independent() -> None:
         # Only ticket 2 (group A sibling) should be cancelled
         assert [e.ticket for e in close_events] == [2]
         # Group A gone, group B intact
-        assert oco.groups == {"B": {3, 4}}
+        assert oco.groups == {"B": {3: "position", 4: "position"}}
     finally:
         await sub.unsubscribe()
         await bus.close()
@@ -224,7 +224,7 @@ def test_oco_remove_manual() -> None:
     oco.add(1, group_id="A")
     oco.add(2, group_id="A")
     oco.remove(1)
-    assert oco.groups == {"A": {2}}
+    assert oco.groups == {"A": {2: "position"}}
     # Removing the last member empties the group entry
     oco.remove(2)
     assert oco.groups == {}
