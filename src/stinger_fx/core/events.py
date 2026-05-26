@@ -140,6 +140,19 @@ class PartialClosedEvent(Event):
     reason: str = ""
 
 
+class CancelOrderRequestEvent(Event):
+    """Strategy → router request to cancel a pending order.
+
+    Ownership is enforced by the router (magic match). Use this when the
+    OCO manager wants to drop a sibling pending after another leg fills,
+    or when the strategy decides to abort a pending entry.
+    """
+
+    strategy_id: str
+    ticket: int
+    reason: str = ""
+
+
 class ClosePositionRequestEvent(Event):
     """Strategy → router request to fully close an existing position.
 
