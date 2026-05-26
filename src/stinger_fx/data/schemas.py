@@ -156,6 +156,34 @@ class SweepResultRow(SQLModel, table=True):
     metrics_json: str
 
 
+class PendingOrderRequestRow(SQLModel, table=True):
+    """A persisted OrderRequest awaiting (or already past) broker submission.
+
+    Lifecycle of `status`:
+      * ``pending``  — row written, broker call not yet completed
+      * ``sent``     — broker accepted, ticket recorded
+      * ``failed``   — broker rejected or call raised
+
+    `client_order_id` is UNIQUE so the OrderQueue can detect duplicate
+    enqueue requests (e.g. a retry after a partial failure). The full
+    request payload is preserved in `request_json` for crash-recovery
+    replay across engine restarts.
+    """
+
+    __tablename__ = "pending_order_requests"
+
+    id: int | None = Field(default=None, primary_key=True)
+    client_order_id: str = Field(unique=True, index=True)
+    strategy_id: str = Field(index=True)
+    request_json: str                            # OrderRequest.model_dump_json()
+    enqueued_at: datetime = Field(index=True)
+    attempts: int = 0
+    status: str = Field(default="pending", index=True)
+    last_error: str = ""
+    broker_ticket: int | None = None
+    completed_at: datetime | None = None
+
+
 class OrderModificationRow(SQLModel, table=True):
     """One row per SL/TP modification or partial-close event.
 

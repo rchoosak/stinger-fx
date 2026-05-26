@@ -13,6 +13,7 @@ import logging
 import uuid
 
 from stinger_fx.brokers.base import BaseBroker
+from stinger_fx.brokers.order_queue import OrderQueue
 from stinger_fx.brokers.pool import BrokerPool
 from stinger_fx.core.event_bus import AsyncEventBus
 from stinger_fx.core.events import (
@@ -58,6 +59,7 @@ class OrderRouter:
         strategy_magic: dict[str, int] | None = None,
         strategy_accounts: dict[str, str] | None = None,
         risk: RiskMonitor | None = None,
+        queue: OrderQueue | None = None,
     ) -> None:
         if broker is None and pool is None:
             raise ValueError("OrderRouter needs either broker= or pool=")
@@ -74,6 +76,10 @@ class OrderRouter:
         self.strategy_magic = strategy_magic or {}
         self.strategy_accounts: dict[str, str] = dict(strategy_accounts or {})
         self.risk = risk
+        # Phase 6.1.C — optional persisted-outbox layer. When provided every
+        # order is written to SQLite before submission and replayable on
+        # restart; sim/file backtests leave this as None for zero DB latency.
+        self.queue = queue
 
     @property
     def pool(self) -> BrokerPool:
@@ -138,7 +144,12 @@ class OrderRouter:
         )
         await self.bus.publish(DecisionEvent(decision=decision))
 
-        result = await broker.place_order(req)
+        # Phase 6.1.C — route through the persisted outbox when configured;
+        # otherwise call the broker directly (sim/file backtest path).
+        if self.queue is not None:
+            result = await self.queue.submit(req, broker)
+        else:
+            result = await broker.place_order(req)
         if result.ok and result.order is not None:
             await self.bus.publish(OrderFilledEvent(order=result.order))
         else:
