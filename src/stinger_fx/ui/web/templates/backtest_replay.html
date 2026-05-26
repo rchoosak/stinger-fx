@@ -12,11 +12,17 @@
   <div class="chart-wrap">
     <canvas id="replay-chart" height="380"></canvas>
   </div>
+  <h3 style="margin-top: 1.5em;">Candlestick · {{ meta.symbol }} {{ meta.timeframe }}</h3>
+  <div class="chart-wrap">
+    <canvas id="candle-chart" height="380"></canvas>
+  </div>
+  <p class="muted small" id="candle-status">Loading candles…</p>
 </section>
 <p class="muted"><a href="/backtest">← back to backtest list</a></p>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial@0.2.1/dist/chartjs-chart-financial.min.js"></script>
 <script>
 (async function () {
   const resp = await fetch(`/backtest/{{ run_id }}/data.json`);
@@ -132,6 +138,96 @@
             },
           },
         },
+      },
+    },
+  });
+})();
+
+// --- Candlestick overlay ----------------------------------------------------
+(async function () {
+  const status = document.getElementById("candle-status");
+  const resp = await fetch(`/backtest/{{ run_id }}/candles.json`);
+  if (!resp.ok) { status.textContent = "candle data unavailable"; return; }
+  const data = await resp.json();
+  const bars = data.candles || [];
+  if (bars.length === 0) {
+    status.textContent = "no bar data found for this run (run `stinger-fx data download` first)";
+    return;
+  }
+  status.textContent = `${bars.length} bars · ${bars.length === 5000 ? "(truncated)" : ""}`;
+
+  const ohlc = bars.map(b => ({
+    x: new Date(b.time).getTime(),
+    o: b.open, h: b.high, l: b.low, c: b.close,
+  }));
+
+  // Trade markers on candle chart — use bar's close as y-coord since the
+  // candle's own price domain is what's plotted (vs equity domain above).
+  const entries = [];
+  const exitsProfit = [];
+  const exitsLoss = [];
+  for (const tr of (data.candles ? {{ meta.trades | tojson | safe }} : [])) {
+    entries.push({ x: new Date(tr.open_ts).getTime(), y: tr.open_price, side: tr.side });
+    const pt = { x: new Date(tr.close_ts).getTime(), y: tr.close_price, pnl: tr.pnl };
+    (tr.pnl >= 0 ? exitsProfit : exitsLoss).push(pt);
+  }
+
+  const ctxC = document.getElementById("candle-chart").getContext("2d");
+  new Chart(ctxC, {
+    type: "candlestick",
+    data: {
+      datasets: [
+        {
+          label: "OHLC",
+          data: ohlc,
+          color: { up: "#3fb950", down: "#f85149", unchanged: "#8b949e" },
+          borderColor: { up: "#3fb950", down: "#f85149", unchanged: "#8b949e" },
+        },
+        {
+          label: "Entry",
+          type: "scatter",
+          data: entries,
+          backgroundColor: "#58a6ff",
+          pointStyle: "triangle",
+          radius: 6,
+          parsing: false,
+        },
+        {
+          label: "Exit (profit)",
+          type: "scatter",
+          data: exitsProfit,
+          backgroundColor: "#3fb950",
+          pointStyle: "rectRot",
+          radius: 5,
+          parsing: false,
+        },
+        {
+          label: "Exit (loss)",
+          type: "scatter",
+          data: exitsLoss,
+          backgroundColor: "#f85149",
+          pointStyle: "rectRot",
+          radius: 5,
+          parsing: false,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        x: {
+          type: "time",
+          ticks: { color: "#8b949e" },
+          grid: { color: "#21262d" },
+        },
+        y: {
+          ticks: { color: "#8b949e" },
+          grid: { color: "#21262d" },
+        },
+      },
+      plugins: {
+        legend: { labels: { color: "#e6edf3" } },
       },
     },
   });

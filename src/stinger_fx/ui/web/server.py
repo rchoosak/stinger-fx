@@ -148,6 +148,76 @@ def create_app(
             context={"strategies": await handle.list_strategies()},
         )
 
+    # --- Strategy live params editor (Phase 5 — Batch E) -----------------
+
+    @app.get("/strategy/{sid}/params", response_class=HTMLResponse)
+    async def strategy_params_form(sid: str, request: Request):
+        """Render an HTMX-driven edit form for the strategy's current params."""
+        try:
+            current = handle.get_strategy_params(sid)
+            schema = handle.get_strategy_param_schema(sid)
+        except KeyError as e:
+            raise HTTPException(404, f"unknown strategy {sid}") from e
+        fields = [
+            {
+                "name": name,
+                "value": current.get(name, info["default"]),
+                "type": info["type"],
+                "description": info["description"],
+            }
+            for name, info in schema.items()
+        ]
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="partials/strategy_params.html",
+            context={"sid": sid, "fields": fields, "error": None},
+        )
+
+    @app.post("/strategy/{sid}/params", response_class=HTMLResponse)
+    async def strategy_params_update(sid: str, request: Request):
+        """Apply form-encoded param updates atomically via runner.update_params."""
+        form = await request.form()
+        try:
+            schema = handle.get_strategy_param_schema(sid)
+        except KeyError as e:
+            raise HTTPException(404, f"unknown strategy {sid}") from e
+        # Coerce raw form strings into the field's declared type. Pydantic
+        # would do this anyway, but doing it here lets us surface a more
+        # actionable error message when e.g. "abc" was typed into an int field.
+        new_values: dict = {}
+        for name, info in schema.items():
+            if name not in form:
+                continue
+            raw = form[name]
+            new_values[name] = _coerce_form_value(raw, info["type"])
+
+        try:
+            await handle.update_strategy_params(sid, new_values)
+        except ValueError as e:
+            # Re-render the form with the error banner.
+            current = handle.get_strategy_params(sid)
+            fields = [
+                {
+                    "name": name,
+                    "value": new_values.get(name, current.get(name, info["default"])),
+                    "type": info["type"],
+                    "description": info["description"],
+                }
+                for name, info in schema.items()
+            ]
+            return TEMPLATES.TemplateResponse(
+                request=request,
+                name="partials/strategy_params.html",
+                context={"sid": sid, "fields": fields, "error": str(e)},
+            )
+
+        # Success: HTMX swaps the strategies list back in.
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="partials/strategies.html",
+            context={"strategies": await handle.list_strategies()},
+        )
+
     # --- SSE streams ------------------------------------------------------
 
     @app.get("/stream/events")
@@ -295,6 +365,19 @@ def create_app(
             raise HTTPException(404, f"no backtest run with id {run_id!r}")
         return JSONResponse(data)
 
+    @app.get("/backtest/{run_id}/candles.json")
+    async def backtest_candles(run_id: str):
+        """Return OHLC bars for the run's primary symbol/timeframe.
+
+        Used by the candlestick overlay on the replay page. Returns an empty
+        list (not a 404) when bars aren't available — the chart can fall back
+        to equity-only when this happens.
+        """
+        from fastapi.responses import JSONResponse
+
+        candles = _load_replay_candles(app.state.data_dir, run_id)
+        return JSONResponse({"candles": candles})
+
     # --- Control plane ---------------------------------------------------
     # Two tiny endpoints the `--detach` flow leans on. They're broker- and
     # mode-agnostic so they work the same way for any running engine.
@@ -353,6 +436,31 @@ def create_app(
     return app
 
 
+def _coerce_form_value(raw, type_name: str):
+    """Best-effort string-to-type coercion for HTMX form inputs.
+
+    Falls back to the raw string when coercion fails so Pydantic can surface
+    the real validation error from `update_strategy_params`.
+    """
+    # Form values can also be UploadFile when a file input is in the form —
+    # we never expect that here, but guard anyway.
+    if not isinstance(raw, str):
+        return raw
+    if type_name == "int":
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return raw
+    if type_name == "float":
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return raw
+    if type_name == "bool":
+        return raw.strip().lower() in ("1", "true", "yes", "on")
+    return raw
+
+
 def _li(level: str, message: str) -> str:
     ts = datetime.now().strftime("%H:%M:%S")
     safe = json.dumps(message)[1:-1]  # crude HTML-safe-ish: avoid injecting raw tags
@@ -394,6 +502,74 @@ def _list_backtest_runs(data_dir: Path) -> list[dict]:
         )
     # Most-recently-finished first
     out.sort(key=lambda r: r["end"], reverse=True)
+    return out
+
+
+def _load_replay_candles(data_dir: Path, run_id: str) -> list[dict]:
+    """Read OHLC bars for ``run_id``'s primary feed from the parquet store.
+
+    Reads `meta.symbol`, `meta.timeframe`, `meta.start`, `meta.end` from the
+    ``<run_id>_trades.json`` sidecar, then streams matching bars out of
+    ``<data_dir>/parquet``. Returns an empty list (not a 404) when the
+    sidecar is missing or there are no bars — the chart falls back to
+    equity-only when the response is empty.
+
+    Capped at 5000 bars so a year of M1 doesn't blow the JSON response.
+    """
+    bt_dir = data_dir / "backtests"
+    trades_path = bt_dir / f"{run_id}_trades.json"
+    if not trades_path.exists():
+        return []
+    try:
+        meta = json.loads(trades_path.read_text())
+    except json.JSONDecodeError:
+        return []
+    symbol = meta.get("symbol")
+    tf_str = meta.get("timeframe")
+    start_iso = meta.get("start")
+    end_iso = meta.get("end")
+    if not (symbol and tf_str and start_iso and end_iso):
+        return []
+
+    from stinger_fx.data import iter_bars
+    from stinger_fx.domain import Timeframe
+
+    try:
+        tf = Timeframe(tf_str)
+    except ValueError:
+        return []
+    try:
+        start = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+        end = datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
+    except ValueError:
+        return []
+
+    parquet_root = data_dir / "parquet"
+    if not parquet_root.exists():
+        return []
+
+    out: list[dict] = []
+    try:
+        for bar in iter_bars(parquet_root, symbol, tf, start, end):
+            out.append(
+                {
+                    "time": bar.time.isoformat(),
+                    "open": bar.open,
+                    "high": bar.high,
+                    "low": bar.low,
+                    "close": bar.close,
+                    "volume": bar.tick_volume,
+                }
+            )
+            if len(out) >= 5000:
+                logger.info(
+                    "candles_truncated run_id=%s symbol=%s tf=%s capped=5000",
+                    run_id, symbol, tf_str,
+                )
+                break
+    except Exception as e:  # noqa: BLE001 — gracefully degrade on missing data
+        logger.warning("candles_read_failed run_id=%s err=%s", run_id, e)
+        return []
     return out
 
 

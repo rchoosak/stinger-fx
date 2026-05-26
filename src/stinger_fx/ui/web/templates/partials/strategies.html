@@ -16,6 +16,7 @@
         {% else %}
           <button hx-post="/strategy/{{ s.id }}/pause" hx-target="#strategies-panel" hx-swap="innerHTML">Pause</button>
         {% endif %}
+        <button hx-get="/strategy/{{ s.id }}/params" hx-target="#strategies-panel" hx-swap="innerHTML">Edit params</button>
       </td>
     </tr>
   {% endfor %}

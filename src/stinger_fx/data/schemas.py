@@ -156,6 +156,31 @@ class SweepResultRow(SQLModel, table=True):
     metrics_json: str
 
 
+class OrderModificationRow(SQLModel, table=True):
+    """One row per SL/TP modification or partial-close event.
+
+    Populated by the engine's ModificationLogger when it receives
+    ``OrderModifiedEvent`` or ``PartialClosedEvent`` from the bus.
+    """
+
+    __tablename__ = "order_modifications"
+
+    id: int | None = Field(default=None, primary_key=True)
+    ts: datetime = Field(index=True)
+    ticket: int = Field(index=True)
+    strategy_id: str = Field(index=True)
+    modification_type: str = Field(index=True)  # "modify_sl_tp" | "partial_close"
+    # SL/TP modification fields (NULL for partial_close rows)
+    old_sl: float | None = None
+    new_sl: float | None = None
+    old_tp: float | None = None
+    new_tp: float | None = None
+    # Partial-close fields (NULL for modify_sl_tp rows)
+    closed_volume: float | None = None
+    realized_pnl: float | None = None
+    reason: str = ""
+
+
 class ConfigAuditRow(SQLModel, table=True):
     __tablename__ = "config_audit"
 

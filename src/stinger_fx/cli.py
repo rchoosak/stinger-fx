@@ -484,6 +484,49 @@ def data_download(
     asyncio.run(_do())
 
 
+@data_app.command("import-ticks")
+def data_import_ticks(
+    csv: Path = typer.Option(..., "--csv", help="Path to the tick CSV file."),
+    symbol: str = typer.Option(..., "--symbol", help="Symbol to file the ticks under."),
+    time_col: str = typer.Option("time", "--time-col", help="CSV column holding the timestamp."),
+    bid_col: str = typer.Option("bid", "--bid-col", help="CSV column holding the bid price."),
+    ask_col: str = typer.Option("ask", "--ask-col", help="CSV column holding the ask price."),
+    last_col: str | None = typer.Option(None, "--last-col", help="Optional 'last' price column."),
+    volume_col: str | None = typer.Option(None, "--volume-col", help="Optional volume column."),
+    flags_col: str | None = typer.Option(None, "--flags-col", help="Optional flags column."),
+    tz: str = typer.Option("UTC", "--tz", help="Timezone for naive timestamps (IANA name)."),
+    config_dir: Path = typer.Option(Path("config"), "--config-dir", "-c"),
+) -> None:
+    """Import a tick CSV into the Parquet store under data/parquet/<symbol>/TICK.
+
+    Accepts ISO 8601 timestamps natively; for "2024.01.15 00:00:00" style
+    timestamps pandas is used as a fallback parser. Naive timestamps are
+    interpreted in --tz (default UTC) and stored as UTC.
+    """
+    from stinger_fx.config import load_all
+    from stinger_fx.data.csv_import import CsvImportError, import_ticks_csv
+
+    cfg = load_all(config_dir)
+    parquet_root = cfg.app.data_dir / "parquet"
+    try:
+        n = import_ticks_csv(
+            csv,
+            symbol=symbol,
+            parquet_root=parquet_root,
+            time_col=time_col,
+            bid_col=bid_col,
+            ask_col=ask_col,
+            last_col=last_col,
+            volume_col=volume_col,
+            flags_col=flags_col,
+            tz=tz,
+        )
+    except CsvImportError as e:
+        typer.echo(f"ERROR: {e}", err=True)
+        raise typer.Exit(code=1) from e
+    typer.echo(f"imported {n} ticks → {parquet_root / symbol / 'TICK'}")
+
+
 # --- db ---------------------------------------------------------------------
 
 

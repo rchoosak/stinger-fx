@@ -14,11 +14,12 @@ from datetime import UTC, datetime
 import pyarrow as pa
 
 from stinger_fx.backtest.reports import TradeRecord
-from stinger_fx.backtest.slippage import fixed_pips_slippage
+from stinger_fx.backtest.slippage import SlippageModel, fixed_pips_model, fixed_pips_slippage
 from stinger_fx.brokers.base import BaseBroker
 from stinger_fx.core.event_bus import AsyncEventBus
 from stinger_fx.core.events import (
     OrderFilledEvent,
+    PartialClosedEvent,
     PositionClosedEvent,
 )
 from stinger_fx.domain import (
@@ -47,6 +48,7 @@ class SimBroker(BaseBroker):
         *,
         initial_balance: float,
         slippage_pips: float = 0.0,
+        slippage_fn: SlippageModel | None = None,
         contract_size: float = 100_000.0,
         point: float = 0.0001,
     ) -> None:
@@ -58,8 +60,16 @@ class SimBroker(BaseBroker):
         self._next_ticket = 1
         self._positions: dict[int, Position] = {}
         self._sim_time: datetime = datetime.now(UTC)
+        # Per-symbol bid/ask — set by advance_market(). `_last_price` kept for
+        # backward compat (check_sl_tp uses it as a mark-to-market reference).
         self._last_price: dict[str, float] = {}
+        self._last_bid: dict[str, float] = {}
+        self._last_ask: dict[str, float] = {}
         self._trades: list[TradeRecord] = []
+        # Slippage callable — if not supplied, fall back to the legacy fixed-pips model.
+        self._slippage_fn: SlippageModel = slippage_fn or fixed_pips_model(
+            pips=slippage_pips, point=point
+        )
 
     # --- For the file backtester to drive the sim ---------------------------
 
@@ -67,7 +77,16 @@ class SimBroker(BaseBroker):
         self._sim_time = t
 
     def set_market(self, symbol: str, price: float) -> None:
+        """Set both bid and ask to *price* (no spread).  Bar-mode entry point."""
         self._last_price[symbol] = price
+        self._last_bid[symbol] = price
+        self._last_ask[symbol] = price
+
+    def set_market_tick(self, symbol: str, bid: float, ask: float) -> None:
+        """Set bid and ask independently.  Tick-mode entry point."""
+        self._last_bid[symbol] = bid
+        self._last_ask[symbol] = ask
+        self._last_price[symbol] = bid  # mark-to-market reference = bid
 
     @property
     def trades(self) -> list[TradeRecord]:
@@ -169,14 +188,16 @@ class SimBroker(BaseBroker):
                 status=OrderStatus.REJECTED,
                 message=f"sim broker supports MARKET only (got {req.type})",
             )
-        mid = self._last_price.get(req.symbol)
-        if mid is None:
+        bid = self._last_bid.get(req.symbol)
+        ask = self._last_ask.get(req.symbol)
+        if bid is None or ask is None:
             return OrderResult(
                 ok=False,
                 status=OrderStatus.REJECTED,
                 message=f"no market price for {req.symbol}",
             )
-        fill_price = fixed_pips_slippage(mid, req.side, self._slippage_pips, self._point)
+        fill_price = self._slippage_fn(req.side, bid=bid, ask=ask)
+        mid = (bid + ask) / 2
         ticket = self._next_ticket
         self._next_ticket += 1
         pos = Position(
@@ -226,24 +247,43 @@ class SimBroker(BaseBroker):
         pos = self._positions.get(ticket)
         if pos is None:
             return OrderResult(ok=False, status=OrderStatus.REJECTED, message="not found")
-        # Pydantic frozen — rebuild
-        updated = pos.model_copy(update={"sl": sl, "tp": tp})
+        # Pydantic frozen — rebuild. Pass through current values for fields
+        # the caller didn't supply so we don't accidentally clear an existing
+        # SL when only TP was being moved (and vice-versa).
+        updated = pos.model_copy(
+            update={
+                "sl": sl if sl is not None else pos.sl,
+                "tp": tp if tp is not None else pos.tp,
+            }
+        )
         self._positions[ticket] = updated
         return OrderResult(ok=True, ticket=ticket, status=OrderStatus.SUBMITTED)
 
     async def close_position(
         self, ticket: int, volume: float | None = None
     ) -> OrderResult:
-        pos = self._positions.pop(ticket, None)
+        pos = self._positions.get(ticket)
         if pos is None:
             return OrderResult(ok=False, status=OrderStatus.REJECTED, message="not found")
         mid = self._last_price.get(pos.symbol)
         if mid is None:
             return OrderResult(ok=False, status=OrderStatus.REJECTED, message="no market price")
+
+        # Phase 4: a partial close passes a `volume` strictly less than the
+        # position's current volume. We close that chunk and leave the rest
+        # open with a shrunken `volume`. A None / equal / over-sized volume
+        # request closes the whole position (the over-sized case is filtered
+        # at the router; brokers in the wild typically clamp).
+        full_close = volume is None or volume >= pos.volume
+        close_qty = pos.volume if full_close else float(volume)
+
+        # When closing a BUY we exit at bid (sell side), and vice versa.
         close_side = Side.SELL if pos.side is Side.BUY else Side.BUY
-        close_price = fixed_pips_slippage(mid, close_side, self._slippage_pips, self._point)
-        # P&L = (close - open) * sign * volume * contract_size, in profit currency.
-        pnl = (close_price - pos.open_price) * pos.side.sign * pos.volume * self._contract
+        bid = self._last_bid.get(pos.symbol, mid)
+        ask = self._last_ask.get(pos.symbol, mid)
+        close_price = self._slippage_fn(close_side, bid=bid, ask=ask)
+        # P&L on the closed chunk only.
+        pnl = (close_price - pos.open_price) * pos.side.sign * close_qty * self._contract
         self.balance += pnl
         self._trades.append(
             TradeRecord(
@@ -252,13 +292,26 @@ class SimBroker(BaseBroker):
                 side=pos.side.value,
                 open_price=pos.open_price,
                 close_price=close_price,
-                volume=pos.volume,
+                volume=close_qty,
                 pnl=pnl,
             )
         )
-        await self.bus.publish(
-            PositionClosedEvent(position=pos, realized_pnl=pnl)
-        )
+
+        if full_close:
+            self._positions.pop(ticket, None)
+            await self.bus.publish(
+                PositionClosedEvent(position=pos, realized_pnl=pnl)
+            )
+        else:
+            remaining = pos.model_copy(update={"volume": pos.volume - close_qty})
+            self._positions[ticket] = remaining
+            await self.bus.publish(
+                PartialClosedEvent(
+                    position=remaining,
+                    closed_volume=close_qty,
+                    realized_pnl=pnl,
+                )
+            )
         return OrderResult(ok=True, ticket=ticket, status=OrderStatus.FILLED)
 
     async def cancel_order(self, ticket: int) -> OrderResult:
@@ -274,7 +327,11 @@ class SimBroker(BaseBroker):
     # --- Backtest helpers ---------------------------------------------------
 
     def check_sl_tp(self, symbol: str, bar_high: float, bar_low: float) -> list[Position]:
-        """Returns positions that should be closed (one of SL/TP is breached this bar)."""
+        """Returns positions that should be closed (one of SL/TP is breached this bar).
+
+        Bar-mode check: scans bar high/low. Ambiguous when a wick touches both
+        SL and TP — `tick`-mode uses `check_sl_tp_tick` for unambiguous timing.
+        """
         to_close: list[Position] = []
         for pos in list(self._positions.values()):
             if pos.symbol != symbol:
@@ -290,5 +347,38 @@ class SimBroker(BaseBroker):
                     to_close.append(pos)
                     continue
                 if pos.tp is not None and bar_low <= pos.tp:
+                    to_close.append(pos)
+        return to_close
+
+    def check_sl_tp_tick(self, symbol: str, bid: float, ask: float) -> list[Position]:
+        """Tick-mode SL/TP check (Phase 4).
+
+        Conservative quoting model — a long position closes on:
+          • SL when **bid** ≤ sl   (we sell at bid, so SL fires when bid hits)
+          • TP when **bid** ≥ tp   (same logic — we sell at bid for profit)
+
+        A short position closes on:
+          • SL when **ask** ≥ sl   (we buy back at ask)
+          • TP when **ask** ≤ tp
+
+        Unlike bar-mode `check_sl_tp`, this is unambiguous chronologically:
+        each tick reveals one bid/ask snapshot, so SL and TP can't both fire
+        on the same event.
+        """
+        to_close: list[Position] = []
+        for pos in list(self._positions.values()):
+            if pos.symbol != symbol:
+                continue
+            if pos.side is Side.BUY:
+                if pos.sl is not None and bid <= pos.sl:
+                    to_close.append(pos)
+                    continue
+                if pos.tp is not None and bid >= pos.tp:
+                    to_close.append(pos)
+            else:
+                if pos.sl is not None and ask >= pos.sl:
+                    to_close.append(pos)
+                    continue
+                if pos.tp is not None and ask <= pos.tp:
                     to_close.append(pos)
         return to_close

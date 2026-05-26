@@ -1,11 +1,13 @@
 """Data layer — SQLite + Parquet stores."""
 
-from stinger_fx.data.historical import iter_bars
+from stinger_fx.data.historical import iter_bars, iter_ticks
+from stinger_fx.data.modification_logger import ModificationLogger
 from stinger_fx.data.parquet_store import ParquetStore
 from stinger_fx.data.repositories import (
     BacktestRepo,
     ConfigAuditRepo,
     DecisionRepo,
+    OrderModificationRepo,
     OrderRepo,
     SignalRepo,
     SweepRepo,
@@ -17,6 +19,8 @@ __all__ = [
     "BacktestRepo",
     "ConfigAuditRepo",
     "DecisionRepo",
+    "ModificationLogger",
+    "OrderModificationRepo",
     "OrderRepo",
     "ParquetStore",
     "SignalRepo",
@@ -25,4 +29,5 @@ __all__ = [
     "TradeRepo",
     "in_memory_store",
     "iter_bars",
+    "iter_ticks",
 ]
