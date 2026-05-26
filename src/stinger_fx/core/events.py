@@ -182,6 +182,22 @@ class StrategyStateChangedEvent(Event):
     reason: str = ""
 
 
+class BrokerDisconnectedEvent(Event):
+    """Broker connection lost — engine should treat the broker as offline until
+    a corresponding ``BrokerReconnectedEvent`` arrives."""
+
+    broker_name: str
+    reason: str = ""
+
+
+class BrokerReconnectedEvent(Event):
+    """Broker connection re-established after a disconnect.  Tick pumps and
+    order queues should resume."""
+
+    broker_name: str
+    downtime_seconds: float = 0.0
+
+
 class ConfigReloadedEvent(Event):
     changes: dict[str, Any] = Field(default_factory=dict)
 
