@@ -75,12 +75,19 @@ class ConfigReloader:
 
     async def _diff_app(self, old: AppConfig, new: AppConfig, result: ReloadResult) -> None:
         # Broker switch — requires restart (broker re-connect mid-run is unsafe).
-        if old.broker.type != new.broker.type:
-            result.needs_restart.append(f"broker.type ({old.broker.type}→{new.broker.type})")
+        # `primary_broker_config` is safe for both single- and multi-account
+        # configs; for multi-account we compare the whole `broker_list` below
+        # to also catch additions / removals.
+        old_primary = old.primary_broker_config
+        new_primary = new.primary_broker_config
+        if old_primary.type != new_primary.type:
+            result.needs_restart.append(
+                f"broker.type ({old_primary.type}→{new_primary.type})"
+            )
             return
 
         # Broker subconfig changes within the same type — also restart for safety.
-        if old.broker != new.broker:
+        if old.broker_list != new.broker_list:
             result.needs_restart.append("broker.*")
 
         # Web bind host/port — restart-required; everything else in WebConfig is hot.

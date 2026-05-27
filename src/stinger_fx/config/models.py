@@ -160,6 +160,17 @@ class AppConfig(BaseModel):
         assert self.broker is not None  # guarded by _normalise_brokers
         return [self.broker]
 
+    @property
+    def primary_broker_config(self) -> BrokerConfig:
+        """First broker config regardless of single/multi mode.
+
+        Use this anywhere the legacy code path read ``app_cfg.broker.X``
+        for logging / display / Strategy-Tester defaulting — in multi-
+        account mode ``broker`` is None and direct access raises, but
+        ``broker_list`` is guaranteed non-empty by ``_normalise_brokers``.
+        """
+        return self.broker_list[0]
+
 
 # --- Strategies ---------------------------------------------------------------
 
