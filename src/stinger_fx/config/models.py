@@ -368,7 +368,9 @@ class SweepRunConfig(BaseModel):
     slippage_volatility_factor: float = Field(0.25, gt=0)
     data_source: Path
     parameter_grid: dict[str, list[Any]] = Field(default_factory=dict)
-    rank_by: MetricName = "net_pnl"
+    # rank_by accepts a built-in MetricName OR any name defined in
+    # custom_metrics (Phase 7.C). Relaxed from Literal to str + runtime check.
+    rank_by: str = "net_pnl"
     top_n: int = Field(10, ge=1, le=1000)
     granularity: Literal["bar", "tick"] = "bar"
     # Phase 6.3.A/B — pluggable search backend
@@ -385,6 +387,12 @@ class SweepRunConfig(BaseModel):
     # AND still returns the single-objective ranking (rank_by). Each
     # entry is {"metric": name, "direction": "max" | "min"}.
     objectives: list[dict[str, str]] | None = None
+    # Phase 7.C — user-defined metrics. Each entry maps a custom metric
+    # name to a DSL expression (e.g. "sharpe - 0.5 * max_drawdown / 10").
+    # Custom metrics are computed per cell post-backtest and are then
+    # available to rank_by + objectives. Expressions can only reference
+    # built-in metrics (no custom→custom chains).
+    custom_metrics: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("start", "end")
     @classmethod
@@ -455,7 +463,10 @@ class WalkForwardConfig(BaseModel):
     scheme: Literal["rolling", "expanding"] = "rolling"
     # Inner-sweep configuration (same algos / knobs as SweepRunConfig)
     parameter_grid: dict[str, list[Any]] = Field(default_factory=dict)
-    rank_by: MetricName = "net_pnl"
+    # rank_by accepts a built-in MetricName OR any name defined in
+    # custom_metrics (Phase 7.C). Plain str type with validation in the
+    # model_validator below.
+    rank_by: str = "net_pnl"
     algo: Literal["grid", "optuna", "random", "genetic"] = "grid"
     n_trials: int = Field(100, ge=1)
     random_seed: int | None = None

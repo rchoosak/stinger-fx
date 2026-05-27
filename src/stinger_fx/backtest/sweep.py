@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from stinger_fx.backtest.file_backtester import FileBacktester
+from stinger_fx.backtest.metric_dsl import MetricDSLError, compile_metric
 from stinger_fx.backtest.pareto import Objective, ParetoResult, extract_pareto_frontier
 from stinger_fx.backtest.reports import BacktestReport
 from stinger_fx.backtest.search import build_search_strategy
@@ -148,6 +149,12 @@ class ParameterSweep:
         # "maximize" uniformly.
         minimize = cfg.rank_by in _SMALLER_IS_BETTER
 
+        # Phase 7.C — compile custom-metric expressions once up front so any
+        # syntax / disallowed-node error fails fast before any backtest runs.
+        compiled_customs = {
+            name: compile_metric(expr) for name, expr in cfg.custom_metrics.items()
+        }
+
         i = 0
         while True:
             overrides = search.suggest()
@@ -156,6 +163,18 @@ class ParameterSweep:
             i += 1
             cell_report = await self._run_cell(cfg, overrides, i)
             metrics = cell_report.to_metrics_dict()
+            # Phase 7.C — evaluate each custom metric against the cell's
+            # base metrics and merge into the metrics dict. Custom metrics
+            # are then visible to rank_by / objectives downstream.
+            for name, expr in compiled_customs.items():
+                try:
+                    metrics[name] = expr.evaluate(metrics)
+                except MetricDSLError as e:
+                    logger.warning(
+                        "custom_metric_eval_failed sweep_id=%s cell=%d name=%s err=%s",
+                        cfg.id, i, name, e,
+                    )
+                    metrics[name] = float("nan")
             raw_score = metrics.get(cfg.rank_by, 0.0)
             # Optuna handles None/nan poorly; coerce to a finite worst-case
             if raw_score is None or (isinstance(raw_score, float) and raw_score != raw_score):
