@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Portfolio · Stinger-Fx{% endblock %}
+{% block content %}
+<section class="panel widest">
+  <h2>Portfolio: <code>{{ summary.id }}</code></h2>
+  <p class="muted">
+    {{ summary.component_ids | length }} components ·
+    initial: {{ summary.initial_balance }} · final: {{ summary.final_balance }} ·
+    net P&amp;L: <strong>{{ "%+.2f"|format(summary.net_pnl) }}</strong>
+  </p>
+  <p>
+    <strong>Max drawdown:</strong> {{ "%.2f"|format(summary.max_drawdown_pct) }}% ·
+    <strong>Sharpe:</strong> {{ "%.4f"|format(summary.sharpe) }}
+  </p>
+</section>
+
+<section class="panel widest">
+  <h3>Combined equity curve</h3>
+  <div class="chart-wrap">
+    <canvas id="combined-chart" height="380"></canvas>
+  </div>
+</section>
+
+<section class="panel widest">
+  <h3>Per-strategy contribution</h3>
+  <table class="audit-table">
+    <thead><tr>
+      <th>Strategy</th><th>Run</th><th>Net P&amp;L</th><th>Share %</th>
+      <th>Final balance</th><th>Max DD %</th><th>Sharpe</th><th>Trades</th>
+    </tr></thead>
+    <tbody>
+      {% for c in summary.contributions %}
+      <tr>
+        <td>{{ c.strategy_id }}</td>
+        <td><a href="/backtest/{{ c.run_id }}"><code>{{ c.run_id }}</code></a></td>
+        <td>{{ "%+.2f"|format(c.net_pnl) }}</td>
+        <td>{{ "%+.2f"|format(c.share_pct) }}%</td>
+        <td>{{ "%.2f"|format(c.final_balance) }}</td>
+        <td>{{ "%.2f"|format(c.max_drawdown_pct) }}%</td>
+        <td>{{ "%.4f"|format(c.sharpe) }}</td>
+        <td>{{ c.trade_count }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel widest">
+  <h3>Cross-strategy correlation</h3>
+  <p class="muted small">Pearson correlation of per-step P&amp;L deltas. Low (or negative) values indicate good diversification; high values mean strategies move together.</p>
+  <table class="audit-table">
+    <thead>
+      <tr>
+        <th></th>
+        {% for a in summary.component_ids %}<th><code>{{ a }}</code></th>{% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in summary.component_ids %}
+      <tr>
+        <th><code>{{ a }}</code></th>
+        {% for b in summary.component_ids %}
+        {% set rho = summary.correlation_matrix.get(a, {}).get(b, 0.0) %}
+        <td style="background: rgba({{ (255 - rho * 100) | int }}, {{ (200 + rho * 50) | int }}, 100, 0.2);">
+          {{ "%+.2f"|format(rho) }}
+        </td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script>
+(function () {
+  const points = {{ summary.equity_curve | tojson | safe }};
+  const data = points.map(p => ({ x: p.time, y: p.equity }));
+  const ctx = document.getElementById("combined-chart").getContext("2d");
+  new Chart(ctx, {
+    type: "line",
+    data: {
+      datasets: [{
+        label: "Combined equity",
+        data,
+        borderColor: "#58a6ff",
+        backgroundColor: "rgba(88,166,255,0.08)",
+        fill: true,
+        tension: 0,
+        pointRadius: 0,
+        borderWidth: 1.5,
+        parsing: false,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        x: { type: "time", ticks: { color: "#8b949e" }, grid: { color: "#21262d" } },
+        y: { ticks: { color: "#8b949e" }, grid: { color: "#21262d" } },
+      },
+      plugins: { legend: { labels: { color: "#e6edf3" } } },
+    },
+  });
+})();
+</script>
+
+<p class="muted"><a href="/portfolio">← back to portfolio builder</a></p>
+{% endblock %}
