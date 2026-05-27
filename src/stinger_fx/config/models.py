@@ -380,6 +380,11 @@ class SweepRunConfig(BaseModel):
     generations: int = Field(10, ge=1)
     elite_size: int = Field(2, ge=0)
     mutation_rate: float = Field(0.1, ge=0.0, le=1.0)
+    # Phase 7.B — multi-objective (Pareto frontier). When supplied,
+    # the sweep computes the Pareto frontier across these objectives
+    # AND still returns the single-objective ranking (rank_by). Each
+    # entry is {"metric": name, "direction": "max" | "min"}.
+    objectives: list[dict[str, str]] | None = None
 
     @field_validator("start", "end")
     @classmethod
