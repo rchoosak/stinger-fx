@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from stinger_fx.backtest.file_backtester import FileBacktester
+from stinger_fx.backtest.pareto import Objective, ParetoResult, extract_pareto_frontier
 from stinger_fx.backtest.reports import BacktestReport
 from stinger_fx.backtest.search import build_search_strategy
 from stinger_fx.config.models import (
@@ -53,6 +54,10 @@ class SweepReport:
     rank_by: MetricName
     total_combos: int
     results: list[SweepCellResult] = field(default_factory=list)
+    # Phase 7.B — multi-objective Pareto frontier (None when no objectives
+    # were declared on the sweep config). When set, summary JSON includes
+    # the frontier subset + the full Pareto-tagged point list.
+    pareto: ParetoResult | None = None
 
     @property
     def ranked(self) -> list[SweepCellResult]:
@@ -167,6 +172,23 @@ class ParameterSweep:
         # Now that the search is done we know the actual trial count
         report.total_combos = i
         report.finished_at = datetime.now(UTC)
+        # Phase 7.B — compute Pareto frontier when objectives are declared
+        if cfg.objectives:
+            objectives = [
+                Objective(
+                    metric=obj["metric"],
+                    direction=obj.get("direction", "max"),  # type: ignore[arg-type]
+                )
+                for obj in cfg.objectives
+            ]
+            cells = [(r.params, r.metrics) for r in report.results]
+            report.pareto = extract_pareto_frontier(cells, objectives)
+            logger.info(
+                "sweep_pareto sweep_id=%s frontier_size=%d total=%d",
+                cfg.id,
+                len(report.pareto.frontier),
+                len(report.pareto.points),
+            )
         await self._persist(cfg, report)
         return report
 
@@ -208,22 +230,19 @@ class ParameterSweep:
     async def _persist(self, cfg: SweepRunConfig, report: SweepReport) -> None:
         self._report_dir.mkdir(parents=True, exist_ok=True)
         path = self._report_dir / f"{cfg.id}_summary.json"
-        path.write_text(
-            json.dumps(
-                {
-                    **report.to_summary(),
-                    "top_n": [
-                        {"params": r.params, "metrics": r.metrics}
-                        for r in report.top(cfg.top_n)
-                    ],
-                    "all": [
-                        {"params": r.params, "metrics": r.metrics} for r in report.ranked
-                    ],
-                },
-                indent=2,
-                default=str,
-            )
-        )
+        summary_payload: dict[str, Any] = {
+            **report.to_summary(),
+            "top_n": [
+                {"params": r.params, "metrics": r.metrics}
+                for r in report.top(cfg.top_n)
+            ],
+            "all": [
+                {"params": r.params, "metrics": r.metrics} for r in report.ranked
+            ],
+        }
+        if report.pareto is not None:
+            summary_payload["pareto"] = report.pareto.to_summary()
+        path.write_text(json.dumps(summary_payload, indent=2, default=str))
         if self._sqlite is not None:
             from stinger_fx.data.repositories import SweepRepo
 

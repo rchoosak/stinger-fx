@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}{{ sweep_id }} · Pareto · Stinger-Fx{% endblock %}
+{% block content %}
+<section class="panel widest">
+  <h2>{{ sweep_id }} · Pareto frontier</h2>
+  <p class="muted">
+    {{ pareto.frontier_size }} of {{ pareto.total_points }} cells are Pareto-optimal.
+    Each non-dominated cell represents a trade-off no other combination can beat
+    on every objective simultaneously.
+  </p>
+  <p>
+    <strong>Objectives:</strong>
+    {% for o in pareto.objectives %}
+      <span class="badge">{{ o.metric }} ({{ o.direction }})</span>
+    {% endfor %}
+  </p>
+</section>
+
+{% if pareto.objectives | length >= 2 %}
+<section class="panel widest">
+  <h3>{{ pareto.objectives[0].metric }} ({{ pareto.objectives[0].direction }})
+      vs {{ pareto.objectives[1].metric }} ({{ pareto.objectives[1].direction }})</h3>
+  <div class="chart-wrap">
+    <canvas id="pareto-chart" height="380"></canvas>
+  </div>
+</section>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script>
+(function () {
+  const points = {{ pareto.points | tojson | safe }};
+  const objs = {{ pareto.objectives | tojson | safe }};
+  const xKey = objs[0].metric;
+  const yKey = objs[1].metric;
+
+  const frontier = points.filter(p => p.is_pareto)
+    .map(p => ({ x: p.metrics[xKey], y: p.metrics[yKey], params: p.params }));
+  const dominated = points.filter(p => !p.is_pareto)
+    .map(p => ({ x: p.metrics[xKey], y: p.metrics[yKey], params: p.params }));
+
+  const ctx = document.getElementById("pareto-chart").getContext("2d");
+  new Chart(ctx, {
+    type: "scatter",
+    data: {
+      datasets: [
+        {
+          label: "Dominated",
+          data: dominated,
+          backgroundColor: "rgba(139, 148, 158, 0.35)",
+          pointRadius: 4,
+          parsing: false,
+        },
+        {
+          label: "Pareto-optimal",
+          data: frontier,
+          backgroundColor: "#3fb950",
+          pointRadius: 7,
+          parsing: false,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        x: {
+          title: { display: true, text: xKey + " (" + objs[0].direction + ")",
+                   color: "#e6edf3" },
+          ticks: { color: "#8b949e" }, grid: { color: "#21262d" },
+        },
+        y: {
+          title: { display: true, text: yKey + " (" + objs[1].direction + ")",
+                   color: "#e6edf3" },
+          ticks: { color: "#8b949e" }, grid: { color: "#21262d" },
+        },
+      },
+      plugins: {
+        legend: { labels: { color: "#e6edf3" } },
+        tooltip: {
+          callbacks: {
+            label: (c) => {
+              const p = c.raw.params;
+              const pstr = Object.entries(p).map(([k, v]) => `${k}=${v}`).join(", ");
+              return `${pstr}  →  ${xKey}=${c.raw.x.toFixed(4)}, ${yKey}=${c.raw.y.toFixed(4)}`;
+            },
+          },
+        },
+      },
+    },
+  });
+})();
+</script>
+{% else %}
+<section class="panel widest">
+  <p class="muted">Need at least 2 objectives to render a scatter plot. Listing Pareto frontier cells below.</p>
+</section>
+{% endif %}
+
+<section class="panel widest">
+  <h3>Pareto-optimal cells</h3>
+  <table class="audit-table">
+    <thead><tr>
+      <th>#</th><th>Parameters</th>
+      {% for o in pareto.objectives %}<th>{{ o.metric }}</th>{% endfor %}
+    </tr></thead>
+    <tbody>
+      {% for p in pareto.points if p.is_pareto %}
+      <tr>
+        <td><code>{{ loop.index }}</code></td>
+        <td>{% for k, v in p.params.items() %}<code>{{ k }}={{ v }}</code>{% if not loop.last %} · {% endif %}{% endfor %}</td>
+        {% for o in pareto.objectives %}
+          <td>{{ "%.4f"|format(p.metrics[o.metric]) }}</td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<p class="muted"><a href="/sweep/{{ sweep_id }}">← back to sweep summary</a></p>
+{% endblock %}

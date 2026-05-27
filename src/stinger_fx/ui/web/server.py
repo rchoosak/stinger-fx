@@ -489,6 +489,24 @@ def create_app(
             },
         )
 
+    @app.get("/sweep/{sweep_id}/pareto", response_class=HTMLResponse)
+    async def sweep_pareto(sweep_id: str, request: Request):
+        """Render the Pareto frontier scatter plot for a multi-objective sweep."""
+        data = _load_sweep_summary(app.state.data_dir, sweep_id)
+        if data is None:
+            raise HTTPException(404, f"no sweep run with id {sweep_id!r}")
+        pareto = data.get("pareto")
+        if not pareto:
+            raise HTTPException(
+                404,
+                f"sweep {sweep_id!r} has no Pareto frontier — set 'objectives' in the sweep config",
+            )
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="sweep_pareto.html",
+            context={"sweep_id": sweep_id, "summary": data, "pareto": pareto},
+        )
+
     @app.get("/walkforward", response_class=HTMLResponse)
     async def wf_list(request: Request):
         runs = _list_walk_forward_runs(app.state.data_dir)
