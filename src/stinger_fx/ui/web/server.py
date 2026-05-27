@@ -418,6 +418,48 @@ def create_app(
         )
         return JSONResponse(result.to_json())
 
+    # --- Portfolio aggregation (Phase 7.A) -------------------------------
+
+    @app.get("/portfolio", response_class=HTMLResponse)
+    async def portfolio_form(request: Request):
+        """List backtest runs and let the operator pick which to combine."""
+        runs = _list_backtest_runs(app.state.data_dir)
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="portfolio_form.html",
+            context={"runs": runs},
+        )
+
+    @app.get("/portfolio/view", response_class=HTMLResponse)
+    async def portfolio_view(request: Request, runs: str = ""):
+        """Aggregate the supplied comma-separated run_ids into a portfolio
+        report and render the view. The form posts here as a GET with
+        ``runs=a,b,c`` so URLs are bookmarkable."""
+        run_ids = [r.strip() for r in runs.split(",") if r.strip()]
+        if not run_ids:
+            raise HTTPException(400, "no run_ids supplied")
+        summary = _build_portfolio_summary(app.state.data_dir, run_ids)
+        if summary is None:
+            raise HTTPException(404, "one or more run_ids not found")
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="portfolio_view.html",
+            context={"summary": summary, "run_ids": run_ids},
+        )
+
+    @app.get("/portfolio/data.json")
+    async def portfolio_data(runs: str = ""):
+        """JSON payload for the portfolio chart — equity curve + correlations."""
+        from fastapi.responses import JSONResponse
+
+        run_ids = [r.strip() for r in runs.split(",") if r.strip()]
+        if not run_ids:
+            raise HTTPException(400, "no run_ids supplied")
+        summary = _build_portfolio_summary(app.state.data_dir, run_ids)
+        if summary is None:
+            raise HTTPException(404, "one or more run_ids not found")
+        return JSONResponse(summary)
+
     # --- Sweep + walk-forward viewers (Phase 6.3.D) ----------------------
 
     @app.get("/sweep", response_class=HTMLResponse)
@@ -885,6 +927,61 @@ def _load_replay_data(data_dir: Path, run_id: str) -> dict | None:
         except Exception as e:  # noqa: BLE001
             logger.warning("equity curve read failed run_id=%s err=%s", run_id, e)
     return {"meta": meta, "metrics": metrics, "equity": equity}
+
+
+# --- Portfolio aggregation helpers (Phase 7.A) ------------------------------
+
+
+def _build_portfolio_summary(data_dir: Path, run_ids: list[str]) -> dict | None:
+    """Load each run's trades + equity, aggregate via aggregate_portfolio,
+    return the summary dict. Returns None if any run is missing."""
+    from datetime import datetime as _dt
+
+    from stinger_fx.backtest.portfolio import aggregate_portfolio
+    from stinger_fx.backtest.reports import BacktestReport, TradeRecord
+
+    reports: list[BacktestReport] = []
+    for run_id in run_ids:
+        data = _load_replay_data(data_dir, run_id)
+        if data is None:
+            return None
+        meta = data["meta"]
+        equity = data.get("equity", [])
+        # Rebuild minimal BacktestReport — only fields aggregator needs
+        equity_curve = []
+        for row in equity:
+            try:
+                ts = _dt.fromisoformat(row["time"].replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                continue
+            equity_curve.append((ts, float(row["equity"])))
+        trades = []
+        for t in meta.get("trades", []):
+            try:
+                trades.append(TradeRecord(
+                    open_ts=_dt.fromisoformat(t["open_ts"].replace("Z", "+00:00")),
+                    close_ts=_dt.fromisoformat(t["close_ts"].replace("Z", "+00:00")),
+                    side=t.get("side", "buy"),
+                    open_price=float(t.get("open_price", 0.0)),
+                    close_price=float(t.get("close_price", 0.0)),
+                    volume=float(t.get("volume", 0.0)),
+                    pnl=float(t.get("pnl", 0.0)),
+                ))
+            except (ValueError, KeyError, AttributeError):
+                continue
+        report = BacktestReport(
+            run_id=run_id,
+            strategy_id=meta.get("strategy_id", "—"),
+            started_at=_dt.now(),
+            finished_at=_dt.now(),
+            trades=trades,
+            equity_curve=equity_curve,
+            initial_balance=float(meta.get("initial_balance", 10_000.0)),
+            final_balance=float(meta.get("final_balance", 10_000.0)),
+        )
+        reports.append(report)
+    portfolio = aggregate_portfolio(reports, portfolio_id="+".join(run_ids))
+    return portfolio.to_summary()
 
 
 # --- Sweep + walk-forward summary helpers (Phase 6.3.D) ---------------------

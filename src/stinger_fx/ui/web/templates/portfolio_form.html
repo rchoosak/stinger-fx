@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Portfolio · Stinger-Fx{% endblock %}
+{% block content %}
+<section class="panel widest">
+  <h2>Build a portfolio</h2>
+  <p class="muted">
+    Combine multiple backtest runs into a single portfolio view. Select two
+    or more runs below; the view shows the combined equity curve, per-strategy
+    contribution, and the cross-strategy correlation matrix.
+  </p>
+  {% if runs %}
+  <form action="/portfolio/view" method="get" id="portfolio-form">
+    <table class="audit-table">
+      <thead><tr>
+        <th>Include</th><th>Run</th><th>Strategy</th>
+        <th>Net P&amp;L</th><th>Trades</th><th>Finished</th>
+      </tr></thead>
+      <tbody>
+        {% for r in runs %}
+        <tr>
+          <td><input type="checkbox" class="run-checkbox" value="{{ r.run_id }}" /></td>
+          <td><code>{{ r.run_id }}</code></td>
+          <td>{{ r.strategy_id }}</td>
+          <td>{{ "%+.2f"|format(r.net_pnl) }}</td>
+          <td>{{ r.trade_count }}</td>
+          <td class="muted small">{{ r.end[:19] | replace("T", " ") }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <input type="hidden" name="runs" id="runs-field" value="" />
+    <div class="params-actions" style="margin-top: 12px;">
+      <button type="submit">Aggregate</button>
+    </div>
+  </form>
+  <script>
+    document.getElementById("portfolio-form").addEventListener("submit", function (e) {
+      const checked = Array.from(document.querySelectorAll(".run-checkbox:checked"))
+        .map(cb => cb.value);
+      if (checked.length < 2) {
+        alert("Select at least two runs.");
+        e.preventDefault();
+        return;
+      }
+      document.getElementById("runs-field").value = checked.join(",");
+    });
+  </script>
+  {% else %}
+  <p class="muted">No backtest runs available.</p>
+  {% endif %}
+</section>
+{% endblock %}
