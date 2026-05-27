@@ -378,7 +378,7 @@ Managers receive `on_tick` (and optionally `on_bar` / `on_position_closed` / `on
 
 ---
 
-## 5. Indicators (15 built-in)
+## 5. Indicators (22 built-in)
 
 All importable from `stinger_fx.strategies.indicators`. Single-valued helpers return `float | None`; multi-valued helpers return a typed `NamedTuple`.
 
@@ -393,7 +393,9 @@ if fast is None:
 ### 5.1 Moving averages + oscillators
 
 ```python
-from stinger_fx.strategies.indicators import sma, ema, rsi, macd, stochastic, cci
+from stinger_fx.strategies.indicators import (
+    sma, ema, rsi, macd, stochastic, cci, stoch_rsi, williams_r,
+)
 
 sma_val = sma(closes, period=20)
 ema_val = ema(closes, period=20)
@@ -411,6 +413,15 @@ if stoch:
     d = stoch.d                # 0–100
 
 cci_val = cci(bars, period=20)   # ±100 = significant deviation
+
+# Stochastic RSI — Stoch formula applied to RSI series (faster than plain Stoch)
+sr = stoch_rsi(closes, rsi_period=14, stoch_period=14, k_smooth=3, d_smooth=3)
+if sr:
+    if sr.k < 20:  # oversold
+        ...
+
+# Williams %R — [-100, 0]; > -20 = overbought, < -80 = oversold
+wr = williams_r(bars, period=14)
 ```
 
 ### 5.2 Volatility envelopes
@@ -436,7 +447,7 @@ if kelt:
 ### 5.3 Trend strength + direction
 
 ```python
-from stinger_fx.strategies.indicators import adx
+from stinger_fx.strategies.indicators import adx, aroon, psar
 
 result = adx(bars, period=14)
 if result and result.adx > 25:
@@ -445,6 +456,22 @@ if result and result.adx > 25:
 ```
 
 ADX < 20: chop. 20–40: confirmed trend. > 40: strong (often exhausted).
+
+```python
+# Aroon — how recently did we make a new high/low?
+ar = aroon(bars, period=25)
+if ar:
+    if ar.up == 100 and ar.down < 50:
+        # strong fresh uptrend (today is the highest of the last 25 bars)
+    if abs(ar.oscillator) < 30:
+        # consolidation
+
+# Parabolic SAR — trailing stop dots that flip on reversal
+sar = psar(bars, af_start=0.02, af_step=0.02, af_max=0.20)
+if sar:
+    if sar.trend == "up":
+        await ctx.move_stop(my_ticket, sl=sar.value)
+```
 
 ### 5.4 Volume-weighted price
 
@@ -497,6 +524,52 @@ gbp = ctx.history_for("GBPUSD", Timeframe.M15).closes()
 rho = correlation(eur, gbp, period=50)
 if rho is not None and rho > 0.85:
     # highly correlated — pair-tradeable
+```
+
+### 5.8 Volume — OBV
+
+```python
+from stinger_fx.strategies.indicators import obv
+
+current_obv = obv(ctx.history.bars())
+# Compare with a window ago for divergence detection
+past_obv = obv(ctx.history.bars()[:-20])
+if current_obv > past_obv and ctx.history.closes()[-1] < ctx.history.closes()[-20]:
+    # OBV rising while price falling → bullish divergence (accumulation)
+```
+
+### 5.9 Heikin-Ashi candles
+
+```python
+from stinger_fx.strategies.indicators import heikin_ashi, heikin_ashi_series
+
+# Just the latest HA candle
+ha = heikin_ashi(ctx.history.bars())
+if ha and ha.is_green and ha.upper_shadow < 0.0001:
+    # strong-momentum green candle with no upper hesitation
+
+# The full HA series — useful for streak counting / pattern matching
+ha_series = heikin_ashi_series(ctx.history.bars())
+last_3 = ha_series[-3:]
+if all(c.is_green for c in last_3):
+    # 3 consecutive green HA candles
+```
+
+`HeikinAshiCandle` exposes `.open / .high / .low / .close / .body / .is_green / .upper_shadow / .lower_shadow`.
+
+### 5.10 Ehlers / Hilbert-transform-family
+
+```python
+from stinger_fx.strategies.indicators import ehlers_super_smoother, ehlers_decycler
+
+# Super Smoother — drop-in for SMA/EMA with significantly less lag
+filt = ehlers_super_smoother(ctx.history.closes(), period=10)
+
+# Decycler — strips dominant cycle, leaves pure trend (great for regime gating)
+trend = ehlers_decycler(ctx.history.closes(), period=60)
+if trend is not None:
+    if trend > ctx.history.closes()[-1]:
+        # in a smoothed downtrend
 ```
 
 ---
