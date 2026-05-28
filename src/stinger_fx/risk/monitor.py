@@ -52,8 +52,16 @@ class RiskMonitor:
         self._subs: list[Subscription] = []
 
         # Open-position counter per strategy_id. Incremented on OrderFilled,
-        # decremented on PositionClosed.
+        # decremented on PositionClosed — *for the strategy that actually
+        # owns the closed position*, looked up via _ticket_to_strategy.
         self._open_positions: dict[str, int] = {}
+
+        # Ticket → strategy_id, populated on OrderFilledEvent so that
+        # PositionClosedEvent (which doesn't carry strategy_id) can be
+        # attributed back to the right per-strategy bucket. Without this
+        # the decrement guesses "first non-zero bucket" and can blow the
+        # cap on a strategy that didn't actually close anything.
+        self._ticket_to_strategy: dict[int, str] = {}
 
         # Per-symbol open-position counter (for per_symbol.max_open_positions).
         self._open_positions_by_symbol: dict[str, int] = {}
@@ -201,18 +209,34 @@ class RiskMonitor:
         self._open_positions[sid] = self._open_positions.get(sid, 0) + 1
         sym = evt.order.symbol
         self._open_positions_by_symbol[sym] = self._open_positions_by_symbol.get(sym, 0) + 1
+        # Remember which strategy owns this ticket so the matching
+        # PositionClosedEvent can decrement the right per-strategy bucket
+        # (PositionClosedEvent carries only `magic`, not strategy_id).
+        if evt.order.ticket:
+            self._ticket_to_strategy[evt.order.ticket] = sid
 
     async def _on_closed(self, evt: PositionClosedEvent) -> None:
-        # PositionClosedEvent carries strategy attribution via the position's
-        # magic — but we keep a per-strategy_id counter, not per-magic. The
-        # OrderRouter stamps magic from the strategy_magic map; we don't reverse
-        # it here. Best-effort decrement of the largest non-zero bucket keeps
-        # the counter sane; threading strategy_id through the event itself is
-        # a Phase-3 refinement.
-        for sid in list(self._open_positions.keys()):
-            if self._open_positions[sid] > 0:
+        # Per-strategy decrement: look up the ticket recorded at fill-time
+        # so we touch the strategy that actually owns this position, not
+        # the first non-zero bucket. Pre-fix code decremented "first
+        # non-zero bucket" which silently moved counts between strategies
+        # in any multi-strategy run.
+        ticket = evt.position.ticket
+        sid = self._ticket_to_strategy.pop(ticket, None)
+        if sid is not None:
+            if self._open_positions.get(sid, 0) > 0:
                 self._open_positions[sid] -= 1
-                break
+        else:
+            # Position closed but we never saw its fill (e.g. opened
+            # before RiskMonitor started, or filled on a different engine
+            # instance). Skip the per-strategy decrement rather than
+            # corrupting another strategy's bucket — logging makes the
+            # gap visible without breaking trading.
+            logger.warning(
+                "risk_close_ticket_unknown ticket=%s symbol=%s magic=%s — "
+                "per-strategy bucket not decremented",
+                ticket, evt.position.symbol, evt.position.magic,
+            )
         sym = evt.position.symbol
         if self._open_positions_by_symbol.get(sym, 0) > 0:
             self._open_positions_by_symbol[sym] -= 1
