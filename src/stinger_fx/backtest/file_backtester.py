@@ -208,6 +208,12 @@ class FileBacktester(BaseBacktester):
             last_close[bar.symbol] = bar.close
             for pos in broker.check_sl_tp(bar.symbol, bar.high, bar.low):
                 await broker.close_position(pos.ticket)
+            # Phase 6.2.A — pending STOP / LIMIT orders triggered by the
+            # bar's price range. Pre-fix bar-mode skipped this entirely
+            # (only tick-mode called check_pending), so pendings sat in
+            # the broker forever and breakout / pullback strategies
+            # showed zero trades in bar backtests.
+            await broker.check_pending_bar(bar.symbol, bar.high, bar.low)
             await bus.publish(BarEvent(bar=bar))
             for _ in range(3):
                 await asyncio.sleep(0)
