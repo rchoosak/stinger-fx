@@ -149,8 +149,17 @@ class OrderRouter:
             result = await self.queue.submit(req, broker)
         else:
             result = await broker.place_order(req)
-        if result.ok and result.order is not None and result.status == OrderStatus.FILLED:
+        if result.ok and result.order is not None and result.status in (
+            OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED,
+        ):
             # Market orders fill immediately — emit OrderFilledEvent.
+            # PARTIALLY_FILLED comes from MT5 retcode DONE_PARTIAL (live broker
+            # accepted some but not all of the requested volume). The order
+            # itself carries status=PARTIALLY_FILLED and filled_volume<volume
+            # so subscribers can distinguish; downstream (RiskMonitor counter,
+            # strategy.on_order_filled, metrics, trade journal) only needs to
+            # know the fill *happened*. Pre-fix, PARTIALLY_FILLED fell through
+            # all three branches and disappeared silently in live mode.
             await self.bus.publish(OrderFilledEvent(order=result.order))
         elif result.ok and result.status == OrderStatus.SUBMITTED:
             # Pending order placed (Phase 6.2.B) — the broker already emitted
