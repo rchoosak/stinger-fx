@@ -13,7 +13,6 @@ from stinger_fx.strategies.cointegration import (
     spread_zscore,
 )
 
-
 # --- OLS --------------------------------------------------------------------
 
 
@@ -31,7 +30,7 @@ def test_ols_handles_noise() -> None:
     rng = random.Random(42)
     x = list(range(50))
     y = [3 * xi + rng.gauss(0, 0.1) for xi in x]
-    slope, intercept = ols_regression(y, x)
+    slope, _intercept = ols_regression(y, x)
     assert slope == pytest.approx(3.0, abs=0.05)
 
 

@@ -14,10 +14,9 @@ from stinger_fx.backtest.sweep import (
     enumerate_grid,
 )
 from stinger_fx.config.models import StrategyEntry, SweepRunConfig
-from stinger_fx.data import SqliteStore, SweepRepo, in_memory_store
+from stinger_fx.data import SweepRepo, in_memory_store
 from stinger_fx.data.parquet_store import ParquetStore
 from stinger_fx.domain import Bar, Timeframe
-
 
 # --- Cartesian enumeration ---------------------------------------------------
 

@@ -18,7 +18,6 @@ from stinger_fx.domain import (
     OrderRequest,
     OrderResult,
     OrderStatus,
-    OrderType,
     Position,
     Side,
     Signal,
@@ -49,7 +48,7 @@ class _CountingBroker(BaseBroker):
             account_id=self.tag, time=datetime.now(UTC),
             balance=10_000, equity=10_000, margin=0, free_margin=10_000,
         )
-    async def get_symbol_info(self, symbol):  # noqa: ARG002
+    async def get_symbol_info(self, symbol):
         return SymbolInfo(
             symbol="EURUSD", digits=5, point=0.00001, contract_size=100_000,
             volume_min=0.01, volume_max=100, volume_step=0.01,

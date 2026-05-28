@@ -17,7 +17,6 @@ from stinger_fx.strategies.parameters import StrategyParams
 
 
 def _make_ctx(bus: AsyncEventBus) -> StrategyContext:
-    signals: list[SignalEvent] = []
 
     async def sink(signal):
         await bus.publish(SignalEvent(signal=signal))

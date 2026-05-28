@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from typing import ClassVar
 
 import pytest
 
@@ -38,7 +39,7 @@ class _RaisingStrategy(BaseStrategy):
 class _ReloadAware(BaseStrategy):
     name = "reload_aware"
     Params = _Params
-    seen_reloads: list[tuple[int, int]] = []
+    seen_reloads: ClassVar[list[tuple[int, int]]] = []
 
     @classmethod
     def subscriptions(cls, params: StrategyParams) -> list[Subscription]:

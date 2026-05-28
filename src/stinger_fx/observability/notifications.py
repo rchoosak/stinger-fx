@@ -16,13 +16,11 @@ phone.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta, timezone
-from typing import Any
+from datetime import UTC, datetime, timedelta
 
 import httpx
 
@@ -276,7 +274,7 @@ class NotificationDispatcher:
         return handler
 
     def _is_duplicate(self, message: str) -> bool:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cutoff = now - self.DEDUPE_WINDOW
         # Prune
         while self._recent and self._recent[0][1] < cutoff:

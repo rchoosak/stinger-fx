@@ -16,7 +16,6 @@ from stinger_fx.core.events import (
     EngineStartedEvent,
     EngineStoppedEvent,
     OrderFilledEvent,
-    OrderRejectedEvent,
     SignalEvent,
     StrategyStateChangedEvent,
     TickEvent,

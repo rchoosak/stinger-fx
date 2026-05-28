@@ -160,7 +160,7 @@ class MT5Broker(BaseBroker):
             if hist is not None:
                 try:
                     hist.labels(method=method).observe(elapsed)
-                except Exception:  # noqa: BLE001 — never let metrics crash trading
+                except Exception:
                     pass
 
     @staticmethod
@@ -215,14 +215,14 @@ class MT5Broker(BaseBroker):
             self._health_task.cancel()
             try:
                 await self._health_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            except (asyncio.CancelledError, Exception):
                 pass
             self._health_task = None
         if self._tick_task is not None:
             self._tick_task.cancel()
             try:
                 await self._tick_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            except (asyncio.CancelledError, Exception):
                 pass
             self._tick_task = None
         if self._connected:
@@ -355,7 +355,7 @@ class MT5Broker(BaseBroker):
                     continue
                 try:
                     info = await self._sdk(mt5.terminal_info)
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     info = None
                     err_reason = str(e)
                 else:
@@ -395,7 +395,7 @@ class MT5Broker(BaseBroker):
                 # is clean. Best-effort — may itself error if SDK is wedged.
                 try:
                     await self._sdk(mt5.shutdown)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     pass
 
                 def _do_init() -> bool:
@@ -411,7 +411,7 @@ class MT5Broker(BaseBroker):
                     return bool(mt5.initialize(**kwargs))
 
                 ok = await self._sdk(_do_init)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.warning("mt5 reconnect attempt failed attempt=%s err=%s", attempt, e)
                 continue
             if not ok:
@@ -436,7 +436,7 @@ class MT5Broker(BaseBroker):
             for sym in tuple(self._tick_subs):
                 try:
                     await self._sdk(mt5.symbol_select, sym, True)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.warning("mt5 resubscribe failed symbol=%s", sym)
             return
 
@@ -467,7 +467,7 @@ class MT5Broker(BaseBroker):
                         raw = await self._sdk(mt5.symbol_info_tick, symbol)
                     except asyncio.CancelledError:
                         raise
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         logger.exception("symbol_info_tick failed symbol=%s", symbol)
                         continue
                     if raw is None:

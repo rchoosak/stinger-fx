@@ -18,7 +18,6 @@ timeframe, side) so a scraping Prometheus stays small.
 from __future__ import annotations
 
 import logging
-
 from datetime import UTC, datetime
 
 from prometheus_client import (
@@ -244,7 +243,7 @@ class MetricsCollector:
         # observed the bus event. The delta captures every hop the tick made.
         try:
             lag = max(0.0, (datetime.now(UTC) - evt.tick.time).total_seconds())
-        except Exception:  # noqa: BLE001 — tz mismatch shouldn't crash metrics
+        except Exception:
             return
         self.metrics["tick_e2e_seconds"].labels(symbol=symbol).observe(lag)  # type: ignore[union-attr]
         self.metrics["tick_pump_lag_seconds"].labels(symbol=symbol).set(lag)  # type: ignore[union-attr]
@@ -271,7 +270,7 @@ class MetricsCollector:
         if o.requested_at is not None and o.filled_at is not None:
             try:
                 rt = (o.filled_at - o.requested_at).total_seconds()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 return
             if rt >= 0:
                 self.metrics["order_submission_seconds"].labels(  # type: ignore[union-attr]

@@ -26,7 +26,7 @@ from stinger_fx.strategies.context import StrategyContext
 from stinger_fx.strategies.parameters import StrategyParams
 
 
-class BaseStrategy(ABC):
+class BaseStrategy(ABC):  # noqa: B024 — lifecycle hooks are intentionally all optional; ABC reserves the name even without abstract members
     """All strategies subclass this and override the relevant lifecycle hooks."""
 
     name: ClassVar[str] = ""

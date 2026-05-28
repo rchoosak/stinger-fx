@@ -30,7 +30,6 @@ from stinger_fx.config.models import MT5Config
 from stinger_fx.core import AsyncEventBus
 from stinger_fx.domain import OrderRequest, OrderStatus, OrderType, Side
 
-
 TRADE_RETCODE_DONE = 10009
 TRADE_RETCODE_PLACED = 10008
 TRADE_RETCODE_DONE_PARTIAL = 10010

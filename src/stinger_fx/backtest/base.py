@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from enum import Enum
+from enum import StrEnum
 
 from stinger_fx.backtest.reports import BacktestReport
 from stinger_fx.config.models import BacktestRunConfig
 
 
-class Granularity(str, Enum):
+class Granularity(StrEnum):
     """Backtest replay granularity.
 
     BAR — iterate `iter_bars()` per feed, publish BarEvent (Phase 1–3 default).

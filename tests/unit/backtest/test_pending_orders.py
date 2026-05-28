@@ -8,7 +8,6 @@ just sits there.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 
 import pytest
 

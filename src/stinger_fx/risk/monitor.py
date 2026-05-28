@@ -23,7 +23,7 @@ with action="rejected" so the operator can see why in the trade journal.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import NamedTuple
 
 from stinger_fx.config.models import RiskConfig
@@ -194,9 +194,9 @@ class RiskMonitor:
         return max(0.0, (self._peak_equity - self._current_equity) / self._peak_equity * 100)
 
     def _maybe_roll_daily(self) -> None:
-        today = datetime.now(timezone.utc).date()
+        today = datetime.now(UTC).date()
         if self._daily_anchor_date is None or today != self._daily_anchor_date.date():
-            self._daily_anchor_date = datetime.now(timezone.utc)
+            self._daily_anchor_date = datetime.now(UTC)
             if self._current_balance is not None:
                 self._daily_opening_balance = self._current_balance
             self._daily_realized_pnl = 0.0

@@ -15,10 +15,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-
-from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -26,7 +25,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sse_starlette.sse import EventSourceResponse
 
-from stinger_fx.core.event_bus import AsyncEventBus
 from stinger_fx.core.events import (
     BarEvent,
     DecisionEvent,
@@ -295,7 +293,7 @@ def create_app(
                         return
                     try:
                         line = await asyncio.wait_for(queue.get(), timeout=15)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         # heartbeat to keep the connection alive
                         yield {"event": "ping", "data": ""}
                         continue
@@ -338,7 +336,7 @@ def create_app(
                         return
                     try:
                         html = await asyncio.wait_for(queue.get(), timeout=15)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         yield {"event": "ping", "data": ""}
                         continue
                     yield {"event": "snapshot", "data": html}
@@ -540,12 +538,14 @@ def create_app(
         modifications: list[dict] = []
         mismatches: list[dict] = []
         if store is not None:
+            from sqlmodel import desc
+            from sqlmodel import select as _select
+
             from stinger_fx.data.repositories import (
                 OrderModificationRepo,
                 ReconciliationRepo,
             )
             from stinger_fx.data.schemas import DecisionRow
-            from sqlmodel import desc, select as _select
 
             with store.session() as s:
                 d_rows = list(
@@ -733,11 +733,11 @@ def create_app(
         try:
             for account_id, info in await handle.list_accounts():
                 accounts.append({"account_id": account_id, "broker": info.broker})
-        except Exception:  # noqa: BLE001 — multi-account introduced list_accounts
+        except Exception:
             try:
                 info = await handle.get_account()
                 accounts = [{"account_id": info.account_id, "broker": info.broker}]
-            except Exception:  # noqa: BLE001
+            except Exception:
                 accounts = []
         return JSONResponse(
             {
@@ -750,7 +750,7 @@ def create_app(
         )
 
     @app.post("/control/shutdown")
-    async def shutdown(background_tasks: "BackgroundTasks"):
+    async def shutdown(background_tasks: BackgroundTasks):
         """Politely terminate the engine process.
 
         SIGINT is what the existing run-loop already handles in its cleanup
@@ -907,7 +907,7 @@ def _load_replay_candles(data_dir: Path, run_id: str) -> list[dict]:
                     run_id, symbol, tf_str,
                 )
                 break
-    except Exception as e:  # noqa: BLE001 — gracefully degrade on missing data
+    except Exception as e:
         logger.warning("candles_read_failed run_id=%s err=%s", run_id, e)
         return []
     return out
@@ -942,7 +942,7 @@ def _load_replay_data(data_dir: Path, run_id: str) -> dict | None:
                         "equity": row["equity"],
                     }
                 )
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("equity curve read failed run_id=%s err=%s", run_id, e)
     return {"meta": meta, "metrics": metrics, "equity": equity}
 

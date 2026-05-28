@@ -99,7 +99,7 @@ class EngineHandle:
         for account_id, broker in self.brokers.items():
             try:
                 info = await broker.get_account_info()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 continue
             out.append((account_id, info))
         return out
@@ -147,7 +147,7 @@ class EngineHandle:
         runner = self.runners.get(sid)
         if runner is None:
             raise KeyError(sid)
-        params_cls = type(runner._params)
+        type(runner._params)
         # Merge over current values so partial updates work (caller can pass
         # only the fields they want to change).
         merged = {**runner._params.model_dump(), **new_values}

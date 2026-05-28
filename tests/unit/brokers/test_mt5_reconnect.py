@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import sys
 import types
-from datetime import UTC, datetime
 
 import pytest
 
@@ -45,7 +44,7 @@ class _FakeMT5:
         # If non-empty, initialize fails N times before succeeding.
         self.initialize_fail_count = 0
 
-    def initialize(self, **kwargs):  # noqa: ARG002
+    def initialize(self, **kwargs):
         self.init_calls += 1
         if self.initialize_fail_count > 0:
             self.initialize_fail_count -= 1

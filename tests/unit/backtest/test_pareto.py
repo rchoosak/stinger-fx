@@ -6,7 +6,6 @@ import pytest
 
 from stinger_fx.backtest.pareto import (
     Objective,
-    ParetoPoint,
     extract_pareto_frontier,
 )
 

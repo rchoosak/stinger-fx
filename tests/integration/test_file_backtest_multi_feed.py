@@ -9,7 +9,6 @@ import pytest
 
 from stinger_fx.backtest import FileBacktester
 from stinger_fx.config.models import BacktestRunConfig, StrategyEntry
-from stinger_fx.core.events import BarEvent
 from stinger_fx.data import in_memory_store
 from stinger_fx.data.parquet_store import ParquetStore
 from stinger_fx.domain import Bar, Timeframe
@@ -94,22 +93,13 @@ async def test_multi_symbol_run_publishes_bars_for_each(two_symbol_parquet: Path
         sqlite_store=in_memory_store(),
         report_dir=tmp_path / "reports",
     )
-    # Subscribe a tap to the bus to assert symbols seen
-    seen: set[str] = set()
-
-    async def collect(evt: BarEvent) -> None:
-        seen.add(evt.bar.symbol)
-
-    # We need access to the bus the backtester builds. FileBacktester owns it
-    # internally — easiest path: assert via the trades-side outcome instead.
-    # The run completes and produces *some* equity curve covering both symbols.
+    # FileBacktester owns the bus internally; assert via the trades-side
+    # outcome instead of subscribing a tap.
     report = await bt.run(cfg)
     assert report.run_id == "multi_smoke"
     # The equity-curve length equals the merged bar count — should be > number
     # of bars per single symbol (otherwise we only merged one feed).
     assert len(report.equity_curve) > 60
-    # Tap unused (path-of-least-resistance); keep for future bus exposure
-    del seen, collect
 
 
 @pytest.mark.asyncio

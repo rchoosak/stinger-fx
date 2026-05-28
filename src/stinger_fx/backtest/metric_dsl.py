@@ -35,7 +35,8 @@ from __future__ import annotations
 import ast
 import math
 import operator as op
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 
 class MetricDSLError(ValueError):
@@ -155,13 +156,16 @@ def _validate(tree: ast.AST) -> None:
             raise MetricDSLError(
                 f"disallowed node {type(node).__name__} in expression"
             )
-        if isinstance(node, ast.Constant):
-            # Only allow numeric / bool / None constants — strings could be
-            # used for format-string tricks, lists/tuples bring surface area.
-            if not isinstance(node.value, (int, float, bool)) and node.value is not None:
-                raise MetricDSLError(
-                    f"disallowed constant type {type(node.value).__name__}"
-                )
+        # Only allow numeric / bool / None constants — strings could be
+        # used for format-string tricks, lists/tuples bring surface area.
+        if (
+            isinstance(node, ast.Constant)
+            and not isinstance(node.value, (int, float, bool))
+            and node.value is not None
+        ):
+            raise MetricDSLError(
+                f"disallowed constant type {type(node.value).__name__}"
+            )
         if isinstance(node, ast.Call):
             # Function must be a bare Name (not an attribute access or call
             # chain) AND must be in SAFE_FUNCTIONS.

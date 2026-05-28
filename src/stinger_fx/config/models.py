@@ -254,10 +254,12 @@ def _coerce_feed_list(
         )
 
     if sources == ["singular"]:
-        assert symbol is not None and timeframe is not None
+        assert symbol is not None
+        assert timeframe is not None
         out = [Subscription(symbol=symbol, timeframe=timeframe)]
     elif sources == ["plural"]:
-        assert symbols is not None and timeframes is not None
+        assert symbols is not None
+        assert timeframes is not None
         out = [Subscription(symbol=s, timeframe=tf) for s in symbols for tf in timeframes]
     else:
         assert feeds is not None

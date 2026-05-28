@@ -5,12 +5,11 @@ from __future__ import annotations
 import pytest
 
 from stinger_fx.backtest.metric_dsl import (
-    MetricDSLError,
     SAFE_FUNCTIONS,
+    MetricDSLError,
     compile_metric,
     evaluate_custom_metrics,
 )
-
 
 # --- Happy path -------------------------------------------------------------
 
@@ -71,7 +70,7 @@ def test_free_variables_collected() -> None:
 def test_rejects_attribute_access() -> None:
     # Attribute access shows up as a non-Name function target → rejected
     # by the "only direct function calls allowed" check.
-    with pytest.raises(MetricDSLError, match="(disallowed|direct function calls)"):
+    with pytest.raises(MetricDSLError, match=r"(disallowed|direct function calls)"):
         compile_metric("net_pnl.bit_length()")
 
 
@@ -94,7 +93,7 @@ def test_rejects_lambda() -> None:
     # Lambda call: the "function" target is a Lambda node, not a Name —
     # caught by the "direct function calls only" rule. (The Lambda body
     # itself is also disallowed, but we hit the call check first.)
-    with pytest.raises(MetricDSLError, match="(disallowed|direct function calls)"):
+    with pytest.raises(MetricDSLError, match=r"(disallowed|direct function calls)"):
         compile_metric("(lambda x: x * 2)(net_pnl)")
 
 

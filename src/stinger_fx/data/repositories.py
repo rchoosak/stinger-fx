@@ -219,7 +219,7 @@ class SweepRepo:
     def __init__(self, store: SqliteStore) -> None:
         self._store = store
 
-    def record_sweep(self, sweep_id: str, strategy_id: str, report) -> int:  # noqa: ANN001
+    def record_sweep(self, sweep_id: str, strategy_id: str, report) -> int:
         """Write one SweepRow + len(results) SweepResultRow rows."""
         best = report.best()
         with self._store.session() as s:

@@ -26,7 +26,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-
 # Direction "max" → larger is better (net P&L, Sharpe, win rate).
 # Direction "min" → smaller is better (max drawdown).
 Direction = Literal["max", "min"]

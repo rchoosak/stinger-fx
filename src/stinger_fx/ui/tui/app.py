@@ -10,10 +10,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from datetime import datetime
+from typing import ClassVar
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal
 from textual.widgets import Footer, Header
 
 from stinger_fx.core.event_bus import Subscription
@@ -42,7 +43,7 @@ class StingerTUI(App[None]):
     TITLE = "Stinger-Fx"
     SUB_TITLE = "EA Bot Platform"
 
-    BINDINGS = [
+    BINDINGS: ClassVar = [
         Binding("q", "quit", "Quit", show=True),
         Binding("p", "toggle_pause", "Pause/Resume selected", show=True),
         Binding("r", "reset_kill", "Reset kill switch", show=True),
@@ -135,7 +136,7 @@ class StingerTUI(App[None]):
                     panel.peak_equity = snap.get("peak_equity")  # type: ignore[assignment]
                     panel.drawdown_pct = float(snap.get("drawdown_pct", 0.0))  # type: ignore[arg-type]
                     panel.kill_switch = bool(snap.get("kill_switch_tripped", False))
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 self.query_one(LogPanel).push(level="warning", message=f"poll: {e}")
             await asyncio.sleep(2)
 

@@ -121,7 +121,7 @@ class Reconciler:
             return
         try:
             positions = await self._broker.get_positions()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("reconciler_broker_unreachable err=%s", e)
             return
         match = next((p for p in positions if p.ticket == order.ticket), None)
@@ -179,7 +179,7 @@ class Reconciler:
                 )
                 s.add(row)
                 s.commit()
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(
                 "reconciler_db_write_failed ticket=%s type=%s", order.ticket, mismatch_type
             )

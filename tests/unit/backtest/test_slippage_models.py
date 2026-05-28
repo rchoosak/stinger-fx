@@ -13,7 +13,6 @@ from stinger_fx.backtest.slippage import (
 )
 from stinger_fx.domain import Side
 
-
 # ---------------------------------------------------------------------------
 # fixed_pips_model
 # ---------------------------------------------------------------------------

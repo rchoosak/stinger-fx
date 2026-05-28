@@ -26,7 +26,6 @@ from typing import Protocol, runtime_checkable
 
 from stinger_fx.domain import Side
 
-
 # ---------------------------------------------------------------------------
 # Protocol
 # ---------------------------------------------------------------------------

@@ -123,5 +123,5 @@ def test_factory_builds_genetic() -> None:
 
 def test_factory_rejects_unknown_algo() -> None:
     """The error message must mention all supported algos."""
-    with pytest.raises(ValueError, match="grid.*optuna.*random.*genetic"):
+    with pytest.raises(ValueError, match=r"grid.*optuna.*random.*genetic"):
         build_search_strategy("magic", parameter_grid={"a": [1]})

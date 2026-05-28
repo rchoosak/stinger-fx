@@ -5,8 +5,6 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import pytest
-
 from stinger_fx.data import iter_ticks
 from stinger_fx.data.parquet_store import ParquetStore
 from stinger_fx.domain import Tick

@@ -25,8 +25,6 @@ from stinger_fx.core.events import (
     OrderModifiedEvent,
     OrderRejectedEvent,
     PartialCloseRequestEvent,
-    PartialClosedEvent,
-    PositionClosedEvent,
     SignalEvent,
 )
 from stinger_fx.domain import (
@@ -34,7 +32,6 @@ from stinger_fx.domain import (
     Order,
     OrderRequest,
     OrderStatus,
-    OrderType,
     Signal,
 )
 from stinger_fx.risk import RiskMonitor
