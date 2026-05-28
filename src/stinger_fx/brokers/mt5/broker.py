@@ -1,13 +1,15 @@
 """MT5Broker — concrete BaseBroker over the official MetaTrader5 Python package.
 
-The MetaTrader5 SDK is synchronous and not thread-safe, so:
+The MetaTrader5 SDK is synchronous and not thread-safe, so **every** call
+into the SDK is funnelled through one dedicated single-thread executor via
+`_sdk()`. That gives us serialization for free (only one SDK call at a
+time) and lets us treat the SDK as if it lived behind an async facade.
 
-  • One dedicated single-thread executor handles every SDK call. That gives
-    us serialization for free (only one call at a time) and lets us treat
-    the SDK as if it lived behind an async facade.
-  • Tick subscriptions run in a separate daemon thread that polls
-    `symbol_info_tick` and forwards changes to the asyncio loop via
-    `call_soon_threadsafe(bus.publish, ...)`.
+Tick subscriptions used to run in a separate daemon thread that called
+`symbol_info_tick` directly — that broke the single-thread invariant
+because the executor and the daemon could race on the SDK simultaneously.
+The tick poller is now an asyncio task that polls through `_sdk()`, so the
+single-worker executor remains the only thread ever calling into the SDK.
 
 The SDK import is lazy so unit tests on macOS/Linux can still import this
 module to inspect the class shape.
@@ -17,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any
@@ -109,8 +110,15 @@ class MT5Broker(BaseBroker):
         self._connected = False
         self._tick_subs: set[str] = set()
         self._bar_subs: set[tuple[str, Timeframe]] = set()
-        self._tick_thread: threading.Thread | None = None
-        self._tick_stop = threading.Event()
+        # Tick poller runs as an asyncio task — see `_tick_loop`. This used
+        # to be a daemon thread, but that bypassed the single-worker
+        # executor that serializes SDK access. With an asyncio task, every
+        # `symbol_info_tick` call goes through `_sdk()` so the SDK is only
+        # ever entered from one thread (the executor worker).
+        self._tick_task: asyncio.Task[None] | None = None
+        # Test/sim hook: tick poll cadence (seconds). Tests can shorten
+        # this to avoid waiting for the production 50 ms interval.
+        self._tick_poll_interval: float = TICK_POLL_INTERVAL
         self._last_tick_time: dict[str, datetime] = {}
         # Phase 6.1.B — optional Prometheus metrics dict (from MetricsCollector).
         # When supplied, _sdk() records per-method call latency into the
@@ -210,10 +218,13 @@ class MT5Broker(BaseBroker):
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
             self._health_task = None
-        self._tick_stop.set()
-        if self._tick_thread is not None:
-            self._tick_thread.join(timeout=2)
-            self._tick_thread = None
+        if self._tick_task is not None:
+            self._tick_task.cancel()
+            try:
+                await self._tick_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            self._tick_task = None
         if self._connected:
             await self._sdk(self._mt5().shutdown)
         self._executor.shutdown(wait=True, cancel_futures=True)
@@ -300,12 +311,10 @@ class MT5Broker(BaseBroker):
         self._require_connected()
         await self._sdk(self._mt5().symbol_select, symbol, True)
         self._tick_subs.add(symbol)
-        if self._tick_thread is None:
-            self._tick_stop.clear()
-            self._tick_thread = threading.Thread(
-                target=self._tick_pump, name="mt5-tick-pump", daemon=True
+        if self._tick_task is None or self._tick_task.done():
+            self._tick_task = asyncio.create_task(
+                self._tick_loop(), name="mt5-tick-loop"
             )
-            self._tick_thread.start()
         logger.info("mt5 subscribed to ticks symbol=%s", symbol)
 
     async def subscribe_bars(self, symbol: str, tf: Timeframe) -> None:
@@ -431,43 +440,58 @@ class MT5Broker(BaseBroker):
                     logger.warning("mt5 resubscribe failed symbol=%s", sym)
             return
 
-    def _tick_pump(self) -> None:
-        """Background thread: poll the latest tick for each subscribed symbol."""
+    async def _tick_loop(self) -> None:
+        """Asyncio task: poll the latest tick for each subscribed symbol.
+
+        Every SDK call goes through `_sdk()` (the single-worker executor),
+        so the MT5 SDK is only ever entered from one thread. Previously
+        this ran in a separate daemon thread that called
+        `mt5.symbol_info_tick` directly — that broke the single-thread
+        invariant and could race the SDK against order sends, account
+        snapshots, history fetches, and the reconnect loop.
+
+        Cancellation: `disconnect()` cancels this task and awaits it.
+        Reconnect: while `self._connected` is False the loop sleeps —
+        the health task drives recovery, we just yield so we don't spin
+        calls into a dead SDK or stomp on the reconnect attempt.
+        """
         mt5 = self._mt5()
-        loop = self._loop
-        if loop is None:
-            return
-        while not self._tick_stop.is_set():
-            # Pause during reconnect — the health loop drives recovery; we
-            # just wait. This avoids spinning calls into a dead SDK and
-            # avoids stomping the reconnect attempt.
-            if not self._connected:
-                self._tick_stop.wait(self._health_check_interval)
-                continue
-            for symbol in tuple(self._tick_subs):
-                try:
-                    raw = mt5.symbol_info_tick(symbol)
-                except Exception:
-                    logger.exception("symbol_info_tick failed symbol=%s", symbol)
+        try:
+            while True:
+                if not self._connected:
+                    # Reconnect in progress — back off and re-check.
+                    await asyncio.sleep(self._health_check_interval)
                     continue
-                if raw is None:
-                    continue
-                # MT5 returns time as epoch seconds in broker server tz; convert to UTC.
-                tick_time = datetime.fromtimestamp(raw.time, tz=UTC)
-                if self._last_tick_time.get(symbol) == tick_time:
-                    continue
-                self._last_tick_time[symbol] = tick_time
-                tick = Tick(
-                    symbol=symbol,
-                    time=tick_time,
-                    bid=float(raw.bid),
-                    ask=float(raw.ask),
-                    last=float(raw.last),
-                    volume=int(raw.volume),
-                    flags=int(raw.flags),
-                )
-                asyncio.run_coroutine_threadsafe(self.bus.publish(TickEvent(tick=tick)), loop)
-            self._tick_stop.wait(TICK_POLL_INTERVAL)
+                for symbol in tuple(self._tick_subs):
+                    try:
+                        raw = await self._sdk(mt5.symbol_info_tick, symbol)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:  # noqa: BLE001
+                        logger.exception("symbol_info_tick failed symbol=%s", symbol)
+                        continue
+                    if raw is None:
+                        continue
+                    # MT5 returns time as epoch seconds in broker server tz;
+                    # convert to UTC.
+                    tick_time = datetime.fromtimestamp(raw.time, tz=UTC)
+                    if self._last_tick_time.get(symbol) == tick_time:
+                        continue
+                    self._last_tick_time[symbol] = tick_time
+                    tick = Tick(
+                        symbol=symbol,
+                        time=tick_time,
+                        bid=float(raw.bid),
+                        ask=float(raw.ask),
+                        last=float(raw.last),
+                        volume=int(raw.volume),
+                        flags=int(raw.flags),
+                    )
+                    await self.bus.publish(TickEvent(tick=tick))
+                await asyncio.sleep(self._tick_poll_interval)
+        except asyncio.CancelledError:
+            # Normal shutdown path — propagate so disconnect() can await us.
+            raise
 
     # --- Historical ---------------------------------------------------------
 
