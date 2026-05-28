@@ -189,14 +189,14 @@ async def test_unknown_ticket_close_does_not_corrupt_other_strategies(caplog) ->
     try:
         # s1 has a known open position.
         await rm._on_filled(_filled("s1", ticket=100))
-        before = dict(rm.snapshot()["open_positions"])  # type: ignore[arg-type]
+        before = dict(rm.snapshot()["open_positions"])  # type: ignore[call-overload]
         assert before == {"s1": 1}
 
         # A close fires for an unknown ticket.
         with caplog.at_level(logging.WARNING, logger="stinger.risk"):
             await rm._on_closed(_closed(ticket=9999))
 
-        after = dict(rm.snapshot()["open_positions"])  # type: ignore[arg-type]
+        after = dict(rm.snapshot()["open_positions"])  # type: ignore[call-overload]
         assert after == {"s1": 1}, (
             f"unknown-ticket close must not decrement any strategy bucket "
             f"— got {after}"

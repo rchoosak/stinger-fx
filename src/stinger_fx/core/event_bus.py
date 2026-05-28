@@ -84,7 +84,13 @@ class AsyncEventBus:
             event_type=event_type,
             handler=handler,
             queue=queue,
-            task=asyncio.create_task(self._consumer_loop(queue, handler, name or event_type.__name__)),
+            task=asyncio.create_task(
+                # _consumer_loop is generic over Event; mypy doesn't unify
+                # the E type variable across the dispatch — runtime is fine.
+                self._consumer_loop(
+                    queue, handler, name or event_type.__name__,  # type: ignore[arg-type]
+                )
+            ),
             overflow=overflow,
             name=name or event_type.__name__,
         )

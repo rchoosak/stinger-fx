@@ -125,7 +125,7 @@ class OrderQueue:
                 s.exec(
                     select(PendingOrderRequestRow)
                     .where(PendingOrderRequestRow.status == "pending")
-                    .order_by(PendingOrderRequestRow.enqueued_at)
+                    .order_by(PendingOrderRequestRow.enqueued_at)  # type: ignore[arg-type]
                 )
             )
         if not rows:

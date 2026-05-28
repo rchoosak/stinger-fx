@@ -444,13 +444,13 @@ class SimBroker(BaseBroker):
         # Pydantic frozen — rebuild. Pass through current values for fields
         # the caller didn't supply so we don't accidentally clear an existing
         # SL when only TP was being moved (and vice-versa).
-        updated = pos.model_copy(
+        updated_pos = pos.model_copy(
             update={
                 "sl": sl if sl is not None else pos.sl,
                 "tp": tp if tp is not None else pos.tp,
             }
         )
-        self._positions[ticket] = updated
+        self._positions[ticket] = updated_pos
         return OrderResult(ok=True, ticket=ticket, status=OrderStatus.SUBMITTED)
 
     async def close_position(
@@ -469,7 +469,8 @@ class SimBroker(BaseBroker):
         # request closes the whole position (the over-sized case is filtered
         # at the router; brokers in the wild typically clamp).
         full_close = volume is None or volume >= pos.volume
-        close_qty = pos.volume if full_close else float(volume)
+        # `not full_close` implies `volume is not None` (by definition above).
+        close_qty = pos.volume if full_close else float(volume)  # type: ignore[arg-type]
 
         # When closing a BUY we exit at bid (sell side), and vice versa.
         close_side = Side.SELL if pos.side is Side.BUY else Side.BUY

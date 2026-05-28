@@ -51,7 +51,7 @@ class SweepReport:
     strategy_id: str
     started_at: datetime
     finished_at: datetime
-    rank_by: MetricName
+    rank_by: MetricName | str  # MetricName built-in OR custom DSL expression
     total_combos: int
     results: list[SweepCellResult] = field(default_factory=list)
     # Phase 7.B — multi-objective Pareto frontier (None when no objectives

@@ -53,7 +53,7 @@ def _histogram_count(metric, **labels) -> float:
     name = metric._name + "_count"
     for sample in metric.collect()[0].samples:
         if sample.name == name and sample.labels == labels:
-            return sample.value
+            return float(sample.value)
     return 0.0
 
 

@@ -9,13 +9,17 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any, cast
 
 import orjson
 import structlog
 
 
-def _orjson_dumps(value: object, default: object) -> str:  # type: ignore[override]
+def _orjson_dumps(value: object, default: Callable[[Any], Any] | None = None) -> str:
+    """Pass-through to orjson.dumps decoded to str — matches the signature
+    JSONRenderer expects (it calls us as a json.dumps drop-in)."""
     return orjson.dumps(value, default=default).decode()
 
 
@@ -32,14 +36,20 @@ def configure(
     - Per-category JSONL handlers can be attached via `add_jsonl_handler`.
     """
     timestamper = structlog.processors.TimeStamper(fmt="iso", utc=True)
-    shared_pre = [
-        structlog.contextvars.merge_contextvars,
-        structlog.stdlib.add_logger_name,
-        structlog.stdlib.add_log_level,
-        timestamper,
-        structlog.processors.StackInfoRenderer(),
-        structlog.processors.format_exc_info,
-    ]
+    # The processor list mixes types whose precise structlog signatures aren't
+    # exported. cast lets us hand it to ProcessorFormatter / structlog.configure
+    # without per-item annotations.
+    shared_pre = cast(
+        "list[Any]",
+        [
+            structlog.contextvars.merge_contextvars,
+            structlog.stdlib.add_logger_name,
+            structlog.stdlib.add_log_level,
+            timestamper,
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+        ],
+    )
 
     structlog.configure(
         processors=[
@@ -109,4 +119,4 @@ def set_level(level: str) -> None:
 
 
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:
-    return structlog.get_logger(name)
+    return cast("structlog.stdlib.BoundLogger", structlog.get_logger(name))

@@ -14,7 +14,7 @@ CONFIG_DIR = REPO_ROOT / "config"
 def test_load_all_uses_repo_defaults() -> None:
     cfg = load_all(CONFIG_DIR)
     assert cfg.app.mode in {"normal", "tui", "web"}
-    assert cfg.app.broker.type == "mt5"
+    assert cfg.app.primary_broker_config.type == "mt5"
     assert any(s.id == "ma_eurusd_m15" for s in cfg.strategies.strategies)
 
 

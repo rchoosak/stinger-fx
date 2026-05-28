@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 
 from stinger_fx.brokers import BrokerPool
@@ -11,6 +13,7 @@ from stinger_fx.core.errors import ConfigError
 
 class _FakeBroker(BaseBroker):
     name = "fake"
+    tag: str = ""  # test sentinel for pool ordering assertions
     async def connect(self): ...
     async def disconnect(self): ...
     async def is_connected(self): return True
@@ -33,15 +36,15 @@ class _FakeBroker(BaseBroker):
 
 def _broker(tag: str) -> _FakeBroker:
     b = _FakeBroker(None)  # type: ignore[arg-type]
-    b.tag = tag  # type: ignore[attr-defined]
+    b.tag = tag
     return b
 
 
 def test_pool_get_by_account_id() -> None:
     a, b = _broker("a"), _broker("b")
     pool = BrokerPool([("primary", a), ("secondary", b)])
-    assert pool.get("primary").tag == "a"
-    assert pool.get("secondary").tag == "b"
+    assert cast(_FakeBroker, pool.get("primary")).tag == "a"
+    assert cast(_FakeBroker, pool.get("secondary")).tag == "b"
     assert pool.has("primary")
     assert not pool.has("nope")
 
@@ -49,7 +52,7 @@ def test_pool_get_by_account_id() -> None:
 def test_pool_primary_is_first_added() -> None:
     a, b = _broker("first"), _broker("second")
     pool = BrokerPool([("a", a), ("b", b)])
-    assert pool.primary().tag == "first"
+    assert cast(_FakeBroker, pool.primary()).tag == "first"
     assert pool.primary_id() == "a"
 
 
@@ -73,6 +76,6 @@ def test_pool_empty_primary_raises() -> None:
 def test_pool_all_and_items_preserve_insertion_order() -> None:
     a, b, c = _broker("a"), _broker("b"), _broker("c")
     pool = BrokerPool([("x", a), ("y", b), ("z", c)])
-    assert [t.tag for t in pool.all()] == ["a", "b", "c"]
+    assert [cast(_FakeBroker, t).tag for t in pool.all()] == ["a", "b", "c"]
     assert [k for k, _ in pool.items()] == ["x", "y", "z"]
     assert len(pool) == 3

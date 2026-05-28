@@ -6,7 +6,7 @@ from stinger_fx.backtest.search import GridSearch, SearchStrategy
 
 
 def test_grid_yields_all_cells_then_none() -> None:
-    grid = {"a": [1, 2, 3], "b": ["x", "y"]}
+    grid: dict[str, list] = {"a": [1, 2, 3], "b": ["x", "y"]}
     gs = GridSearch(grid)
     assert gs.total_trials == 6
     seen: list[dict] = []
@@ -38,8 +38,10 @@ def test_grid_report_is_noop() -> None:
     """Grid is non-adaptive — report() must accept any score without raising."""
     gs = GridSearch({"a": [1, 2]})
     s1 = gs.suggest()
+    assert s1 is not None
     gs.report(s1, 100.0)  # no error
     s2 = gs.suggest()
+    assert s2 is not None
     gs.report(s2, -50.0)
     # Sequence didn't change due to reports
     assert s1 != s2

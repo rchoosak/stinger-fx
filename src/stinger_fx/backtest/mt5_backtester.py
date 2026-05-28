@@ -220,6 +220,10 @@ class MT5StrategyTester(BaseBacktester):
     @staticmethod
     def _write_tester_ini(cfg: BacktestRunConfig, ini: Path, report_xml: Path) -> None:
         ini.parent.mkdir(parents=True, exist_ok=True)
+        # mt5_tester is single-symbol/single-timeframe; both fields are
+        # mandatory (the multi-feed path is for file mode only).
+        assert cfg.symbol is not None
+        assert cfg.timeframe is not None
         content = textwrap.dedent(
             f"""
             [Tester]

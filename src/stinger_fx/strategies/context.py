@@ -11,10 +11,11 @@ runs risk checks.
 
 from __future__ import annotations
 
-import logging
 from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
+
+import structlog
 
 from stinger_fx.core.clock import Clock
 from stinger_fx.core.events import (
@@ -115,7 +116,7 @@ class StrategyContext:
         timeframe: Timeframe,
         params: StrategyParams,
         clock: Clock,
-        logger: logging.Logger,
+        logger: structlog.stdlib.BoundLogger,
         magic: int,
         signal_sink: SignalSink,
         history_capacity: int = 2000,

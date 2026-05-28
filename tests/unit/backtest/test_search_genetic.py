@@ -13,7 +13,7 @@ from stinger_fx.backtest.search import (
 
 def _quadratic_objective(params: dict) -> float:
     """Toy fitness: peaks at a=2, b=3, value 100."""
-    return 100 - (params["a"] - 2) ** 2 - (params["b"] - 3) ** 2
+    return float(100 - (params["a"] - 2) ** 2 - (params["b"] - 3) ** 2)
 
 
 def test_ga_yields_pop_size_x_generations() -> None:
@@ -69,6 +69,7 @@ def test_ga_elite_preserved_to_next_gen() -> None:
     gen0: list[dict] = []
     for _ in range(5):
         s = ga.suggest()
+        assert s is not None
         ga.report(s, _quadratic_objective(s))
         gen0.append(s)
     # Best 2 of gen0 by score

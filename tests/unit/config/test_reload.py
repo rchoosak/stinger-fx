@@ -215,6 +215,7 @@ async def test_broker_change_marks_needs_restart() -> None:
     reloader = ConfigReloader(rec.as_actions())
     old = _full([])
     new = _full([])
+    assert new.app.broker is not None
     new.app.broker.mt5 = MT5Config(login=9999)  # change broker subconfig
     result = await reloader.diff_and_apply(old, new)
     assert result.ok

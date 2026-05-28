@@ -21,7 +21,10 @@ import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from stinger_fx.observability.metrics import MetricsRegistry
 
 import pyarrow as pa
 
@@ -101,7 +104,7 @@ class MT5Broker(BaseBroker):
         bus: AsyncEventBus,
         cfg: MT5Config,
         *,
-        metrics: dict[str, Any] | None = None,
+        metrics: MetricsRegistry | None = None,
     ) -> None:
         super().__init__(bus)
         self._cfg = cfg
@@ -156,12 +159,11 @@ class MT5Broker(BaseBroker):
             return await loop.run_in_executor(self._executor, lambda: fn(*args, **kwargs))
         finally:
             elapsed = _time.perf_counter() - start
-            hist = self._metrics.get("mt5_call_seconds")
-            if hist is not None:
-                try:
-                    hist.labels(method=method).observe(elapsed)
-                except Exception:
-                    pass
+            hist = self._metrics["mt5_call_seconds"]
+            try:
+                hist.labels(method=method).observe(elapsed)
+            except Exception:
+                pass
 
     @staticmethod
     def _mt5():
@@ -687,16 +689,23 @@ class MT5Broker(BaseBroker):
         )
 
     @staticmethod
-    def _order_type_constant(mt5, req: OrderRequest) -> int:
+    def _order_type_constant(mt5: Any, req: OrderRequest) -> int:
+        # mt5.* constants are Any (untyped SDK) — cast to int for the caller.
         if req.type == OrderType.MARKET:
-            return mt5.ORDER_TYPE_BUY if req.side is Side.BUY else mt5.ORDER_TYPE_SELL
+            return int(mt5.ORDER_TYPE_BUY if req.side is Side.BUY else mt5.ORDER_TYPE_SELL)
         if req.type == OrderType.LIMIT:
-            return mt5.ORDER_TYPE_BUY_LIMIT if req.side is Side.BUY else mt5.ORDER_TYPE_SELL_LIMIT
+            return int(
+                mt5.ORDER_TYPE_BUY_LIMIT if req.side is Side.BUY else mt5.ORDER_TYPE_SELL_LIMIT
+            )
         if req.type == OrderType.STOP:
-            return mt5.ORDER_TYPE_BUY_STOP if req.side is Side.BUY else mt5.ORDER_TYPE_SELL_STOP
+            return int(
+                mt5.ORDER_TYPE_BUY_STOP if req.side is Side.BUY else mt5.ORDER_TYPE_SELL_STOP
+            )
         if req.type == OrderType.STOP_LIMIT:
-            return (
-                mt5.ORDER_TYPE_BUY_STOP_LIMIT if req.side is Side.BUY else mt5.ORDER_TYPE_SELL_STOP_LIMIT
+            return int(
+                mt5.ORDER_TYPE_BUY_STOP_LIMIT
+                if req.side is Side.BUY
+                else mt5.ORDER_TYPE_SELL_STOP_LIMIT
             )
         raise ValueError(f"unsupported order type: {req.type}")
 

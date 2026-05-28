@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import logging
 from datetime import UTC, datetime
 
 import pytest
+import structlog
 
 from stinger_fx.core import AsyncEventBus, SimClock
 from stinger_fx.domain import OrderType, Side, Timeframe
@@ -27,7 +27,7 @@ def _make_ctx() -> tuple[StrategyContext, list[Signal]]:
         timeframe=Timeframe.M1,
         params=StrategyParams(),
         clock=SimClock(datetime(2024, 1, 1, tzinfo=UTC)),
-        logger=logging.getLogger("test"),
+        logger=structlog.get_logger("test"),
         magic=12345,
         signal_sink=sink,
         bus=AsyncEventBus(),

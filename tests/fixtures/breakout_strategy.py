@@ -45,10 +45,12 @@ class BreakoutOnce(BaseStrategy):
         if self._placed:
             return
         self._placed = True
-        await ctx.buy_stop(
-            price=ctx.params.trigger_price,
-            volume=ctx.params.volume,
-        )
+        # ctx.params is typed as the StrategyParams base; we set Params on this
+        # class to BreakoutOnceParams so the runtime instance has the extra
+        # fields. assert keeps mypy honest.
+        params = ctx.params
+        assert isinstance(params, BreakoutOnceParams)
+        await ctx.buy_stop(price=params.trigger_price, volume=params.volume)
 
     async def on_order_filled(self, ctx: StrategyContext, order) -> None:
         # Mark on the strategy instance so the test can observe the fill

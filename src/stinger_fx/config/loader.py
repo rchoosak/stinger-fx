@@ -34,7 +34,7 @@ def _load_yaml(path: Path) -> dict:
 
 def _validate[T](model: type[T], data: dict, source: Path) -> T:
     try:
-        return model.model_validate(data)  # type: ignore[attr-defined]
+        return model.model_validate(data)  # type: ignore[attr-defined,no-any-return]
     except ValidationError as e:
         raise ConfigError(f"validation failed for {source}:\n{e}") from e
 

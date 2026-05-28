@@ -183,7 +183,11 @@ class BacktestRepo:
 
     def list_runs(self, limit: int = 50) -> list[BacktestRunRow]:
         with self._store.session() as s:
-            stmt = select(BacktestRunRow).order_by(BacktestRunRow.started_at.desc()).limit(limit)  # type: ignore[union-attr]
+            stmt = (
+                select(BacktestRunRow)
+                .order_by(BacktestRunRow.started_at.desc())  # type: ignore[attr-defined]
+                .limit(limit)
+            )
             return list(s.exec(stmt))
 
 
@@ -262,7 +266,7 @@ class SweepRepo:
                 s.exec(
                     select(SweepResultRow)
                     .where(SweepResultRow.sweep_id == sweep_id)
-                    .order_by(SweepResultRow.rank)
+                    .order_by(SweepResultRow.rank)  # type: ignore[arg-type]
                     .limit(n)
                 )
             )

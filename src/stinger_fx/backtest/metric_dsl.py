@@ -204,10 +204,10 @@ def _eval_node(node: ast.AST, scope: dict[str, Any]) -> Any:
 
     if isinstance(node, ast.UnaryOp):
         operand = _eval_node(node.operand, scope)
-        fn = _UNARY_OPS.get(type(node.op))
-        if fn is None:
+        unary_fn = _UNARY_OPS.get(type(node.op))
+        if unary_fn is None:
             raise MetricDSLError(f"disallowed unary op {type(node.op).__name__}")
-        return fn(operand)
+        return unary_fn(operand)
 
     if isinstance(node, ast.BoolOp):
         values = [_eval_node(v, scope) for v in node.values]

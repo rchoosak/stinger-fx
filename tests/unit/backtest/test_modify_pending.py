@@ -76,8 +76,8 @@ async def test_modify_pending_updates_volume_only() -> None:
     sb.set_market_tick("EURUSD", 1.0998, 1.0999)
     try:
         result = await sb.place_order(_pending_req(price=1.10, volume=0.1))
-        ticket = result.ticket
-        await sb.modify_order(ticket, volume=0.25)
+        assert result.ticket is not None
+        await sb.modify_order(result.ticket, volume=0.25)
         pending = (await sb.get_open_orders())[0]
         assert pending.volume == pytest.approx(0.25)
         assert pending.price == pytest.approx(1.10)
@@ -92,6 +92,7 @@ async def test_modify_pending_rejects_negative_volume() -> None:
     sb.set_market_tick("EURUSD", 1.0998, 1.0999)
     try:
         result = await sb.place_order(_pending_req(price=1.10, volume=0.1))
+        assert result.ticket is not None
         mod = await sb.modify_order(result.ticket, volume=-0.5)
         assert mod.ok is False
         assert "volume" in mod.message.lower()
@@ -107,6 +108,7 @@ async def test_modified_pending_triggers_at_new_price() -> None:
     sb.set_market_tick("EURUSD", 1.0998, 1.0999)
     try:
         result = await sb.place_order(_pending_req(price=1.10))
+        assert result.ticket is not None
         # Move trigger up to 1.105
         await sb.modify_order(result.ticket, price=1.105)
         # Tick crosses original (1.10) — should NOT fire
@@ -127,6 +129,7 @@ async def test_modified_pending_fills_with_new_volume() -> None:
     sb.set_market_tick("EURUSD", 1.0998, 1.0999)
     try:
         result = await sb.place_order(_pending_req(price=1.10, volume=0.1))
+        assert result.ticket is not None
         await sb.modify_order(result.ticket, volume=0.3)
         await sb.check_pending("EURUSD", 1.10, 1.1001)
         positions = await sb.get_positions()

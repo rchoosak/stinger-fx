@@ -128,7 +128,7 @@ def test_partial_account_uses_cached_snapshot_when_present(client: TestClient) -
     # bus subscription installed by the FastAPI lifespan handler — we test
     # the rendering path here; the bus-cache wiring has its own integration
     # test in tests/unit/test_runtime_wiring.py.)
-    client.app.state.latest_snapshot = AccountSnapshot(
+    client.app.state.latest_snapshot = AccountSnapshot(  # type: ignore[attr-defined]
         account_id="x", time=datetime.now(UTC),
         balance=12_345.0, equity=12_400.0, margin=0, free_margin=12_400.0, profit=55.0,
     )
@@ -145,7 +145,7 @@ def test_partial_strategies_renders_empty(client: TestClient) -> None:
 
 
 def test_partial_positions_renders_with_rows(client: TestClient) -> None:
-    broker: _StubBroker = client.app.state.handle.broker  # type: ignore[assignment]
+    broker: _StubBroker = client.app.state.handle.broker  # type: ignore[attr-defined]
     broker.fake_positions = [
         Position(
             ticket=99, symbol="EURUSD", side=Side.BUY, volume=0.5,

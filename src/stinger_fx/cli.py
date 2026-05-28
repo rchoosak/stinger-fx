@@ -228,6 +228,7 @@ def backtest_run(
 ) -> None:
     """Execute one backtest run (by id) from backtest.yaml."""
     from stinger_fx.backtest import FileBacktester
+    from stinger_fx.backtest.base import BaseBacktester
     from stinger_fx.config import load_all
     from stinger_fx.core.errors import BacktestError
     from stinger_fx.data import SqliteStore
@@ -248,6 +249,7 @@ def backtest_run(
     sqlite = SqliteStore(cfg.app.data_dir / "stinger.db")
     sqlite.create_all()
 
+    bt: BaseBacktester
     if run.mode == "file":
         if run.data_source is None:
             typer.echo("ERROR: file mode requires data_source: <parquet root>", err=True)
@@ -454,7 +456,7 @@ def data_download(
 
     async def _do() -> None:
         bus = AsyncEventBus()
-        broker = build_broker(cfg.app.broker, bus)
+        broker = build_broker(cfg.app.primary_broker_config, bus)
         await broker.connect()
         try:
             tbl = await broker.get_history_bars(symbol, tf, start, end)

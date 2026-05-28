@@ -94,7 +94,7 @@ class WalkForwardReport:
     strategy_id: str
     started_at: datetime
     finished_at: datetime
-    rank_by: MetricName
+    rank_by: MetricName | str  # MetricName built-in OR custom DSL expression
     scheme: str
     n_folds: int
     folds: list[WalkForwardFoldResult] = field(default_factory=list)

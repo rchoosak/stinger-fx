@@ -22,7 +22,7 @@ def test_random_yields_n_trials_then_none() -> None:
 
 def test_random_samples_from_grid_only() -> None:
     """Every suggestion must use values from the supplied grid lists."""
-    grid = {"a": [10, 20], "b": ["x", "y", "z"]}
+    grid: dict[str, list] = {"a": [10, 20], "b": ["x", "y", "z"]}
     rs = RandomSearch(grid, n_trials=50, random_seed=42)
     while (s := rs.suggest()) is not None:
         assert s["a"] in (10, 20)

@@ -20,6 +20,7 @@ from stinger_fx.brokers.mt5.broker import MT5Broker
 from stinger_fx.config.models import MT5Config
 from stinger_fx.core import AsyncEventBus
 from stinger_fx.core.events import BrokerDisconnectedEvent, BrokerReconnectedEvent
+from tests._helpers import collect_into
 
 
 class _FakeMT5:
@@ -87,8 +88,8 @@ async def test_health_loop_detects_disconnect_and_reconnects(monkeypatch) -> Non
     bus = AsyncEventBus()
     disconnected: list[BrokerDisconnectedEvent] = []
     reconnected: list[BrokerReconnectedEvent] = []
-    sub_d = bus.subscribe(BrokerDisconnectedEvent, lambda e: disconnected.append(e) or asyncio.sleep(0))
-    sub_r = bus.subscribe(BrokerReconnectedEvent, lambda e: reconnected.append(e) or asyncio.sleep(0))
+    sub_d = bus.subscribe(BrokerDisconnectedEvent, collect_into(disconnected))
+    sub_r = bus.subscribe(BrokerReconnectedEvent, collect_into(reconnected))
 
     cfg = MT5Config(terminal_path="", login=0, password="", server="", timeout_ms=1000)
     broker = MT5Broker(bus, cfg)
@@ -131,7 +132,7 @@ async def test_reconnect_backoff_handles_multiple_failures(monkeypatch) -> None:
 
     bus = AsyncEventBus()
     reconnected: list[BrokerReconnectedEvent] = []
-    sub_r = bus.subscribe(BrokerReconnectedEvent, lambda e: reconnected.append(e) or asyncio.sleep(0))
+    sub_r = bus.subscribe(BrokerReconnectedEvent, collect_into(reconnected))
 
     cfg = MT5Config(terminal_path="", login=0, password="", server="", timeout_ms=1000)
     broker = MT5Broker(bus, cfg)

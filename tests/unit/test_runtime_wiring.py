@@ -92,7 +92,9 @@ class _RecordingBroker(BaseBroker):
     async def place_order(self, req: OrderRequest) -> OrderResult:
         return OrderResult(ok=False, status=OrderStatus.REJECTED, message="test broker")
 
-    async def modify_order(self, ticket, *, sl=None, tp=None, price=None) -> OrderResult:
+    async def modify_order(
+        self, ticket, *, sl=None, tp=None, price=None, volume=None,
+    ) -> OrderResult:
         return OrderResult(ok=False, status=OrderStatus.REJECTED)
 
     async def close_position(self, ticket, volume=None) -> OrderResult:
