@@ -74,6 +74,23 @@ RETRYABLE_RETCODES: frozenset[int] = frozenset({
     10024,  # TRADE_RETCODE_TIMEOUT — server didn't respond in time
 })
 
+# MT5 retcodes that mean the broker accepted the request. Different retcodes
+# map to different OrderStatus values:
+#   * TRADE_RETCODE_DONE         — request fully completed (market filled,
+#                                  pending modified, position closed)
+#   * TRADE_RETCODE_PLACED       — pending order entered the broker's queue;
+#                                  not filled yet. This is the success path
+#                                  for STOP / LIMIT / STOP_LIMIT orders.
+#   * TRADE_RETCODE_DONE_PARTIAL — only part of the requested volume filled
+#                                  (the remainder may sit as a pending leg
+#                                  or get rejected by the venue's IOC).
+RETCODE_DONE = 10009
+RETCODE_PLACED = 10008
+RETCODE_DONE_PARTIAL = 10010
+SUCCESS_RETCODES: frozenset[int] = frozenset({
+    RETCODE_DONE, RETCODE_PLACED, RETCODE_DONE_PARTIAL,
+})
+
 
 class MT5Broker(BaseBroker):
     name = "mt5"
@@ -569,7 +586,11 @@ class MT5Broker(BaseBroker):
                 # will detect the disconnect separately.
                 break
             retcode = int(result.retcode)
-            if retcode == mt5.TRADE_RETCODE_DONE:
+            # Treat every "broker accepted" retcode as a success that breaks
+            # out of the retry loop. Critically PLACED — pending orders
+            # commonly return PLACED, not DONE; pre-fix that was getting
+            # retried and then mis-reported as a rejection.
+            if retcode in SUCCESS_RETCODES:
                 break
             if retcode not in RETRYABLE_RETCODES:
                 break
@@ -589,10 +610,30 @@ class MT5Broker(BaseBroker):
                 ok=False, status=OrderStatus.REJECTED,
                 message=f"order_send() returned None after {last_attempt + 1} attempt(s): {err}",
             )
-        ok = int(result.retcode) == mt5.TRADE_RETCODE_DONE
-        status = OrderStatus.FILLED if ok else OrderStatus.REJECTED
+        retcode = int(result.retcode)
+        # Map MT5 retcode → engine status. Pre-fix only DONE was a success;
+        # PLACED (pending queued, awaiting trigger) and DONE_PARTIAL (partial
+        # fill) were incorrectly reported as rejections.
+        if retcode == RETCODE_DONE:
+            ok = True
+            status = OrderStatus.FILLED
+        elif retcode == RETCODE_PLACED:
+            ok = True
+            status = OrderStatus.SUBMITTED
+        elif retcode == RETCODE_DONE_PARTIAL:
+            ok = True
+            status = OrderStatus.PARTIALLY_FILLED
+        else:
+            ok = False
+            status = OrderStatus.REJECTED
+
         order = None
         if ok:
+            # Pending PLACED has no fill yet: volume reported by MT5 is 0
+            # and price refers to the trigger, not a fill price.
+            is_filled = status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED)
+            filled_volume = float(result.volume or 0.0) if is_filled else 0.0
+            fill_price: float | None = float(result.price or price) if is_filled else None
             order = Order(
                 ticket=int(result.order),
                 strategy_id=req.strategy_id,
@@ -600,9 +641,9 @@ class MT5Broker(BaseBroker):
                 side=req.side,
                 type=req.type,
                 volume=req.volume,
-                filled_volume=float(result.volume or req.volume),
+                filled_volume=filled_volume,
                 price=price,
-                fill_price=float(result.price or price),
+                fill_price=fill_price,
                 sl=req.sl,
                 tp=req.tp,
                 status=status,
@@ -610,7 +651,7 @@ class MT5Broker(BaseBroker):
                 magic=req.magic,
                 client_order_id=req.client_order_id,
                 requested_at=datetime.now(UTC),
-                filled_at=datetime.now(UTC) if ok else None,
+                filled_at=datetime.now(UTC) if is_filled else None,
             )
         return OrderResult(
             ok=ok,
