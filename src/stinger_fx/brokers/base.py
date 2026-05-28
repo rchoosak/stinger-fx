@@ -106,7 +106,19 @@ class BaseBroker(ABC):
         sl: float | None = None,
         tp: float | None = None,
         price: float | None = None,
-    ) -> OrderResult: ...
+        volume: float | None = None,
+    ) -> OrderResult:
+        """Modify an open position (sl/tp only) or a pending order.
+
+        For an **open position** only `sl` and `tp` are meaningful — entry
+        price and volume are immutable post-fill. Implementations must
+        either ignore `price`/`volume` for positions or reject the request.
+
+        For a **pending order** any combination of `sl`, `tp`, `price`,
+        and `volume` may be supplied (Phase 6.2.D — pending order volume
+        adjustment). `None` means "leave that field unchanged".
+        """
+        ...
 
     @abstractmethod
     async def close_position(self, ticket: int, volume: float | None = None) -> OrderResult: ...
