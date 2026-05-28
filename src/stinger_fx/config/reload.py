@@ -37,6 +37,7 @@ class ReloadActions:
     replace_strategy: Callable[[StrategyEntry], Awaitable[None]]          # class_path change → stop+start
     update_params: Callable[[str, dict[str, Any]], Awaitable[None]]       # id, new params
     set_enabled: Callable[[str, bool], Awaitable[None]]                   # id, enabled
+    change_account: Callable[[str, str], Awaitable[None]]                 # id, new account_id
 
     # App
     update_log_level: Callable[[str], Awaitable[None]]
@@ -145,6 +146,8 @@ class ConfigReloader:
                 continue
 
             if o.class_path != n.class_path:
+                # replace covers everything (account included) because it
+                # tears the runner down and re-adds it with the new entry.
                 await self._safe(self._actions.replace_strategy(n), f"strategy[~{sid}].class_path", result)
                 continue
 
@@ -159,6 +162,17 @@ class ConfigReloader:
                 await self._safe(
                     self._actions.update_params(sid, n.params),
                     f"strategy[{sid}].params",
+                    result,
+                )
+
+            # Account re-routing — the strategy keeps running on the same
+            # asyncio task; only the broker its signals go to changes.
+            # Pre-fix this was silently ignored, so a strategy "moved" in
+            # YAML kept trading on the previous account.
+            if o.account != n.account:
+                await self._safe(
+                    self._actions.change_account(sid, n.account),
+                    f"strategy[{sid}].account={n.account}",
                     result,
                 )
 

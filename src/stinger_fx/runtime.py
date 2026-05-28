@@ -368,17 +368,49 @@ class StingerApp:
     def _build_reload_actions(self, broker) -> ReloadActions:
         magic_by_id: dict[str, int] = {sid: derive_magic(sid) for sid in self.runners}
 
+        async def _subscribe_for_strategy(sid: str, account_id: str) -> None:
+            """Wire the *correct* broker for `account_id` to this strategy's
+            declared feeds. Pre-fix the add-callback used a captured primary
+            broker, so new strategies routed to demo_b got their ticks from
+            demo_a (or whatever was primary at startup)."""
+            assert self.bus is not None
+            target_broker = (
+                self._pool.get(account_id)
+                if self._pool.has(account_id)
+                else self._pool.primary()
+            )
+            runner = self.runners.get(sid)
+            if runner is None:
+                return
+            seen: set[tuple[str, Timeframe]] = set()
+            for sub in runner.strategy.subscriptions(runner._params):
+                key = (sub.symbol, sub.timeframe)
+                if key in seen:
+                    continue
+                seen.add(key)
+                await self._subscribe_one(target_broker, sub.symbol, sub.timeframe)
+
         async def add(entry: StrategyEntry) -> None:
             await self._add_strategy_internal(entry, magic_by_id)
+            # Account routing — pre-fix this was missing, so new strategies
+            # silently fell back to the primary broker regardless of their
+            # `account:` field in YAML.
+            self._strategy_accounts[entry.id] = entry.account
             if self._router is not None:
                 self._router.strategy_magic.update(magic_by_id)
-            await self._wire_broker_subscriptions(broker)
+                self._router.strategy_accounts[entry.id] = entry.account
+            await _subscribe_for_strategy(entry.id, entry.account)
 
         async def remove(sid: str) -> None:
             runner = self.runners.pop(sid, None)
             if runner is None:
                 return
             await runner.stop()
+            # Drop routing entries so a later config-add with the same id
+            # starts from a clean slate.
+            self._strategy_accounts.pop(sid, None)
+            if self._router is not None:
+                self._router.strategy_accounts.pop(sid, None)
 
         async def replace(entry: StrategyEntry) -> None:
             await remove(entry.id)
@@ -400,6 +432,35 @@ class StingerApp:
             else:
                 await runner.pause()
 
+        async def change_account(sid: str, account_id: str) -> None:
+            """Hot re-route a running strategy to a different broker.
+
+            The strategy task keeps running on the bus; only the order-routing
+            map flips, plus we subscribe the new broker to the strategy's
+            feeds so its tick pump is awake. The previous broker is left
+            subscribed — other strategies may still need those symbols, and
+            an idle subscription is cheap.
+            """
+            if not self._pool.has(account_id):
+                logger.error(
+                    "reload_change_account_unknown sid=%s account=%s known=%s",
+                    sid, account_id, sorted(b for b, _ in self._pool.items()),
+                )
+                raise ValueError(
+                    f"unknown account {account_id!r} for strategy {sid!r} — "
+                    f"add the broker to app.yaml first or revert the change"
+                )
+            if sid not in self.runners:
+                logger.warning(
+                    "reload_change_account_unknown_strategy sid=%s — ignored",
+                    sid,
+                )
+                return
+            self._strategy_accounts[sid] = account_id
+            if self._router is not None:
+                self._router.strategy_accounts[sid] = account_id
+            await _subscribe_for_strategy(sid, account_id)
+
         async def log_level(level: str) -> None:
             set_level(level)
 
@@ -413,6 +474,7 @@ class StingerApp:
             replace_strategy=replace,
             update_params=update_params,
             set_enabled=set_enabled,
+            change_account=change_account,
             update_log_level=log_level,
             update_risk=risk,
         )

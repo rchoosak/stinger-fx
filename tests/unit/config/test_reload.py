@@ -51,10 +51,12 @@ def _full(strategies: list[StrategyEntry], **app_overrides: Any) -> FullConfig:
 class _Recorder:
     def __init__(self) -> None:
         self.added: list[str] = []
+        self.added_accounts: list[tuple[str, str]] = []
         self.removed: list[str] = []
         self.replaced: list[str] = []
         self.params: list[tuple[str, dict]] = []
         self.enabled: list[tuple[str, bool]] = []
+        self.accounts: list[tuple[str, str]] = []
         self.log_levels: list[str] = []
         self.risk_calls: int = 0
 
@@ -74,6 +76,9 @@ class _Recorder:
         async def enabled(sid: str, val: bool) -> None:
             self.enabled.append((sid, val))
 
+        async def change_account(sid: str, account_id: str) -> None:
+            self.accounts.append((sid, account_id))
+
         async def log_level(level: str) -> None:
             self.log_levels.append(level)
 
@@ -86,9 +91,79 @@ class _Recorder:
             replace_strategy=replace,
             update_params=params,
             set_enabled=enabled,
+            change_account=change_account,
             update_log_level=log_level,
             update_risk=risk,
         )
+
+
+# --- account hot-reload regression -----------------------------------------
+#
+# Pre-fix _diff_strategies only compared class_path / enabled / params.
+# Changing a strategy's `account:` in YAML produced o != n (so the inner
+# block runs) but none of the three branches matched — so it was a silent
+# no-op and the strategy kept trading on the previous account.
+
+
+@pytest.mark.asyncio
+async def test_account_change_calls_change_account() -> None:
+    """Only `account` changes — the diff must call ``change_account``
+    rather than silently no-op."""
+    s_old = StrategyEntry(id="s1", class_path="a:B", enabled=True, params={"x": 1}, account="demo_a")
+    s_new = StrategyEntry(id="s1", class_path="a:B", enabled=True, params={"x": 1}, account="demo_b")
+    rec = _Recorder()
+    reloader = ConfigReloader(rec.as_actions())
+    result = await reloader.diff_and_apply(_full([s_old]), _full([s_new]))
+    assert result.ok
+    assert rec.accounts == [("s1", "demo_b")], (
+        f"expected change_account('s1', 'demo_b'), got {rec.accounts}"
+    )
+    # And nothing else fired — no spurious replace, no params, no enabled flip.
+    assert not rec.replaced
+    assert not rec.params
+    assert not rec.enabled
+
+
+@pytest.mark.asyncio
+async def test_account_change_with_params_fires_both() -> None:
+    """Independent fields: param change + account change both apply."""
+    s_old = StrategyEntry(id="s1", class_path="a:B", enabled=True, params={"x": 1}, account="demo_a")
+    s_new = StrategyEntry(id="s1", class_path="a:B", enabled=True, params={"x": 2}, account="demo_b")
+    rec = _Recorder()
+    reloader = ConfigReloader(rec.as_actions())
+    result = await reloader.diff_and_apply(_full([s_old]), _full([s_new]))
+    assert result.ok
+    assert rec.params == [("s1", {"x": 2})]
+    assert rec.accounts == [("s1", "demo_b")]
+
+
+@pytest.mark.asyncio
+async def test_class_path_change_skips_change_account() -> None:
+    """When class_path changes the strategy is fully replaced; no separate
+    change_account is needed because the add side of the replace picks up
+    the entry's account directly."""
+    s_old = StrategyEntry(id="s1", class_path="a:B", enabled=True, params={}, account="demo_a")
+    s_new = StrategyEntry(id="s1", class_path="a:C", enabled=True, params={}, account="demo_b")
+    rec = _Recorder()
+    reloader = ConfigReloader(rec.as_actions())
+    result = await reloader.diff_and_apply(_full([s_old]), _full([s_new]))
+    assert result.ok
+    assert rec.replaced == ["s1"]
+    assert rec.accounts == [], (
+        "replace already covers account routing (via add); a separate "
+        f"change_account would double-touch the router. Got {rec.accounts}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_change_no_callbacks_fire() -> None:
+    """Sanity: identical strategy entries trigger nothing."""
+    s = StrategyEntry(id="s1", class_path="a:B", enabled=True, params={"x": 1}, account="demo_a")
+    rec = _Recorder()
+    reloader = ConfigReloader(rec.as_actions())
+    result = await reloader.diff_and_apply(_full([s]), _full([s]))
+    assert result.ok
+    assert not rec.accounts and not rec.params and not rec.replaced
 
 
 @pytest.mark.asyncio
