@@ -180,6 +180,7 @@ async def test_reload_diff_multi_account_doesnt_crash() -> None:
         replace_strategy=_noop,
         update_params=_noop,
         set_enabled=_noop,
+        change_account=_noop,
         update_log_level=_noop,
         update_risk=_noop,
     )
