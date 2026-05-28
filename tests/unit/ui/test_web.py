@@ -15,7 +15,6 @@ from fastapi.testclient import TestClient
 from stinger_fx.brokers import BrokerPool
 from stinger_fx.brokers.base import BaseBroker
 from stinger_fx.core import AsyncEventBus
-from stinger_fx.core.events import AccountSnapshotEvent
 from stinger_fx.domain import (
     AccountInfo,
     AccountSnapshot,
@@ -26,7 +25,6 @@ from stinger_fx.domain import (
     Position,
     Side,
     SymbolInfo,
-    Timeframe,
 )
 from stinger_fx.ui.handle import EngineHandle
 from stinger_fx.ui.web import create_app
@@ -34,7 +32,10 @@ from stinger_fx.ui.web import create_app
 
 class _StubBroker(BaseBroker):
     name = "stub"
-    fake_positions: list[Position] = []
+
+    def __init__(self, bus: AsyncEventBus) -> None:
+        super().__init__(bus)
+        self.fake_positions: list[Position] = []
 
     async def connect(self) -> None: ...
     async def disconnect(self) -> None: ...
@@ -52,7 +53,7 @@ class _StubBroker(BaseBroker):
             balance=10_000, equity=10_002, margin=0, free_margin=10_002, profit=2.0,
         )
 
-    async def get_symbol_info(self, symbol):  # noqa: ARG002
+    async def get_symbol_info(self, symbol):
         return SymbolInfo(
             symbol="EURUSD", digits=5, point=0.00001, contract_size=100_000,
             volume_min=0.01, volume_max=100, volume_step=0.01,

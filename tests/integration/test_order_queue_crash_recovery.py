@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from sqlmodel import select
 
 from stinger_fx.backtest.order_router import OrderRouter
 from stinger_fx.brokers.base import BaseBroker
@@ -39,7 +40,6 @@ from stinger_fx.domain import (
     SignalStrength,
     SymbolInfo,
 )
-from sqlmodel import select
 
 
 class _AlwaysFillBroker(BaseBroker):
@@ -58,7 +58,7 @@ class _AlwaysFillBroker(BaseBroker):
     async def get_account_snapshot(self):
         return AccountSnapshot(account_id="x", time=datetime.now(UTC),
                                balance=10_000, equity=10_000, margin=0, free_margin=10_000)
-    async def get_symbol_info(self, symbol):  # noqa: ARG002
+    async def get_symbol_info(self, symbol):
         return SymbolInfo(symbol="EURUSD", digits=5, point=0.00001,
                           contract_size=100_000, volume_min=0.01, volume_max=100,
                           volume_step=0.01, currency_base="EUR",

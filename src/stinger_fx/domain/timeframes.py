@@ -6,10 +6,10 @@ are synthesized by the bar aggregator from M1 bars or ticks.
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 
-class Timeframe(str, Enum):
+class Timeframe(StrEnum):
     """Canonical timeframe identifiers used throughout the platform."""
 
     TICK = "TICK"

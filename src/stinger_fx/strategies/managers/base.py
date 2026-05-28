@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from stinger_fx.domain import Bar, Tick
+    from stinger_fx.domain import Tick
     from stinger_fx.strategies.context import StrategyContext
 
 

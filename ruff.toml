@@ -13,11 +13,23 @@ select = [
     "PT",                 # pytest style
 ]
 ignore = [
-    "E501",  # line length (handled by formatter)
+    "E501",   # line length (handled by formatter)
+    "RUF002", # ambiguous-unicode-character-docstring — Thai narration is intentional
+    "RUF003", # ambiguous-unicode-character-comment   — Thai narration is intentional
+    "SIM105", # contextlib.suppress vs try/except pass — equivalent; try-form is often
+              # more communicative about exactly what's being swallowed (e.g. CancelledError + Exception)
+    "SIM108", # if-else vs ternary — readability is subjective; spread form is fine
 ]
 
 [lint.per-file-ignores]
-"tests/**/*.py" = ["B011"]
+"tests/**/*.py" = [
+    "B011",  # assert False — fine in tests
+    "PT011", # pytest.raises(BroadException) — fine, regression tests rarely need `match=`
+    "PT018", # composite assertion — splitting hurts test readability with no debug benefit
+]
+"src/stinger_fx/cli.py" = ["B008"]  # typer.Option / typer.Argument as defaults is the documented typer idiom
+"src/stinger_fx/strategies/base.py" = ["B027"]  # BaseStrategy lifecycle hooks are intentionally empty
+"tests/unit/backtest/test_search_optuna.py" = ["E402"]  # imports follow pytest.importorskip — required pattern
 "src/stinger_fx/backtest/mt5_shim/**" = ["ALL"]  # MQL5 source, not Python
 
 [format]

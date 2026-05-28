@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 
 import pytest
@@ -40,7 +39,7 @@ class _StubBroker(BaseBroker):
             account_id="x", time=datetime.now(UTC),
             balance=10_000, equity=10_000, margin=0, free_margin=10_000,
         )
-    async def get_symbol_info(self, symbol):  # noqa: ARG002
+    async def get_symbol_info(self, symbol):
         return SymbolInfo(
             symbol="EURUSD", digits=5, point=0.00001, contract_size=100_000,
             volume_min=0.01, volume_max=100, volume_step=0.01,
@@ -90,6 +89,7 @@ def test_health_returns_engine_state(client: TestClient) -> None:
 def test_shutdown_endpoint_returns_shutting_down(client: TestClient, monkeypatch) -> None:
     """Don't actually send SIGINT during the test — patch os.kill."""
     import os
+
     import stinger_fx.ui.web.server as server_mod  # noqa: F401
 
     fired: list[tuple[int, int]] = []

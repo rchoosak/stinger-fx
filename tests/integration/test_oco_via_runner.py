@@ -8,7 +8,6 @@ bus → runner._on_position_closed → manager.on_position_closed → ctx.close(
 from __future__ import annotations
 
 import asyncio
-import logging
 from datetime import UTC, datetime
 
 import pytest

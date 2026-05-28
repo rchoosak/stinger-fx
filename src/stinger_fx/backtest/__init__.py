@@ -15,8 +15,8 @@ from stinger_fx.backtest.sweep import (
 __all__ = [
     "BacktestReport",
     "BaseBacktester",
-    "Granularity",
     "FileBacktester",
+    "Granularity",
     "OrderRouter",
     "ParameterSweep",
     "SimBroker",

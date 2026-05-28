@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from datetime import UTC, datetime
 
 import pytest
@@ -27,10 +26,9 @@ from stinger_fx.domain import (
 )
 from stinger_fx.strategies.base import BaseStrategy
 from stinger_fx.strategies.parameters import StrategyParams
-from stinger_fx.strategies.runner import StrategyRunner, derive_magic
+from stinger_fx.strategies.runner import StrategyRunner
 from stinger_fx.ui.handle import EngineHandle
 from stinger_fx.ui.web import create_app
-
 
 # --- Test strategy with a few typed param fields ----------------------------
 
@@ -65,7 +63,7 @@ class _StubBroker(BaseBroker):
     async def get_account_snapshot(self):
         return AccountSnapshot(account_id="x", time=datetime.now(UTC),
                                balance=10_000, equity=10_000, margin=0, free_margin=10_000)
-    async def get_symbol_info(self, symbol):  # noqa: ARG002
+    async def get_symbol_info(self, symbol):
         return SymbolInfo(symbol="EURUSD", digits=5, point=0.00001,
                           contract_size=100_000, volume_min=0.01, volume_max=100,
                           volume_step=0.01, currency_base="EUR",

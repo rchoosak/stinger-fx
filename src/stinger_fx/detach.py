@@ -192,7 +192,7 @@ def detach_stop(
 
             with httpx.Client(timeout=3.0) as client:
                 client.post(f"{web_url}/control/shutdown")
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.debug("/control/shutdown POST failed; falling back to signal")
 
     # Wait for the process to actually exit, polling periodically.
@@ -251,6 +251,6 @@ def detach_status(data_dir: Path) -> dict[str, Any]:
                 r = client.get(f"{web_url}/health")
                 if r.status_code == 200:
                     out["health"] = r.json()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
     return out

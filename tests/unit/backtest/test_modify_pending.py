@@ -12,7 +12,6 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 
 import pytest
 
@@ -20,7 +19,7 @@ from stinger_fx.backtest.order_router import OrderRouter
 from stinger_fx.backtest.replay_broker import SimBroker
 from stinger_fx.core import AsyncEventBus
 from stinger_fx.core.events import ModifyOrderRequestEvent
-from stinger_fx.domain import OrderRequest, OrderStatus, OrderType, Side
+from stinger_fx.domain import OrderRequest, OrderType, Side
 
 
 def _pending_req(

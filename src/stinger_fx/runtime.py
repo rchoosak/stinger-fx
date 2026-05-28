@@ -22,7 +22,6 @@ from stinger_fx.config import (
     StrategyEntry,
     load_all,
 )
-from stinger_fx.brokers.base import BaseBroker
 from stinger_fx.core import AsyncEventBus, LiveClock, TradingEngine
 from stinger_fx.core.errors import ConfigError
 from stinger_fx.core.events import (
@@ -199,8 +198,12 @@ class StingerApp:
     async def run_until_signal(self) -> None:
         assert (
             self.engine is not None
-            and self._watcher is not None
-            and len(self._pool) > 0
+        )
+        assert (
+            self._watcher is not None
+        )
+        assert (
+            len(self._pool) > 0
         )
         # Schedule periodic account snapshots BEFORE engine.start so they're
         # registered on the engine's scheduler. The scheduler starts inside
@@ -235,7 +238,8 @@ class StingerApp:
 
             from stinger_fx.ui.web import create_app
 
-            assert self.handle is not None and self.full_cfg is not None
+            assert self.handle is not None
+            assert self.full_cfg is not None
             web_app = create_app(self.handle, data_dir=self.full_cfg.app.data_dir)
             config = uvicorn.Config(
                 web_app,
@@ -290,7 +294,8 @@ class StingerApp:
     async def _add_strategy_internal(
         self, entry: StrategyEntry, magic_by_id: dict[str, int]
     ) -> None:
-        assert self.bus is not None and self.engine is not None
+        assert self.bus is not None
+        assert self.engine is not None
         strategy_cls = load_strategy_class(entry.class_path)
         params = validate_params(strategy_cls, entry.params)
         magic = derive_magic(entry.id)
@@ -464,7 +469,7 @@ class StingerApp:
         async def log_level(level: str) -> None:
             set_level(level)
 
-        async def risk(cfg) -> None:  # noqa: ANN001
+        async def risk(cfg) -> None:
             if self._risk is not None:
                 self._risk.update_config(cfg)
 
@@ -480,7 +485,9 @@ class StingerApp:
         )
 
     async def _on_config_change(self) -> None:
-        assert self.full_cfg is not None and self._reloader is not None and self.bus is not None
+        assert self.full_cfg is not None
+        assert self._reloader is not None
+        assert self.bus is not None
         try:
             new_cfg = load_all(self.config_dir)
         except Exception as e:

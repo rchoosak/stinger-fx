@@ -98,7 +98,7 @@ class OrderQueue:
         # the connection open during a potentially long network call.
         try:
             result = await broker.place_order(req)
-        except Exception as e:  # noqa: BLE001 — record failure then re-raise
+        except Exception as e:
             self._mark_failed(row_id, error=f"{type(e).__name__}: {e}")
             raise
 
@@ -138,7 +138,7 @@ class OrderQueue:
             broker = self._broker_lookup(req.strategy_id)
             try:
                 result = await broker.place_order(req)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 self._mark_failed(row.id, error=f"replay {type(e).__name__}: {e}")
                 continue
             self._update_status(row.id, result)

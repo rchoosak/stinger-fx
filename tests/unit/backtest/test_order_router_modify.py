@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 
 import pytest
 
@@ -13,8 +12,8 @@ from stinger_fx.core import AsyncEventBus
 from stinger_fx.core.events import (
     ModifyOrderRequestEvent,
     OrderModifiedEvent,
-    PartialCloseRequestEvent,
     PartialClosedEvent,
+    PartialCloseRequestEvent,
 )
 from stinger_fx.domain import OrderRequest, OrderType, Side
 

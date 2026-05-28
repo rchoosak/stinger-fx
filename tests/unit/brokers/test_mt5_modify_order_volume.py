@@ -51,7 +51,6 @@ from stinger_fx.config.models import MT5Config
 from stinger_fx.core import AsyncEventBus
 from stinger_fx.domain import OrderStatus
 
-
 TRADE_RETCODE_DONE = 10009
 
 

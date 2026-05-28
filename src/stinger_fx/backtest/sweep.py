@@ -31,7 +31,6 @@ from stinger_fx.config.models import (
     SweepRunConfig,
 )
 from stinger_fx.data import SqliteStore
-from stinger_fx.domain import Timeframe
 
 logger = logging.getLogger("stinger.backtest.sweep")
 

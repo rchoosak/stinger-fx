@@ -40,7 +40,6 @@ from stinger_fx.observability.notifications import (
     known_event_names,
 )
 
-
 # --- Formatters --------------------------------------------------------------
 
 

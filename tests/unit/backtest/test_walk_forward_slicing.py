@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -60,7 +61,7 @@ def test_folds_cover_full_range_back_to_back() -> None:
     """The end of fold N's OOS must equal the start of fold N+1's window
     (no gaps between adjacent folds in rolling scheme)."""
     folds = slice_folds(_ts(0), _ts(40), n_folds=4, scheme="rolling", in_sample_pct=0.5)
-    for prev, curr in zip(folds[:-1], folds[1:], strict=True):
+    for prev, curr in itertools.pairwise(folds):
         # Curr's in_sample[0] (window start in rolling) must equal prev's oos end
         assert curr.in_sample[0] == prev.out_of_sample[1]
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -12,7 +12,7 @@ from stinger_fx.domain.orders import OrderType
 from stinger_fx.domain.positions import Side
 
 
-class SignalStrength(str, Enum):
+class SignalStrength(StrEnum):
     WEAK = "weak"
     NORMAL = "normal"
     STRONG = "strong"

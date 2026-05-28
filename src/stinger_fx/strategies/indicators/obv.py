@@ -15,6 +15,7 @@ themselves — the math is trivial.
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Sequence
 
 from stinger_fx.domain import Bar
@@ -28,7 +29,7 @@ def obv(bars: Sequence[Bar]) -> float | None:
     if len(bars) < 2:
         return None
     total = 0.0
-    for prev, curr in zip(bars[:-1], bars[1:], strict=True):
+    for prev, curr in itertools.pairwise(bars):
         if curr.close > prev.close:
             total += float(curr.tick_volume)
         elif curr.close < prev.close:

@@ -84,8 +84,8 @@ def run_cmd(
             raise typer.Exit(code=1) from e
         typer.echo(f"engine detached pid={info['pid']}")
         typer.echo(f"web UI: {info['web_url']}")
-        typer.echo(f"  · status: stinger-fx status")
-        typer.echo(f"  · stop:   stinger-fx stop")
+        typer.echo("  · status: stinger-fx status")
+        typer.echo("  · stop:   stinger-fx stop")
         typer.echo(f"  · logs:   tail -f {info['log']}")
         return
 
@@ -387,7 +387,7 @@ def backtest_sweep(
         console.print("[red]no results[/]")
         return
     # Build table headers from union of param keys + key metrics
-    param_keys = sorted({k for r in top for k in r.params.keys()})
+    param_keys = sorted({k for r in top for k in r.params})
     metric_keys = ["net_pnl", "sharpe", "profit_factor", "win_rate", "max_drawdown", "trades"]
     table = Table("rank", *param_keys, *metric_keys)
     for rank, r in enumerate(top, start=1):

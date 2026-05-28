@@ -3,21 +3,21 @@
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from stinger_fx.domain.positions import Side
 
 
-class OrderType(str, Enum):
+class OrderType(StrEnum):
     MARKET = "market"
     LIMIT = "limit"
     STOP = "stop"
     STOP_LIMIT = "stop_limit"
 
 
-class OrderStatus(str, Enum):
+class OrderStatus(StrEnum):
     PENDING = "pending"               # request created locally, not sent
     SUBMITTED = "submitted"           # accepted by broker, awaiting fill
     PARTIALLY_FILLED = "partially_filled"

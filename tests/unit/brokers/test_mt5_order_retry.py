@@ -17,7 +17,6 @@ from stinger_fx.config.models import MT5Config
 from stinger_fx.core import AsyncEventBus
 from stinger_fx.domain import OrderRequest, OrderStatus, OrderType, Side
 
-
 # MT5 retcode constants used in this test (mirrors the broker module).
 TRADE_RETCODE_DONE = 10009
 TRADE_RETCODE_REQUOTE = 10004
@@ -69,7 +68,7 @@ class _FakeMT5:
     def symbol_info_tick(self, _symbol):
         return self._tick
 
-    def order_send(self, request):  # noqa: ARG002
+    def order_send(self, request):
         self.send_calls += 1
         # If sequence exhausted, keep returning the last code so we don't
         # crash if the broker decides to push past expected attempts.

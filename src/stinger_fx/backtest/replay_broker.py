@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 import pyarrow as pa
 
 from stinger_fx.backtest.reports import TradeRecord
-from stinger_fx.backtest.slippage import SlippageModel, fixed_pips_model, fixed_pips_slippage
+from stinger_fx.backtest.slippage import SlippageModel, fixed_pips_model
 from stinger_fx.brokers.base import BaseBroker
 from stinger_fx.core.event_bus import AsyncEventBus
 from stinger_fx.core.events import (
@@ -41,7 +41,7 @@ from stinger_fx.domain import (
 logger = logging.getLogger("stinger.backtest.sim_broker")
 
 
-def _pending_triggered(order: "Order", bid: float, ask: float) -> bool:
+def _pending_triggered(order: Order, bid: float, ask: float) -> bool:
     """Return True when current bid/ask triggers this pending order."""
     if order.price is None:
         return False

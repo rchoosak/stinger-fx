@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from sqlmodel import select
 
 from stinger_fx.brokers.base import BaseBroker
 from stinger_fx.brokers.order_queue import OrderQueue
@@ -23,7 +24,6 @@ from stinger_fx.domain import (
     Side,
     SymbolInfo,
 )
-from sqlmodel import select
 
 
 class _RecordingBroker(BaseBroker):
@@ -55,7 +55,7 @@ class _RecordingBroker(BaseBroker):
     async def get_account_snapshot(self):
         return AccountSnapshot(account_id="x", time=datetime.now(UTC),
                                balance=10_000, equity=10_000, margin=0, free_margin=10_000)
-    async def get_symbol_info(self, symbol):  # noqa: ARG002
+    async def get_symbol_info(self, symbol):
         return SymbolInfo(symbol="EURUSD", digits=5, point=0.00001,
                           contract_size=100_000, volume_min=0.01, volume_max=100,
                           volume_step=0.01, currency_base="EUR",

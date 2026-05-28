@@ -96,7 +96,7 @@ def test_combined_equity_curve_uses_union_of_timestamps() -> None:
     # 4 timestamps total (2 from a + 2 from b, no overlap)
     assert len(p.equity_curve) == 4
     # First timestamp is from a — b should be at its initial balance
-    first_ts, first_eq = p.equity_curve[0]
+    _first_ts, first_eq = p.equity_curve[0]
     assert first_eq == pytest.approx(10_010 + 10_000)  # a after 1st trade + b's initial
 
 

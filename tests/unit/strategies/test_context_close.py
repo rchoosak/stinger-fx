@@ -12,7 +12,7 @@ from stinger_fx.backtest.order_router import OrderRouter
 from stinger_fx.backtest.replay_broker import SimBroker
 from stinger_fx.core import AsyncEventBus, SimClock
 from stinger_fx.core.events import ClosePositionRequestEvent, PositionClosedEvent
-from stinger_fx.domain import Position, Side, Tick, Timeframe
+from stinger_fx.domain import Position, Side, Timeframe
 from stinger_fx.strategies.context import StrategyContext
 from stinger_fx.strategies.parameters import StrategyParams
 from stinger_fx.strategies.runner import derive_magic

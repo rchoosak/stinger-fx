@@ -142,8 +142,8 @@ def _signal(ctx: StrategyContext, symbol: str, *, side: str, volume: float):
     `ctx.buy` / `ctx.sell` always use `ctx.symbol`; pairs trading needs
     to target either leg, so we build the Signal manually.
     """
-    from stinger_fx.domain.signals import Signal, SignalStrength
     from stinger_fx.domain.positions import Side
+    from stinger_fx.domain.signals import Signal, SignalStrength
 
     return Signal(
         strategy_id=ctx.strategy_id,

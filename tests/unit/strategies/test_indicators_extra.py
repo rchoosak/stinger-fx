@@ -15,15 +15,15 @@ from stinger_fx.strategies.indicators import (
 )
 
 
-def _bar(i: int, *, h: float, l: float, c: float) -> Bar:
+def _bar(i: int, *, h: float, lo: float, c: float) -> Bar:
     base = datetime(2024, 1, 1, tzinfo=UTC)
     return Bar(
         symbol="EURUSD",
         timeframe=Timeframe.M15,
         time=base + timedelta(minutes=15 * i),
-        open=(h + l) / 2,
+        open=(h + lo) / 2,
         high=h,
-        low=l,
+        low=lo,
         close=c,
         is_closed=True,
     )
@@ -106,13 +106,13 @@ def test_macd_rejects_bad_params() -> None:
 
 
 def test_stochastic_none_when_short() -> None:
-    bars = [_bar(i, h=1.1, l=1.0, c=1.05) for i in range(5)]
+    bars = [_bar(i, h=1.1, lo=1.0, c=1.05) for i in range(5)]
     assert stochastic(bars, k_period=14, d_period=3) is None
 
 
 def test_stochastic_at_top_of_range() -> None:
     # Close pinned at the high — %K should be 100
-    bars = [_bar(i, h=1.1, l=1.0, c=1.1) for i in range(20)]
+    bars = [_bar(i, h=1.1, lo=1.0, c=1.1) for i in range(20)]
     result = stochastic(bars, k_period=14, d_period=3)
     assert result is not None
     assert result.k == pytest.approx(100.0)
@@ -120,7 +120,7 @@ def test_stochastic_at_top_of_range() -> None:
 
 
 def test_stochastic_at_bottom_of_range() -> None:
-    bars = [_bar(i, h=1.1, l=1.0, c=1.0) for i in range(20)]
+    bars = [_bar(i, h=1.1, lo=1.0, c=1.0) for i in range(20)]
     result = stochastic(bars, k_period=14, d_period=3)
     assert result is not None
     assert result.k == pytest.approx(0.0)
@@ -128,7 +128,7 @@ def test_stochastic_at_bottom_of_range() -> None:
 
 def test_stochastic_flat_range_returns_neutral() -> None:
     # All bars at the same level — degenerate denominator; should not crash
-    bars = [_bar(i, h=1.05, l=1.05, c=1.05) for i in range(20)]
+    bars = [_bar(i, h=1.05, lo=1.05, c=1.05) for i in range(20)]
     result = stochastic(bars, k_period=14, d_period=3)
     assert result is not None
     assert result.k == pytest.approx(50.0)
@@ -138,15 +138,15 @@ def test_stochastic_flat_range_returns_neutral() -> None:
 
 
 def test_donchian_none_when_short() -> None:
-    bars = [_bar(i, h=1.1, l=1.0, c=1.05) for i in range(5)]
+    bars = [_bar(i, h=1.1, lo=1.0, c=1.05) for i in range(5)]
     assert donchian(bars, period=20) is None
 
 
 def test_donchian_picks_window_extremes() -> None:
-    bars = [_bar(i, h=1.10 + 0.01 * i, l=1.00 - 0.01 * i, c=1.05) for i in range(20)]
+    bars = [_bar(i, h=1.10 + 0.01 * i, lo=1.00 - 0.01 * i, c=1.05) for i in range(20)]
     result = donchian(bars, period=20)
     assert result is not None
-    # last bar h=1.29, l=0.81; first bar h=1.10, l=1.00 → max h=1.29, min l=0.81
+    # last bar h=1.29, lo=0.81; first bar h=1.10, lo=1.00 → max h=1.29, min lo=0.81
     assert result.upper == pytest.approx(1.29)
     assert result.lower == pytest.approx(0.81)
     assert result.middle == pytest.approx((1.29 + 0.81) / 2)
@@ -154,4 +154,4 @@ def test_donchian_picks_window_extremes() -> None:
 
 def test_donchian_rejects_bad_period() -> None:
     with pytest.raises(ValueError):
-        donchian([_bar(0, h=1, l=1, c=1)], period=0)
+        donchian([_bar(0, h=1, lo=1, c=1)], period=0)

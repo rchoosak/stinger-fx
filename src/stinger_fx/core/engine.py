@@ -101,7 +101,10 @@ class TradingEngine:
             if ready is None:
                 await stop_evt.wait()
             else:
-                while not await ready():
+                # Polling an external user-supplied predicate; we don't own
+                # an event we could await. 100ms is responsive enough for
+                # CLI/UI integration without burning CPU.
+                while not await ready():  # noqa: ASYNC110
                     await asyncio.sleep(0.1)
         finally:
             await self.stop()

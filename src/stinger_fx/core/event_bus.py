@@ -17,7 +17,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Generic, TypeVar
+from typing import TypeVar
 
 from stinger_fx.core.events import Event
 
@@ -31,7 +31,7 @@ BLOCK = "block"
 
 
 @dataclass
-class Subscription(Generic[E]):
+class Subscription[E: Event]:
     """Handle returned by `subscribe()` — call `unsubscribe()` to stop."""
 
     event_type: type[E]

@@ -7,8 +7,12 @@ import pytest
 # Optuna is an optional extra; skip the whole module when it's not installed.
 optuna = pytest.importorskip("optuna")
 
-from stinger_fx.backtest.search import build_search_strategy
-from stinger_fx.backtest.search.optuna_search import OptunaSearch
+from stinger_fx.backtest.search import (
+    build_search_strategy,
+)
+from stinger_fx.backtest.search.optuna_search import (
+    OptunaSearch,
+)
 
 
 def _synthetic_score(params: dict) -> float:

@@ -8,7 +8,8 @@ so it never received ticks even after the first bug was fixed.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC
+from datetime import datetime as _dt
 from pathlib import Path
 
 import pyarrow as pa
@@ -16,9 +17,6 @@ import pytest
 
 from stinger_fx.brokers.base import BaseBroker
 from stinger_fx.core import AsyncEventBus
-from stinger_fx.core.events import TickEvent
-from datetime import UTC, datetime as _dt
-
 from stinger_fx.domain import (
     AccountInfo,
     AccountSnapshot,
@@ -28,7 +26,6 @@ from stinger_fx.domain import (
     OrderStatus,
     Position,
     SymbolInfo,
-    Tick,
     Timeframe,
 )
 from stinger_fx.runtime import StingerApp
