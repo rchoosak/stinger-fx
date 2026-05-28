@@ -325,32 +325,86 @@ class SimBroker(BaseBroker):
             else:
                 # STOP → market-style fill with slippage
                 fill_price = self._slippage_fn(pending.side, bid=bid, ask=ask)
-
-            # Promote to position
-            pos = Position(
-                ticket=ticket,
-                symbol=pending.symbol,
-                side=pending.side,
-                volume=pending.volume,
-                open_price=fill_price,
-                open_time=self._sim_time,
-                sl=pending.sl,
-                tp=pending.tp,
-                comment=pending.comment,
-                magic=pending.magic,
-            )
-            self._positions[ticket] = pos
-            del self._pending[ticket]
-
-            filled = pending.model_copy(update={
-                "status": OrderStatus.FILLED,
-                "filled_volume": pending.volume,
-                "fill_price": fill_price,
-                "filled_at": self._sim_time,
-            })
+            filled = await self._promote_pending(ticket, pending, fill_price)
             triggered.append(filled)
-            await self.bus.publish(OrderFilledEvent(order=filled))
         return triggered
+
+    async def check_pending_bar(
+        self, symbol: str, bar_high: float, bar_low: float
+    ) -> list[Order]:
+        """Bar-mode variant of ``check_pending``.
+
+        A bar reports the price extent it covered during the period
+        (``[low, high]``) but not the intra-bar path. A pending order
+        whose trigger price lies inside that range was touched at some
+        point during the bar — that's the condition we fire on.
+
+        Pre-fix the bar-mode replay loop never called this, so STOP /
+        LIMIT orders placed in a bar backtest sat in ``_pending``
+        forever and the backtest equity curve didn't reflect them.
+
+        Trigger semantics in bar mode:
+          * All four types fire when ``bar_low <= pending.price <= bar_high``.
+            The directional predicates collapse here — a pending order
+            wouldn't have been placed if the trigger had already been
+            crossed by the time of placement, and once placed, the only
+            way it fires is by the bar's range covering the price.
+
+        Fill price (bar mode lacks bid/ask, so we use conservative proxies):
+          * STOP / STOP_LIMIT — fill at the trigger price with slippage
+            applied (slippage_fn called with bid=ask=trigger). The market
+            crossed the trigger at some intra-bar moment; the exact path
+            is unknown so the trigger is the conservative midpoint.
+          * LIMIT — fill at the limit price exactly (the strategy
+            specified that as their worst acceptable price).
+        """
+        triggered: list[Order] = []
+        for ticket, pending in list(self._pending.items()):
+            if pending.symbol != symbol or pending.price is None:
+                continue
+            if not (bar_low <= pending.price <= bar_high):
+                continue
+            if pending.type in (OrderType.LIMIT, OrderType.STOP_LIMIT):
+                fill_price = pending.price
+            else:
+                # STOP → trigger + slippage; bar data has no spread,
+                # so feed the slippage_fn the trigger as both bid and ask.
+                fill_price = self._slippage_fn(
+                    pending.side, bid=pending.price, ask=pending.price
+                )
+            filled = await self._promote_pending(ticket, pending, fill_price)
+            triggered.append(filled)
+        return triggered
+
+    async def _promote_pending(
+        self, ticket: int, pending: Order, fill_price: float
+    ) -> Order:
+        """Convert a triggered pending order into an open position +
+        emit OrderFilledEvent. Shared by ``check_pending`` (tick mode)
+        and ``check_pending_bar`` (bar mode)."""
+        pos = Position(
+            ticket=ticket,
+            symbol=pending.symbol,
+            side=pending.side,
+            volume=pending.volume,
+            open_price=fill_price,
+            open_time=self._sim_time,
+            sl=pending.sl,
+            tp=pending.tp,
+            comment=pending.comment,
+            magic=pending.magic,
+        )
+        self._positions[ticket] = pos
+        del self._pending[ticket]
+
+        filled = pending.model_copy(update={
+            "status": OrderStatus.FILLED,
+            "filled_volume": pending.volume,
+            "fill_price": fill_price,
+            "filled_at": self._sim_time,
+        })
+        await self.bus.publish(OrderFilledEvent(order=filled))
+        return filled
 
     async def modify_order(
         self,
