@@ -707,11 +707,30 @@ class MT5Broker(BaseBroker):
         sl: float | None = None,
         tp: float | None = None,
         price: float | None = None,
+        volume: float | None = None,
     ) -> OrderResult:
+        """See BaseBroker. For MT5:
+
+          * Open positions → TRADE_ACTION_SLTP; only sl/tp are sent. A
+            non-None `price` or `volume` on a position is a programmer
+            error (entry price + size are immutable post-fill) so we
+            reject it rather than silently dropping the request.
+          * Pending orders → TRADE_ACTION_MODIFY; sl/tp/price/volume are
+            all forwarded. Fields the caller leaves as None are filled
+            in from the existing order so MT5 doesn't reset them.
+        """
         self._require_connected()
         mt5 = self._mt5()
         positions = await self._sdk(mt5.positions_get, ticket=ticket)
         if positions:
+            if price is not None or volume is not None:
+                return OrderResult(
+                    ok=False, status=OrderStatus.REJECTED,
+                    message=(
+                        "cannot modify price or volume on an open position "
+                        f"(ticket={ticket}); only sl/tp are mutable"
+                    ),
+                )
             request = {
                 "action": mt5.TRADE_ACTION_SLTP,
                 "position": ticket,
@@ -720,12 +739,31 @@ class MT5Broker(BaseBroker):
             }
             result = await self._sdk(mt5.order_send, request)
         else:
+            # Pending-order path. Pull the existing order so any field the
+            # caller left as None can be carried through — MT5 treats
+            # missing fields as "clear" on TRADE_ACTION_MODIFY for some
+            # field combinations, so we always send the full quartet.
+            existing_orders = await self._sdk(mt5.orders_get, ticket=ticket)
+            existing = existing_orders[0] if existing_orders else None
+            req_price = price if price is not None else (
+                float(existing.price_open) if existing is not None else 0.0
+            )
+            req_volume = volume if volume is not None else (
+                float(existing.volume_current) if existing is not None else 0.0
+            )
+            req_sl = sl if sl is not None else (
+                float(existing.sl) if existing is not None else 0.0
+            )
+            req_tp = tp if tp is not None else (
+                float(existing.tp) if existing is not None else 0.0
+            )
             request = {
                 "action": mt5.TRADE_ACTION_MODIFY,
                 "order": ticket,
-                "price": price,
-                "sl": sl,
-                "tp": tp,
+                "price": req_price,
+                "volume": req_volume,
+                "sl": req_sl,
+                "tp": req_tp,
             }
             result = await self._sdk(mt5.order_send, request)
         if result is None:
