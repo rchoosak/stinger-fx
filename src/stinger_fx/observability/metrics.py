@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import TypedDict
 
 from prometheus_client import (
     REGISTRY,
@@ -48,7 +49,32 @@ from stinger_fx.core.events import (
 logger = logging.getLogger("stinger.observability.metrics")
 
 
-def make_metrics(registry: CollectorRegistry | None = None) -> dict[str, object]:
+class MetricsRegistry(TypedDict):
+    """Strongly-typed metric bag. Each key maps to its real prometheus type so
+    mypy narrows ``metrics["engine_up"].set(1)`` etc. without per-call casts."""
+
+    engine_up: Gauge
+    strategies_total: Gauge
+    ticks_received_total: Counter
+    bars_closed_total: Counter
+    signals_total: Counter
+    orders_filled_total: Counter
+    orders_rejected_total: Counter
+    signals_rejected_by_risk_total: Counter
+    account_balance: Gauge
+    account_equity: Gauge
+    account_profit: Gauge
+    # Phase 6.1.B — latency telemetry
+    order_submission_seconds: Histogram
+    tick_e2e_seconds: Histogram
+    mt5_call_seconds: Histogram
+    broker_disconnects_total: Counter
+    broker_reconnects_total: Counter
+    broker_downtime_seconds: Histogram
+    tick_pump_lag_seconds: Gauge
+
+
+def make_metrics(registry: CollectorRegistry | None = None) -> MetricsRegistry:
     """Construct the metric objects.
 
     Separated from the collector so tests can build them against a fresh
@@ -182,10 +208,10 @@ class MetricsCollector:
     def __init__(
         self,
         bus: AsyncEventBus,
-        metrics: dict[str, object] | None = None,
+        metrics: MetricsRegistry | None = None,
     ) -> None:
         self._bus = bus
-        self.metrics = metrics or make_metrics()
+        self.metrics: MetricsRegistry = metrics or make_metrics()
         self._subs: list[Subscription] = []
 
     async def start(self) -> None:
@@ -225,19 +251,19 @@ class MetricsCollector:
             await sub.unsubscribe()
         self._subs.clear()
         # Flip engine_up off if we were running
-        self.metrics["engine_up"].set(0)  # type: ignore[union-attr]
+        self.metrics["engine_up"].set(0)
 
     # --- handlers ---------------------------------------------------------
 
     async def _on_engine_started(self, _evt: EngineStartedEvent) -> None:
-        self.metrics["engine_up"].set(1)  # type: ignore[union-attr]
+        self.metrics["engine_up"].set(1)
 
     async def _on_engine_stopped(self, _evt: EngineStoppedEvent) -> None:
-        self.metrics["engine_up"].set(0)  # type: ignore[union-attr]
+        self.metrics["engine_up"].set(0)
 
     async def _on_tick(self, evt: TickEvent) -> None:
         symbol = evt.tick.symbol
-        self.metrics["ticks_received_total"].labels(symbol=symbol).inc()  # type: ignore[union-attr]
+        self.metrics["ticks_received_total"].labels(symbol=symbol).inc()
         # Phase 6.1.B — tick latency telemetry.  `tick.time` is broker-server
         # time stamped at the source; `now()` is the moment the collector
         # observed the bus event. The delta captures every hop the tick made.
@@ -245,24 +271,24 @@ class MetricsCollector:
             lag = max(0.0, (datetime.now(UTC) - evt.tick.time).total_seconds())
         except Exception:
             return
-        self.metrics["tick_e2e_seconds"].labels(symbol=symbol).observe(lag)  # type: ignore[union-attr]
-        self.metrics["tick_pump_lag_seconds"].labels(symbol=symbol).set(lag)  # type: ignore[union-attr]
+        self.metrics["tick_e2e_seconds"].labels(symbol=symbol).observe(lag)
+        self.metrics["tick_pump_lag_seconds"].labels(symbol=symbol).set(lag)
 
     async def _on_bar(self, evt: BarEvent) -> None:
         if not evt.bar.is_closed:
             return
-        self.metrics["bars_closed_total"].labels(  # type: ignore[union-attr]
+        self.metrics["bars_closed_total"].labels(
             symbol=evt.bar.symbol, timeframe=evt.bar.timeframe.value
         ).inc()
 
     async def _on_signal(self, evt: SignalEvent) -> None:
-        self.metrics["signals_total"].labels(  # type: ignore[union-attr]
+        self.metrics["signals_total"].labels(
             strategy_id=evt.signal.strategy_id, side=evt.signal.side.value
         ).inc()
 
     async def _on_filled(self, evt: OrderFilledEvent) -> None:
         o = evt.order
-        self.metrics["orders_filled_total"].labels(  # type: ignore[union-attr]
+        self.metrics["orders_filled_total"].labels(
             strategy_id=o.strategy_id, symbol=o.symbol, side=o.side.value
         ).inc()
         # Phase 6.1.B — order submission latency (broker round-trip).
@@ -273,13 +299,13 @@ class MetricsCollector:
             except Exception:
                 return
             if rt >= 0:
-                self.metrics["order_submission_seconds"].labels(  # type: ignore[union-attr]
+                self.metrics["order_submission_seconds"].labels(
                     strategy_id=o.strategy_id, symbol=o.symbol
                 ).observe(rt)
 
     async def _on_rejected(self, evt: OrderRejectedEvent) -> None:
         o = evt.order
-        self.metrics["orders_rejected_total"].labels(  # type: ignore[union-attr]
+        self.metrics["orders_rejected_total"].labels(
             strategy_id=o.strategy_id, symbol=o.symbol
         ).inc()
 
@@ -290,27 +316,27 @@ class MetricsCollector:
         # `reason` may contain rule + actuals — extract just the rule prefix
         # (text before the first space or `=`) so cardinality stays bounded.
         rule = _rule_label(d.reason)
-        self.metrics["signals_rejected_by_risk_total"].labels(  # type: ignore[union-attr]
+        self.metrics["signals_rejected_by_risk_total"].labels(
             strategy_id=d.signal.strategy_id, rule=rule
         ).inc()
 
     async def _on_snapshot(self, evt: AccountSnapshotEvent) -> None:
         s = evt.snapshot
-        self.metrics["account_balance"].labels(account_id=s.account_id).set(s.balance)  # type: ignore[union-attr]
-        self.metrics["account_equity"].labels(account_id=s.account_id).set(s.equity)  # type: ignore[union-attr]
-        self.metrics["account_profit"].labels(account_id=s.account_id).set(s.profit)  # type: ignore[union-attr]
+        self.metrics["account_balance"].labels(account_id=s.account_id).set(s.balance)
+        self.metrics["account_equity"].labels(account_id=s.account_id).set(s.equity)
+        self.metrics["account_profit"].labels(account_id=s.account_id).set(s.profit)
 
     async def _on_strategy_state(self, evt: StrategyStateChangedEvent) -> None:
         # Reset gauge for this state and increment current state. Cheap because
         # state cardinality is tiny (started/paused/quarantined/stopped).
-        self.metrics["strategies_total"].labels(state=evt.state).inc()  # type: ignore[union-attr]
+        self.metrics["strategies_total"].labels(state=evt.state).inc()
 
     async def _on_broker_disconnected(self, evt: BrokerDisconnectedEvent) -> None:
-        self.metrics["broker_disconnects_total"].labels(broker=evt.broker_name).inc()  # type: ignore[union-attr]
+        self.metrics["broker_disconnects_total"].labels(broker=evt.broker_name).inc()
 
     async def _on_broker_reconnected(self, evt: BrokerReconnectedEvent) -> None:
-        self.metrics["broker_reconnects_total"].labels(broker=evt.broker_name).inc()  # type: ignore[union-attr]
-        self.metrics["broker_downtime_seconds"].labels(  # type: ignore[union-attr]
+        self.metrics["broker_reconnects_total"].labels(broker=evt.broker_name).inc()
+        self.metrics["broker_downtime_seconds"].labels(
             broker=evt.broker_name
         ).observe(evt.downtime_seconds)
 

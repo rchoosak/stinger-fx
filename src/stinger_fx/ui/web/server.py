@@ -571,16 +571,20 @@ def create_app(
                         "reason": row.reason,
                     }
                 )
-            for row in ReconciliationRepo(store).recent(50):
+            for recon_row in ReconciliationRepo(store).recent(50):
                 mismatches.append(
                     {
-                        "ts": row.ts.isoformat() if hasattr(row.ts, "isoformat") else str(row.ts),
-                        "ticket": row.ticket,
-                        "strategy_id": row.strategy_id,
-                        "type": row.mismatch_type,
-                        "expected": row.expected_value,
-                        "actual": row.actual_value,
-                        "details": row.details,
+                        "ts": (
+                            recon_row.ts.isoformat()
+                            if hasattr(recon_row.ts, "isoformat")
+                            else str(recon_row.ts)
+                        ),
+                        "ticket": recon_row.ticket,
+                        "strategy_id": recon_row.strategy_id,
+                        "type": recon_row.mismatch_type,
+                        "expected": recon_row.expected_value,
+                        "actual": recon_row.actual_value,
+                        "details": recon_row.details,
                     }
                 )
         return TEMPLATES.TemplateResponse(
@@ -597,7 +601,7 @@ def create_app(
     # --- Strategy code editor (Phase 6.4.D) ------------------------------
 
     def _require_editor_dir() -> Path:
-        d = app.state.user_strategies_dir
+        d: Path | None = app.state.user_strategies_dir
         if d is None:
             raise HTTPException(
                 503,
@@ -1035,9 +1039,10 @@ def _load_sweep_summary(data_dir: Path, sweep_id: str) -> dict | None:
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text())
+        data = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
         return None
+    return data if isinstance(data, dict) else None
 
 
 def _list_walk_forward_runs(data_dir: Path) -> list[dict]:
@@ -1071,6 +1076,7 @@ def _load_walk_forward_summary(data_dir: Path, wf_id: str) -> dict | None:
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text())
+        data = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
         return None
+    return data if isinstance(data, dict) else None

@@ -73,7 +73,7 @@ async def test_drop_oldest_does_not_block_publisher() -> None:
 @pytest.mark.asyncio
 async def test_block_policy_does_not_drop() -> None:
     bus = AsyncEventBus()
-    received: list[int] = []
+    received: list[float] = []
     started = asyncio.Event()
 
     async def slow_handler(evt: OrderRequestEvent) -> None:

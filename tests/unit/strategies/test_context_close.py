@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from datetime import UTC, datetime
 
 import pytest
+import structlog
 
 from stinger_fx.backtest.order_router import OrderRouter
 from stinger_fx.backtest.replay_broker import SimBroker
@@ -25,7 +25,7 @@ def _make_ctx(bus: AsyncEventBus) -> StrategyContext:
         timeframe=Timeframe.M1,
         params=StrategyParams(),
         clock=SimClock(datetime(2024, 1, 1, tzinfo=UTC)),
-        logger=logging.getLogger("test"),
+        logger=structlog.get_logger("test"),
         magic=derive_magic("test_strat"),
         signal_sink=lambda s: asyncio.sleep(0),
         bus=bus,
@@ -83,7 +83,7 @@ async def test_ctx_close_raises_without_bus() -> None:
         timeframe=Timeframe.M1,
         params=StrategyParams(),
         clock=SimClock(datetime(2024, 1, 1, tzinfo=UTC)),
-        logger=logging.getLogger("test"),
+        logger=structlog.get_logger("test"),
         magic=12345,
         signal_sink=lambda s: asyncio.sleep(0),
         bus=None,

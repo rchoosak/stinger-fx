@@ -10,6 +10,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
@@ -35,7 +36,11 @@ class _Handler(FileSystemEventHandler):
     def on_any_event(self, event: FileSystemEvent) -> None:
         if event.is_directory:
             return
-        name = Path(event.src_path).name
+        # watchdog types src_path as bytes | str depending on the OS; coerce.
+        src = event.src_path
+        if isinstance(src, bytes):
+            src = src.decode()
+        name = Path(src).name
         if name not in self._tracked:
             return
         self._loop.call_soon_threadsafe(self._callback)
@@ -54,7 +59,9 @@ class ConfigWatcher:
         self._dir = config_dir
         self._on_change = on_change
         self._tracked = tracked or {"app.yaml", "strategies.yaml", "backtest.yaml"}
-        self._observer: Observer | None = None
+        # Observer is a factory function in watchdog (not a class), so mypy
+        # can't use it as a type; Any keeps the runtime behaviour intact.
+        self._observer: Any = None
         self._debounce_task: asyncio.Task[None] | None = None
         self._pending = False
 

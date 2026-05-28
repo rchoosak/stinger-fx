@@ -69,9 +69,10 @@ def read_pidfile(data_dir: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text())
+        data = json.loads(path.read_text())
     except json.JSONDecodeError:
         return None
+    return data if isinstance(data, dict) else None
 
 
 def remove_pidfile(data_dir: Path) -> None:

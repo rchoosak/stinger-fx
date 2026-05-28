@@ -34,7 +34,7 @@ class _OcoStrategy(BaseStrategy):
     Params = _OcoParams
 
     @classmethod
-    def subscriptions(cls, params: _OcoParams) -> list[Subscription]:
+    def subscriptions(cls, params: StrategyParams) -> list[Subscription]:
         return [Subscription(symbol="EURUSD", timeframe=Timeframe.M1)]
 
     async def on_start(self, ctx) -> None:

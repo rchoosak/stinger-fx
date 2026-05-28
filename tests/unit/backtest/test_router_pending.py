@@ -25,6 +25,7 @@ from stinger_fx.core.events import (
 )
 from stinger_fx.domain import OrderType, Side
 from stinger_fx.domain.signals import Signal, SignalStrength
+from tests._helpers import collect_into
 
 
 async def _drain(bus: AsyncEventBus, *, ticks: int = 5) -> None:
@@ -41,8 +42,8 @@ async def test_market_signal_emits_filled_event() -> None:
 
     fills: list[OrderFilledEvent] = []
     submits: list[OrderSubmittedEvent] = []
-    sub_f = bus.subscribe(OrderFilledEvent, lambda e: fills.append(e) or asyncio.sleep(0))
-    sub_s = bus.subscribe(OrderSubmittedEvent, lambda e: submits.append(e) or asyncio.sleep(0))
+    sub_f = bus.subscribe(OrderFilledEvent, collect_into(fills))
+    sub_s = bus.subscribe(OrderSubmittedEvent, collect_into(submits))
 
     router = OrderRouter(bus, broker, strategy_magic={"s1": 1})
     await router.attach()
@@ -78,8 +79,8 @@ async def test_pending_signal_emits_only_submitted() -> None:
 
     fills: list[OrderFilledEvent] = []
     submits: list[OrderSubmittedEvent] = []
-    sub_f = bus.subscribe(OrderFilledEvent, lambda e: fills.append(e) or asyncio.sleep(0))
-    sub_s = bus.subscribe(OrderSubmittedEvent, lambda e: submits.append(e) or asyncio.sleep(0))
+    sub_f = bus.subscribe(OrderFilledEvent, collect_into(fills))
+    sub_s = bus.subscribe(OrderSubmittedEvent, collect_into(submits))
 
     router = OrderRouter(bus, broker, strategy_magic={"s1": 1})
     await router.attach()
@@ -121,7 +122,7 @@ async def test_pending_signal_triggers_filled_on_tick_cross() -> None:
     broker.set_market_tick("EURUSD", 1.0998, 1.0999)
 
     fills: list[OrderFilledEvent] = []
-    sub = bus.subscribe(OrderFilledEvent, lambda e: fills.append(e) or asyncio.sleep(0))
+    sub = bus.subscribe(OrderFilledEvent, collect_into(fills))
 
     router = OrderRouter(bus, broker, strategy_magic={"s1": 1})
     await router.attach()
@@ -162,7 +163,7 @@ async def test_pending_without_price_rejected_at_broker() -> None:
     broker.set_market_tick("EURUSD", 1.10, 1.1002)
 
     rejects: list[OrderRejectedEvent] = []
-    sub = bus.subscribe(OrderRejectedEvent, lambda e: rejects.append(e) or asyncio.sleep(0))
+    sub = bus.subscribe(OrderRejectedEvent, collect_into(rejects))
 
     router = OrderRouter(bus, broker, strategy_magic={"s1": 1})
     await router.attach()

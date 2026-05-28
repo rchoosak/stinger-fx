@@ -16,6 +16,7 @@ from stinger_fx.core.events import (
     PartialCloseRequestEvent,
 )
 from stinger_fx.domain import OrderRequest, OrderType, Side
+from tests._helpers import collect_into
 
 
 async def _open_position(
@@ -54,7 +55,7 @@ async def test_modify_routes_to_broker_and_publishes_event() -> None:
     await router.attach()
 
     modified: list[OrderModifiedEvent] = []
-    sub = bus.subscribe(OrderModifiedEvent, lambda e: modified.append(e) or asyncio.sleep(0))
+    sub = bus.subscribe(OrderModifiedEvent, collect_into(modified))
 
     try:
         ticket = await _open_position(broker, strategy_id="strat_a", magic=111)
@@ -92,7 +93,7 @@ async def test_modify_refuses_cross_strategy_ticket() -> None:
     await router.attach()
 
     modified: list[OrderModifiedEvent] = []
-    sub = bus.subscribe(OrderModifiedEvent, lambda e: modified.append(e) or asyncio.sleep(0))
+    sub = bus.subscribe(OrderModifiedEvent, collect_into(modified))
 
     try:
         ticket = await _open_position(broker, strategy_id="strat_a", magic=111)
@@ -125,7 +126,7 @@ async def test_partial_close_shrinks_volume_and_emits_event() -> None:
     partial_events: list[PartialClosedEvent] = []
     sub = bus.subscribe(
         PartialClosedEvent,
-        lambda e: partial_events.append(e) or asyncio.sleep(0),
+        collect_into(partial_events),
     )
 
     try:

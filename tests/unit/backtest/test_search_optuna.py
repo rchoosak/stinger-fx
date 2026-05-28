@@ -18,7 +18,7 @@ from stinger_fx.backtest.search.optuna_search import (
 def _synthetic_score(params: dict) -> float:
     """A toy objective that peaks at a=2, b=3 with value 100."""
     target_a, target_b = 2, 3
-    return 100 - (params["a"] - target_a) ** 2 - (params["b"] - target_b) ** 2
+    return float(100 - (params["a"] - target_a) ** 2 - (params["b"] - target_b) ** 2)
 
 
 def test_optuna_yields_n_trials() -> None:

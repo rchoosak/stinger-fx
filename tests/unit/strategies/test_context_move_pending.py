@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from datetime import UTC, datetime
 
 import pytest
+import structlog
 
 from stinger_fx.core import AsyncEventBus, SimClock
 from stinger_fx.core.events import ModifyOrderRequestEvent
 from stinger_fx.domain import Timeframe
 from stinger_fx.strategies.context import StrategyContext
 from stinger_fx.strategies.parameters import StrategyParams
+from tests._helpers import collect_into
 
 
 def _make_ctx(bus: AsyncEventBus) -> StrategyContext:
@@ -22,7 +23,7 @@ def _make_ctx(bus: AsyncEventBus) -> StrategyContext:
         timeframe=Timeframe.M1,
         params=StrategyParams(),
         clock=SimClock(datetime(2024, 1, 1, tzinfo=UTC)),
-        logger=logging.getLogger("test"),
+        logger=structlog.get_logger("test"),
         magic=12345,
         signal_sink=lambda s: asyncio.sleep(0),
         bus=bus,
@@ -67,7 +68,7 @@ async def test_move_pending_supports_volume_and_sl() -> None:
     bus = AsyncEventBus()
     seen: list[ModifyOrderRequestEvent] = []
     sub = bus.subscribe(
-        ModifyOrderRequestEvent, lambda e: seen.append(e) or asyncio.sleep(0), name="t.mod"
+        ModifyOrderRequestEvent, collect_into(seen), name="t.mod"
     )
     ctx = _make_ctx(bus)
 
@@ -103,7 +104,7 @@ async def test_move_pending_without_bus_raises() -> None:
         timeframe=Timeframe.M1,
         params=StrategyParams(),
         clock=SimClock(datetime(2024, 1, 1, tzinfo=UTC)),
-        logger=logging.getLogger("test"),
+        logger=structlog.get_logger("test"),
         magic=1,
         signal_sink=lambda s: asyncio.sleep(0),
         bus=None,

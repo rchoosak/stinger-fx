@@ -110,7 +110,9 @@ def test_format_kill_switch_only_fires_on_kill_switch_reason() -> None:
         )
     )
     assert _format_kill_switch(other) is None
-    assert "KILL SWITCH" in _format_kill_switch(kill)
+    kill_msg = _format_kill_switch(kill)
+    assert kill_msg is not None
+    assert "KILL SWITCH" in kill_msg
 
 
 def test_format_strategy_state_skips_started() -> None:
@@ -120,9 +122,13 @@ def test_format_strategy_state_skips_started() -> None:
         strategy_id="s1", state="quarantined", reason="too many errors",
     )
     assert _format_strategy_state(started) is None
-    assert "PAUSED" in _format_strategy_state(paused)
-    assert "QUARANTINED" in _format_strategy_state(quarantined)
-    assert "too many errors" in _format_strategy_state(quarantined)
+    paused_msg = _format_strategy_state(paused)
+    quarantined_msg = _format_strategy_state(quarantined)
+    assert paused_msg is not None
+    assert quarantined_msg is not None
+    assert "PAUSED" in paused_msg
+    assert "QUARANTINED" in quarantined_msg
+    assert "too many errors" in quarantined_msg
 
 
 def test_known_event_names_complete() -> None:
@@ -219,8 +225,11 @@ async def test_sink_non_2xx_does_not_raise() -> None:
 
 
 def test_build_sink_rejects_unknown_kind() -> None:
+    # Bypass schema validation to inject an unsupported kind — that's the
+    # whole point of this test (build_sink must reject it).
     cfg = NotificationChannelConfig.model_construct(
-        kind="unknown", enabled=True, bot_token="", chat_id="", webhook_url="", events=[],
+        kind="unknown",  # type: ignore[arg-type]
+        enabled=True, bot_token="", chat_id="", webhook_url="", events=[],
     )
     with pytest.raises(ValueError):
         build_sink(cfg, httpx.AsyncClient())

@@ -13,10 +13,10 @@ through the OrderRouter or any broker. They verify:
 from __future__ import annotations
 
 import asyncio
-import logging
 from datetime import UTC, datetime
 
 import pytest
+import structlog
 
 from stinger_fx.core import AsyncEventBus, SimClock
 from stinger_fx.core.events import (
@@ -35,7 +35,7 @@ def _make_ctx(bus: AsyncEventBus | None = None) -> StrategyContext:
         timeframe=Timeframe.M1,
         params=StrategyParams(),
         clock=SimClock(datetime(2024, 1, 1, tzinfo=UTC)),
-        logger=logging.getLogger("test"),
+        logger=structlog.get_logger("test"),
         magic=12345,
         signal_sink=lambda s: asyncio.sleep(0),
         bus=bus,

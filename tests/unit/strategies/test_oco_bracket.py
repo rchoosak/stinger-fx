@@ -8,10 +8,10 @@ on one, and the order-cancellation auto-cleanup path.
 from __future__ import annotations
 
 import asyncio
-import logging
 from datetime import UTC, datetime
 
 import pytest
+import structlog
 
 from stinger_fx.core import AsyncEventBus, SimClock
 from stinger_fx.core.events import CancelOrderRequestEvent, ClosePositionRequestEvent
@@ -26,6 +26,7 @@ from stinger_fx.domain import (
 from stinger_fx.strategies.context import StrategyContext
 from stinger_fx.strategies.managers.oco import OCOGroupManager
 from stinger_fx.strategies.parameters import StrategyParams
+from tests._helpers import collect_into
 
 
 def _make_ctx(bus: AsyncEventBus) -> StrategyContext:
@@ -35,7 +36,7 @@ def _make_ctx(bus: AsyncEventBus) -> StrategyContext:
         timeframe=Timeframe.M1,
         params=StrategyParams(),
         clock=SimClock(datetime(2024, 1, 1, tzinfo=UTC)),
-        logger=logging.getLogger("test"),
+        logger=structlog.get_logger("test"),
         magic=12345,
         signal_sink=lambda s: asyncio.sleep(0),
         bus=bus,
@@ -177,8 +178,8 @@ async def test_position_close_cancels_pending_sibling() -> None:
     bus = AsyncEventBus()
     cancels: list[CancelOrderRequestEvent] = []
     closes: list[ClosePositionRequestEvent] = []
-    sub_c = bus.subscribe(CancelOrderRequestEvent, lambda e: cancels.append(e) or asyncio.sleep(0))
-    sub_cl = bus.subscribe(ClosePositionRequestEvent, lambda e: closes.append(e) or asyncio.sleep(0))
+    sub_c = bus.subscribe(CancelOrderRequestEvent, collect_into(cancels))
+    sub_cl = bus.subscribe(ClosePositionRequestEvent, collect_into(closes))
 
     ctx = _make_ctx(bus)
     oco = OCOGroupManager(ctx)
@@ -205,7 +206,7 @@ async def test_three_member_bracket_cancels_two_siblings() -> None:
     """3 pendings in a group; one fills → both others cancelled."""
     bus = AsyncEventBus()
     cancels: list[CancelOrderRequestEvent] = []
-    sub = bus.subscribe(CancelOrderRequestEvent, lambda e: cancels.append(e) or asyncio.sleep(0))
+    sub = bus.subscribe(CancelOrderRequestEvent, collect_into(cancels))
 
     ctx = _make_ctx(bus)
     oco = OCOGroupManager(ctx)
@@ -230,8 +231,8 @@ async def test_external_cancellation_just_cleans_up_no_cascade() -> None:
     bus = AsyncEventBus()
     cancels: list[CancelOrderRequestEvent] = []
     closes: list[ClosePositionRequestEvent] = []
-    sub_c = bus.subscribe(CancelOrderRequestEvent, lambda e: cancels.append(e) or asyncio.sleep(0))
-    sub_cl = bus.subscribe(ClosePositionRequestEvent, lambda e: closes.append(e) or asyncio.sleep(0))
+    sub_c = bus.subscribe(CancelOrderRequestEvent, collect_into(cancels))
+    sub_cl = bus.subscribe(ClosePositionRequestEvent, collect_into(closes))
 
     ctx = _make_ctx(bus)
     oco = OCOGroupManager(ctx)
@@ -259,7 +260,7 @@ async def test_unrelated_fill_is_ignored() -> None:
     """A fill for a ticket that isn't in any group must not cascade."""
     bus = AsyncEventBus()
     cancels: list[CancelOrderRequestEvent] = []
-    sub = bus.subscribe(CancelOrderRequestEvent, lambda e: cancels.append(e) or asyncio.sleep(0))
+    sub = bus.subscribe(CancelOrderRequestEvent, collect_into(cancels))
 
     ctx = _make_ctx(bus)
     oco = OCOGroupManager(ctx)
@@ -283,7 +284,7 @@ async def test_phase5_position_only_path_still_works() -> None:
     """Backward-compat: Phase 5 D's position-only group still cascades on close."""
     bus = AsyncEventBus()
     closes: list[ClosePositionRequestEvent] = []
-    sub = bus.subscribe(ClosePositionRequestEvent, lambda e: closes.append(e) or asyncio.sleep(0))
+    sub = bus.subscribe(ClosePositionRequestEvent, collect_into(closes))
 
     ctx = _make_ctx(bus)
     oco = OCOGroupManager(ctx)

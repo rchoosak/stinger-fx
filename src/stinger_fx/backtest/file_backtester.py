@@ -22,6 +22,7 @@ from stinger_fx.brokers.bar_aggregator import BarAggregator
 from stinger_fx.config.models import BacktestRunConfig, StrategyEntry
 from stinger_fx.core import AsyncEventBus, SimClock
 from stinger_fx.core.errors import BacktestError
+from stinger_fx.core.event_bus import Subscription as BusSubscription
 from stinger_fx.core.events import BarEvent, SignalEvent, TickEvent
 from stinger_fx.data import BacktestRepo, SqliteStore, iter_bars, iter_ticks
 from stinger_fx.domain import Tick
@@ -159,7 +160,7 @@ class FileBacktester(BaseBacktester):
                     "run_id": cfg.id,
                     "strategy_id": strategy_id,
                     "symbol": cfg.symbol,
-                    "timeframe": cfg.timeframe.value,
+                    "timeframe": cfg.timeframe.value if cfg.timeframe else None,
                     "start": cfg.start.isoformat(),
                     "end": cfg.end.isoformat(),
                     "initial_balance": cfg.initial_balance,
@@ -248,7 +249,7 @@ class FileBacktester(BaseBacktester):
         # (symbol, tf) it subscribed to. Each one subscribes to TickEvent on
         # the bus and self-filters by symbol.
         aggregators: list[BarAggregator] = []
-        agg_subs = []
+        agg_subs: list[BusSubscription[TickEvent]] = []
         for sub in cfg.feed_list:
             agg = BarAggregator(sub.symbol, sub.timeframe, bus)
             aggregators.append(agg)
@@ -310,7 +311,7 @@ class FileBacktester(BaseBacktester):
         if not equity_curve and last_tick is not None:
             equity_curve.append((last_tick.time, broker.balance))
 
-        for sub in agg_subs:
-            await sub.unsubscribe()
+        for bus_sub in agg_subs:
+            await bus_sub.unsubscribe()
         del aggregators  # keep references alive until subs unsub
         return count

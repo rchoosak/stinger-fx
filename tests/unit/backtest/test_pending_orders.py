@@ -19,6 +19,7 @@ from stinger_fx.core.events import (
     OrderSubmittedEvent,
 )
 from stinger_fx.domain import OrderRequest, OrderStatus, OrderType, Side
+from tests._helpers import collect_into
 
 
 def _req(
@@ -54,8 +55,8 @@ async def test_place_pending_returns_submitted_not_filled() -> None:
 
     submitted: list[OrderSubmittedEvent] = []
     filled: list[OrderFilledEvent] = []
-    sub_s = bus.subscribe(OrderSubmittedEvent, lambda e: submitted.append(e) or asyncio.sleep(0))
-    sub_f = bus.subscribe(OrderFilledEvent, lambda e: filled.append(e) or asyncio.sleep(0))
+    sub_s = bus.subscribe(OrderSubmittedEvent, collect_into(submitted))
+    sub_f = bus.subscribe(OrderFilledEvent, collect_into(filled))
 
     try:
         result = await sb.place_order(
@@ -84,7 +85,7 @@ async def test_buy_stop_triggers_when_ask_crosses_above() -> None:
     sb.set_market_tick("EURUSD", 1.0998, 1.0999)  # below trigger
 
     filled: list[OrderFilledEvent] = []
-    sub = bus.subscribe(OrderFilledEvent, lambda e: filled.append(e) or asyncio.sleep(0))
+    sub = bus.subscribe(OrderFilledEvent, collect_into(filled))
 
     try:
         await sb.place_order(_req(side=Side.BUY, type_=OrderType.STOP, price=1.10))
@@ -168,7 +169,7 @@ async def test_cancel_pending_removes_from_queue() -> None:
     sb.set_market_tick("EURUSD", 1.10, 1.1002)
 
     cancelled: list[OrderCancelledEvent] = []
-    sub = bus.subscribe(OrderCancelledEvent, lambda e: cancelled.append(e) or asyncio.sleep(0))
+    sub = bus.subscribe(OrderCancelledEvent, collect_into(cancelled))
 
     try:
         result = await sb.place_order(_req(side=Side.BUY, type_=OrderType.STOP, price=1.20))

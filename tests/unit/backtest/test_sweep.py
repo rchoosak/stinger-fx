@@ -63,14 +63,18 @@ def test_rank_by_net_pnl_bigger_is_better() -> None:
     r = _report("net_pnl", [_cell(50), _cell(200), _cell(-10)])
     ranked = [c.metrics["net_pnl"] for c in r.ranked]
     assert ranked == [200, 50, -10]
-    assert r.best().metrics["net_pnl"] == 200
+    best = r.best()
+    assert best is not None
+    assert best.metrics["net_pnl"] == 200
 
 
 def test_rank_by_max_drawdown_smaller_is_better() -> None:
     r = _report("max_drawdown", [_cell(0, max_dd=200), _cell(0, max_dd=50), _cell(0, max_dd=500)])
     ranked = [c.metrics["max_drawdown"] for c in r.ranked]
     assert ranked == [50, 200, 500]
-    assert r.best().metrics["max_drawdown"] == 50
+    best = r.best()
+    assert best is not None
+    assert best.metrics["max_drawdown"] == 50
 
 
 def test_top_n_truncates() -> None:

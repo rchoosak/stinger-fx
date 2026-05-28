@@ -53,7 +53,9 @@ def _coerce_time_column(arr: pa.Array, tz: str) -> pa.Array:
         # time in `tz`), then convert to UTC. `cast` doesn't shift values for
         # naive→aware; `assume_timezone` does the right thing.
         if arr.type.tz is None:
-            attached = pc.assume_timezone(arr, tz)
+            # pyarrow stub lag — assume_timezone exists at runtime.
+            attached = pc.assume_timezone(arr, tz)  # type: ignore[attr-defined]
+
         else:
             attached = arr
         return attached.cast(target)
@@ -103,7 +105,8 @@ def _coerce_time_column(arr: pa.Array, tz: str) -> pa.Array:
             ZoneInfo(tz)
         except Exception as e:
             raise CsvImportError(f"unknown timezone {tz!r}") from e
-        attached = pc.assume_timezone(ts, tz)
+        # pyarrow stub lag — assume_timezone exists at runtime.
+        attached = pc.assume_timezone(ts, tz)  # type: ignore[attr-defined]
         return attached.cast(target)
 
     raise CsvImportError(
