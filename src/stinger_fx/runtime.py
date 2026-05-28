@@ -82,7 +82,11 @@ class StingerApp:
             app_cfg = app_cfg.model_copy(update={"mode": self._mode_override})
 
         configure_logs(level=app_cfg.log_level, log_dir=app_cfg.data_dir / "logs")
-        logger.info("config loaded mode=%s broker=%s", app_cfg.mode, app_cfg.broker.type)
+        logger.info(
+            "config loaded mode=%s broker=%s",
+            app_cfg.mode,
+            app_cfg.primary_broker_config.type,
+        )
 
         self.sqlite = SqliteStore(app_cfg.data_dir / "stinger.db")
         self.sqlite.create_all()

@@ -147,7 +147,7 @@ def config_validate(
         typer.echo(f"ERROR: {e}", err=True)
         raise typer.Exit(code=1) from e
     typer.echo(
-        f"OK: app.mode={cfg.app.mode} broker={cfg.app.broker.type} "
+        f"OK: app.mode={cfg.app.mode} broker={cfg.app.primary_broker_config.type} "
         f"strategies={len(cfg.strategies.strategies)} "
         f"backtest_runs={len(cfg.backtest.runs)}"
     )
@@ -261,7 +261,12 @@ def backtest_run(
     elif run.mode == "mt5_tester":
         from stinger_fx.backtest.mt5_backtester import MT5StrategyTester
 
-        terminal = Path(cfg.app.broker.mt5.terminal_path or "terminal64.exe") if cfg.app.broker.mt5 else None
+        primary_broker = cfg.app.primary_broker_config
+        terminal = (
+            Path(primary_broker.mt5.terminal_path or "terminal64.exe")
+            if primary_broker.mt5
+            else None
+        )
         if terminal is None:
             typer.echo("ERROR: mt5_tester mode requires broker.mt5.terminal_path", err=True)
             raise typer.Exit(code=1)
