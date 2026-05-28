@@ -35,6 +35,9 @@ from stinger_fx.core.event_bus import AsyncEventBus
 from stinger_fx.core.events import (
     BrokerDisconnectedEvent,
     BrokerReconnectedEvent,
+    OrderCancelledEvent,
+    PartialClosedEvent,
+    PositionClosedEvent,
     TickEvent,
 )
 from stinger_fx.domain import (
@@ -94,6 +97,19 @@ RETCODE_DONE_PARTIAL = 10010
 SUCCESS_RETCODES: frozenset[int] = frozenset({
     RETCODE_DONE, RETCODE_PLACED, RETCODE_DONE_PARTIAL,
 })
+
+
+def _pending_order_type(mt5: Any, raw_type: int) -> OrderType:
+    """Map an MT5 pending-order type constant back to our OrderType enum.
+    Used when constructing OrderCancelledEvent from a broker-side snapshot.
+    """
+    if raw_type in (mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_SELL_LIMIT):
+        return OrderType.LIMIT
+    if raw_type in (mt5.ORDER_TYPE_BUY_STOP, mt5.ORDER_TYPE_SELL_STOP):
+        return OrderType.STOP
+    if raw_type in (mt5.ORDER_TYPE_BUY_STOP_LIMIT, mt5.ORDER_TYPE_SELL_STOP_LIMIT):
+        return OrderType.STOP_LIMIT
+    return OrderType.MARKET
 
 
 class MT5Broker(BaseBroker):
@@ -790,6 +806,20 @@ class MT5Broker(BaseBroker):
     async def close_position(
         self, ticket: int, volume: float | None = None
     ) -> OrderResult:
+        """Close (or partially close) an open position.
+
+        On success this broker publishes the same events SimBroker does so
+        every subscriber on the bus (RiskMonitor, OCOGroupManager, trade
+        journal, MetricsCollector) sees a uniform contract regardless of
+        which broker is live:
+
+          * full close   → ``PositionClosedEvent``
+          * partial close → ``PartialClosedEvent`` (position is the
+            *remaining* leg; ``closed_volume`` is the chunk that closed)
+
+        Pre-fix this method returned ok=True but never touched the bus, so
+        in live mode the entire system silently stopped reacting to closes.
+        """
         self._require_connected()
         mt5 = self._mt5()
         positions = await self._sdk(mt5.positions_get, ticket=ticket)
@@ -797,19 +827,31 @@ class MT5Broker(BaseBroker):
             return OrderResult(
                 ok=False, status=OrderStatus.REJECTED, message=f"position {ticket} not found"
             )
-        pos = positions[0]
-        close_side = Side.SELL if pos.type == mt5.ORDER_TYPE_BUY else Side.BUY
-        tick = await self._sdk(mt5.symbol_info_tick, pos.symbol)
+        raw_pos = positions[0]
+        # Snapshot the pre-close state — we need open_price + side later to
+        # compute realised P&L on the chunk that closed.
+        pos_side = Side.BUY if raw_pos.type == mt5.ORDER_TYPE_BUY else Side.SELL
+        pos_volume = float(raw_pos.volume)
+        pos_open_price = float(raw_pos.price_open)
+        pos_open_time = datetime.fromtimestamp(int(raw_pos.time), tz=UTC)
+        pos_magic = int(raw_pos.magic)
+        pos_comment = str(getattr(raw_pos, "comment", "") or "")
+        pos_sl = float(raw_pos.sl) if raw_pos.sl else None
+        pos_tp = float(raw_pos.tp) if raw_pos.tp else None
+
+        close_side = Side.SELL if pos_side is Side.BUY else Side.BUY
+        tick = await self._sdk(mt5.symbol_info_tick, raw_pos.symbol)
         price = tick.ask if close_side is Side.BUY else tick.bid
+        close_volume = float(volume or pos_volume)
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": pos.symbol,
-            "volume": float(volume or pos.volume),
+            "symbol": raw_pos.symbol,
+            "volume": close_volume,
             "type": mt5.ORDER_TYPE_SELL if close_side is Side.SELL else mt5.ORDER_TYPE_BUY,
             "position": ticket,
             "price": price,
             "deviation": 20,
-            "magic": int(pos.magic),
+            "magic": pos_magic,
             "comment": "close",
             "type_filling": mt5.ORDER_FILLING_IOC,
             "type_time": mt5.ORDER_TIME_GTC,
@@ -819,23 +861,103 @@ class MT5Broker(BaseBroker):
             err = await self._sdk(mt5.last_error)
             return OrderResult(ok=False, status=OrderStatus.REJECTED, message=str(err))
         ok = int(result.retcode) == mt5.TRADE_RETCODE_DONE
-        return OrderResult(
-            ok=ok,
+        if not ok:
+            return OrderResult(
+                ok=False, ticket=ticket, status=OrderStatus.REJECTED,
+                message=str(result.comment or ""), raw_code=int(result.retcode),
+            )
+
+        # Broker confirmed the close → emit the event SimBroker would emit.
+        # Use the broker-reported fill price (result.price) over our request
+        # price; for partial fills the actually-filled chunk is result.volume
+        # when present, falling back to the requested volume.
+        fill_price = float(getattr(result, "price", None) or price)
+        filled_chunk = float(getattr(result, "volume", None) or close_volume)
+        contract_size = await self._lookup_contract_size(raw_pos.symbol)
+        realized_pnl = self._realized_pnl(
+            side=pos_side, open_price=pos_open_price,
+            close_price=fill_price, volume=filled_chunk,
+            contract_size=contract_size,
+        )
+
+        full_close = filled_chunk >= pos_volume - 1e-9
+        # Build a Position object that mirrors what SimBroker would publish.
+        # For PartialClosedEvent it's the *remaining* leg.
+        remaining_volume = (
+            pos_volume if full_close else max(0.0, pos_volume - filled_chunk)
+        )
+        event_position = Position(
             ticket=ticket,
-            status=OrderStatus.FILLED if ok else OrderStatus.REJECTED,
+            symbol=raw_pos.symbol,
+            side=pos_side,
+            volume=remaining_volume if not full_close else pos_volume,
+            open_price=pos_open_price,
+            open_time=pos_open_time,
+            sl=pos_sl,
+            tp=pos_tp,
+            comment=pos_comment,
+            magic=pos_magic,
+        )
+        if full_close:
+            await self.bus.publish(
+                PositionClosedEvent(position=event_position, realized_pnl=realized_pnl)
+            )
+        else:
+            await self.bus.publish(
+                PartialClosedEvent(
+                    position=event_position,
+                    closed_volume=filled_chunk,
+                    realized_pnl=realized_pnl,
+                )
+            )
+
+        return OrderResult(
+            ok=True,
+            ticket=ticket,
+            status=OrderStatus.FILLED,
             message=str(result.comment or ""),
             raw_code=int(result.retcode),
         )
 
     async def cancel_order(self, ticket: int) -> OrderResult:
+        """Cancel a pending order.
+
+        On success publishes ``OrderCancelledEvent`` so OCO sibling logic
+        and audit trail subscribers fire. Pre-fix this returned ok=True
+        but never published — siblings stayed live and the journal missed
+        the cancellation.
+        """
         self._require_connected()
         mt5 = self._mt5()
+        # Snapshot the order so we have a fully-formed Order to publish on
+        # success. orders_get can fail if the ticket is already gone (race
+        # with broker-side fill); the cancel itself will then fail too.
+        existing = await self._sdk(mt5.orders_get, ticket=ticket)
+        snapshot = existing[0] if existing else None
+
         request = {"action": mt5.TRADE_ACTION_REMOVE, "order": ticket}
         result = await self._sdk(mt5.order_send, request)
         if result is None:
             err = await self._sdk(mt5.last_error)
             return OrderResult(ok=False, status=OrderStatus.REJECTED, message=str(err))
         ok = int(result.retcode) == mt5.TRADE_RETCODE_DONE
+        if ok and snapshot is not None:
+            order = Order(
+                ticket=ticket,
+                strategy_id="",  # MT5 doesn't echo strategy_id; subscriber dispatches by magic
+                symbol=str(snapshot.symbol),
+                side=Side.BUY if snapshot.type in (
+                    mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_BUY_LIMIT,
+                    mt5.ORDER_TYPE_BUY_STOP, mt5.ORDER_TYPE_BUY_STOP_LIMIT,
+                ) else Side.SELL,
+                type=_pending_order_type(mt5, snapshot.type),
+                volume=float(snapshot.volume_current),
+                price=float(snapshot.price_open) if snapshot.price_open else None,
+                status=OrderStatus.CANCELLED,
+                magic=int(snapshot.magic),
+                comment=str(getattr(snapshot, "comment", "") or ""),
+            )
+            await self.bus.publish(OrderCancelledEvent(order=order))
         return OrderResult(
             ok=ok,
             ticket=ticket,
@@ -843,6 +965,30 @@ class MT5Broker(BaseBroker):
             message=str(result.comment or ""),
             raw_code=int(result.retcode),
         )
+
+    async def _lookup_contract_size(self, symbol: str) -> float:
+        """Cheap symbol-info fetch for the realised-P&L computation. We
+        don't cache: contract sizes only change with broker config and
+        the call is cheap relative to the order_send that just happened."""
+        mt5 = self._mt5()
+        info = await self._sdk(mt5.symbol_info, symbol)
+        if info is None:
+            # Best-effort fallback: 100k is the FX-major default. PnL will
+            # still be directionally correct; a wrong scalar only affects
+            # the magnitude downstream subscribers see.
+            return 100_000.0
+        return float(info.trade_contract_size)
+
+    @staticmethod
+    def _realized_pnl(
+        *, side: Side, open_price: float, close_price: float,
+        volume: float, contract_size: float,
+    ) -> float:
+        """P&L in account currency for a closed (or partial-closed) chunk.
+
+        Matches SimBroker's convention: BUY → (close − open), SELL → (open − close).
+        """
+        return (close_price - open_price) * side.sign * volume * contract_size
 
     # --- State queries ------------------------------------------------------
 
