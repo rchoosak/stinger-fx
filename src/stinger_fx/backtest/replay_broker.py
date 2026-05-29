@@ -507,7 +507,16 @@ class SimBroker(BaseBroker):
                     realized_pnl=pnl,
                 )
             )
-        return OrderResult(ok=True, ticket=ticket, status=OrderStatus.FILLED)
+        # Match MT5Broker.close_position contract (PR #59) so OrderResult.status
+        # reflects the actual outcome — FILLED for full close, PARTIALLY_FILLED
+        # for partial close. Callers / audit / SQLite mirror reading
+        # `result.status` (rather than subscribing to the event bus) need to
+        # distinguish the two; pre-fix this always said FILLED even when the
+        # event side said PartialClosedEvent.
+        return OrderResult(
+            ok=True, ticket=ticket,
+            status=OrderStatus.FILLED if full_close else OrderStatus.PARTIALLY_FILLED,
+        )
 
     async def cancel_order(self, ticket: int) -> OrderResult:
         pending = self._pending.pop(ticket, None)
