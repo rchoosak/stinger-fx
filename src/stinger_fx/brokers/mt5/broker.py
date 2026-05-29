@@ -36,6 +36,7 @@ from stinger_fx.core.events import (
     BrokerDisconnectedEvent,
     BrokerReconnectedEvent,
     OrderCancelledEvent,
+    OrderSubmittedEvent,
     PartialClosedEvent,
     PositionClosedEvent,
     TickEvent,
@@ -695,6 +696,16 @@ class MT5Broker(BaseBroker):
                 requested_at=datetime.now(UTC),
                 filled_at=datetime.now(UTC) if is_filled else None,
             )
+            # SimBroker publishes OrderSubmittedEvent the moment a pending
+            # order enters the queue (replay_broker.py:251). MT5Broker pre-fix
+            # didn't, so live pending orders were "successful" from the
+            # caller's perspective but audit/event subscribers never saw
+            # them — UI panels and trade journal silently undercounted.
+            # FILLED / PARTIALLY_FILLED don't emit here; OrderRouter emits
+            # OrderFilledEvent for those (post PR #56).
+            if status is OrderStatus.SUBMITTED:
+                assert order is not None
+                await self.bus.publish(OrderSubmittedEvent(order=order))
         return OrderResult(
             ok=ok,
             ticket=int(result.order) if ok else None,
@@ -860,11 +871,18 @@ class MT5Broker(BaseBroker):
         if result is None:
             err = await self._sdk(mt5.last_error)
             return OrderResult(ok=False, status=OrderStatus.REJECTED, message=str(err))
-        ok = int(result.retcode) == mt5.TRADE_RETCODE_DONE
-        if not ok:
+        # Close deals can come back as DONE (full close) OR DONE_PARTIAL
+        # (broker filled only some of the requested close volume — e.g. low
+        # liquidity at the close price). Pre-fix only DONE was accepted, so
+        # a partial close at the broker was reported as REJECTED to the
+        # caller AND no event fired AND the position state in our process
+        # diverged from broker reality. PLACED is intentionally excluded —
+        # it has no meaning for a close deal.
+        retcode = int(result.retcode)
+        if retcode not in (RETCODE_DONE, RETCODE_DONE_PARTIAL):
             return OrderResult(
                 ok=False, ticket=ticket, status=OrderStatus.REJECTED,
-                message=str(result.comment or ""), raw_code=int(result.retcode),
+                message=str(result.comment or ""), raw_code=retcode,
             )
 
         # Broker confirmed the close → emit the event SimBroker would emit.
