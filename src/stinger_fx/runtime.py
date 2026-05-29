@@ -430,12 +430,39 @@ class StingerApp:
 
         async def set_enabled(sid: str, enabled: bool) -> None:
             runner = self.runners.get(sid)
-            if runner is None:
+            if runner is not None:
+                # Runner exists → just flip the pause/resume bit.
+                if enabled:
+                    await runner.resume()
+                else:
+                    await runner.pause()
                 return
-            if enabled:
-                await runner.resume()
-            else:
-                await runner.pause()
+            # No runner — the strategy was disabled at startup (the setup
+            # loop skips `enabled: false` entries) and is now being flipped
+            # to enabled via hot-reload. Pre-fix the callback short-circuited
+            # here and the reload was logged as "applied" while the strategy
+            # never actually started. Treat this as a fresh add so the
+            # runner, magic, account mapping, and broker subscriptions
+            # all get wired the same way they would at startup.
+            if not enabled:
+                return  # was disabled, stays disabled — nothing to do
+            assert self.full_cfg is not None
+            entry = next(
+                (s for s in self.full_cfg.strategies.strategies if s.id == sid),
+                None,
+            )
+            if entry is None:
+                logger.warning(
+                    "set_enabled_unknown_strategy sid=%s — not in current config",
+                    sid,
+                )
+                return
+            # The diff layer caught only an `enabled` flip, so class_path /
+            # params / account are unchanged from startup; using the (still-
+            # old) snapshot in full_cfg is correct. If those fields changed
+            # too, ConfigReloader fired replace/update_params/change_account
+            # in addition to set_enabled — they'll run after us and adjust.
+            await add(entry)
 
         async def change_account(sid: str, account_id: str) -> None:
             """Hot re-route a running strategy to a different broker.
