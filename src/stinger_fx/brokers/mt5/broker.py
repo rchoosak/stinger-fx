@@ -852,6 +852,18 @@ class MT5Broker(BaseBroker):
 
         close_side = Side.SELL if pos_side is Side.BUY else Side.BUY
         tick = await self._sdk(mt5.symbol_info_tick, raw_pos.symbol)
+        # Mirror place_order's defensive handling: when the terminal has no
+        # quote (e.g. just-reconnected, market closed, symbol not in
+        # MarketWatch, broker glitch) `symbol_info_tick` returns None.
+        # Pre-fix this crashed with AttributeError on `tick.ask`; the close
+        # path is exactly when an operator least wants an unhandled
+        # exception. Reject gracefully with the same shape place_order
+        # uses so callers see a uniform contract.
+        if tick is None:
+            return OrderResult(
+                ok=False, status=OrderStatus.REJECTED,
+                message="no current tick — cannot price close deal",
+            )
         price = tick.ask if close_side is Side.BUY else tick.bid
         close_volume = float(volume or pos_volume)
         request = {
@@ -929,10 +941,16 @@ class MT5Broker(BaseBroker):
                 )
             )
 
+        # Reflect the actual close outcome in OrderResult.status — pre-fix
+        # this always returned FILLED, so callers / log / audit looking at
+        # `result.status` couldn't distinguish a full close from a partial
+        # one (even though the right event was emitted). PartialClosedEvent
+        # fires for partial, PositionClosedEvent for full — keep that
+        # contract on the result object too.
         return OrderResult(
             ok=True,
             ticket=ticket,
-            status=OrderStatus.FILLED,
+            status=OrderStatus.FILLED if full_close else OrderStatus.PARTIALLY_FILLED,
             message=str(result.comment or ""),
             raw_code=int(result.retcode),
         )
