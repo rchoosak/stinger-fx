@@ -1,4 +1,4 @@
-"""Unit tests for XauLiquiditySweepReversal.
+"""Unit tests for LiquiditySweepReversal.
 
 The strategy is exercised directly: build a ``StrategyContext`` with
 three HistoryViews (M1 / M5 / M15), pre-fill them with hand-crafted
@@ -34,9 +34,9 @@ from stinger_fx.domain import (
     Timeframe,
 )
 from stinger_fx.strategies.context import StrategyContext
-from stinger_fx.strategies.examples.xau_liquidity_sweep_reversal import (
-    XauLiquiditySweepReversal,
-    XauLiquiditySweepReversalParams,
+from stinger_fx.strategies.examples.liquidity_sweep_reversal import (
+    LiquiditySweepReversal,
+    LiquiditySweepReversalParams,
 )
 
 SYMBOL = "XAUUSD"
@@ -44,7 +44,7 @@ SYMBOL = "XAUUSD"
 
 def _ts(minutes_from_base: int) -> datetime:
     # Anchor at UTC midnight so trigger timestamps land inside the
-    # default session window [0, 16) of XauLiquiditySweepReversalParams.
+    # default session window [0, 16) of LiquiditySweepReversalParams.
     return datetime(2024, 1, 1, 0, 0, tzinfo=UTC) + timedelta(minutes=minutes_from_base)
 
 
@@ -111,7 +111,7 @@ def _build_range_m5(
 
 
 def _build_ctx(
-    *, params: XauLiquiditySweepReversalParams | None = None,
+    *, params: LiquiditySweepReversalParams | None = None,
     m1_bars: list[Bar] | None = None,
     m5_bars: list[Bar] | None = None,
     m15_bars: list[Bar] | None = None,
@@ -119,14 +119,14 @@ def _build_ctx(
 ) -> tuple[StrategyContext, list[Signal]]:
     """Build a multi-feed StrategyContext with primary=M1, and capture
     every Signal emitted via signal_sink into the returned list."""
-    p = params or XauLiquiditySweepReversalParams()
+    p = params or LiquiditySweepReversalParams()
     bus = AsyncEventBus()
     captured: list[Signal] = []
 
     async def sink(sig: Signal) -> None:
         captured.append(sig)
 
-    subs = XauLiquiditySweepReversal.subscriptions(p)
+    subs = LiquiditySweepReversal.subscriptions(p)
     ctx = StrategyContext(
         strategy_id="xau_test",
         symbol=p.symbol,
@@ -169,8 +169,8 @@ def _build_ctx(
 @pytest.mark.asyncio
 async def test_no_signal_when_warmup_insufficient() -> None:
     """Fewer than 2*adx_period M15 bars → ADX is None → return early."""
-    strat = XauLiquiditySweepReversal()
-    params = XauLiquiditySweepReversalParams(adx_period=14)
+    strat = LiquiditySweepReversal()
+    params = LiquiditySweepReversalParams(adx_period=14)
     # Only 10 M15 bars (need 28)
     m15 = _build_ranging_m15(n=10)
     m5 = _build_range_m5(n=40)
@@ -193,8 +193,8 @@ async def test_no_signal_when_warmup_insufficient() -> None:
 @pytest.mark.asyncio
 async def test_no_signal_when_adx_above_threshold() -> None:
     """Trending M15 → ADX above max_adx → strategy stays flat."""
-    strat = XauLiquiditySweepReversal()
-    params = XauLiquiditySweepReversalParams(max_adx=20.0)
+    strat = LiquiditySweepReversal()
+    params = LiquiditySweepReversalParams(max_adx=20.0)
     m15 = _build_trending_m15(n=40)
     m5 = _build_range_m5(n=40)
     # Same proven short-sweep geometry; gate must block on regime alone.
@@ -216,8 +216,8 @@ async def test_no_signal_when_adx_above_threshold() -> None:
 async def test_short_signal_on_range_high_sweep_and_reentry() -> None:
     """M1 high pierces range_high + sweep_buf, close lands back below
     range_high - reentry_buf → SELL signal with SL above the wick."""
-    strat = XauLiquiditySweepReversal()
-    params = XauLiquiditySweepReversalParams(
+    strat = LiquiditySweepReversal()
+    params = LiquiditySweepReversalParams(
         # Tight buffers so the geometry below works cleanly.
         sweep_buffer_atr=0.0,
         reentry_buffer_atr=0.0,
@@ -249,8 +249,8 @@ async def test_short_signal_on_range_high_sweep_and_reentry() -> None:
 
 @pytest.mark.asyncio
 async def test_long_signal_on_range_low_sweep_and_reentry() -> None:
-    strat = XauLiquiditySweepReversal()
-    params = XauLiquiditySweepReversalParams(
+    strat = LiquiditySweepReversal()
+    params = LiquiditySweepReversalParams(
         sweep_buffer_atr=0.0,
         reentry_buffer_atr=0.0,
         stop_buffer_atr=0.1,
@@ -281,8 +281,8 @@ async def test_long_signal_on_range_low_sweep_and_reentry() -> None:
 async def test_no_entry_when_close_stays_outside_range() -> None:
     """A genuine breakout (high AND close above the range) is NOT a
     sweep reversal — the strategy must ignore it."""
-    strat = XauLiquiditySweepReversal()
-    params = XauLiquiditySweepReversalParams(
+    strat = LiquiditySweepReversal()
+    params = LiquiditySweepReversalParams(
         sweep_buffer_atr=0.0, reentry_buffer_atr=0.0,
     )
     m15 = _build_ranging_m15(n=40)
@@ -304,8 +304,8 @@ async def test_no_entry_when_close_stays_outside_range() -> None:
 
 @pytest.mark.asyncio
 async def test_no_entry_when_position_already_open() -> None:
-    strat = XauLiquiditySweepReversal()
-    params = XauLiquiditySweepReversalParams(
+    strat = LiquiditySweepReversal()
+    params = LiquiditySweepReversalParams(
         sweep_buffer_atr=0.0, reentry_buffer_atr=0.0, min_rr=0.1,
     )
     existing = Position(
@@ -334,8 +334,8 @@ async def test_no_entry_when_position_already_open() -> None:
 async def test_cooldown_blocks_entry_after_close() -> None:
     """Simulate a close: bump strategy state forward, advance fewer than
     cooldown_bars, and the next setup must be ignored."""
-    strat = XauLiquiditySweepReversal()
-    params = XauLiquiditySweepReversalParams(
+    strat = LiquiditySweepReversal()
+    params = LiquiditySweepReversalParams(
         sweep_buffer_atr=0.0, reentry_buffer_atr=0.0, min_rr=0.1,
         cooldown_bars=10,
     )
@@ -365,8 +365,8 @@ async def test_cooldown_blocks_entry_after_close() -> None:
 @pytest.mark.asyncio
 async def test_rejects_setup_when_rr_below_min() -> None:
     """A geometry with TP very close to entry → RR below min_rr → skip."""
-    strat = XauLiquiditySweepReversal()
-    params = XauLiquiditySweepReversalParams(
+    strat = LiquiditySweepReversal()
+    params = LiquiditySweepReversalParams(
         sweep_buffer_atr=0.0, reentry_buffer_atr=0.0,
         # In mid mode TP = channels.middle = 2000. For SHORT, reward =
         # entry - 2000 ≈ 8. Set min_rr=10 to force rejection.
@@ -392,8 +392,8 @@ async def test_rejects_setup_when_rr_below_min() -> None:
 async def test_max_trades_per_session_hard_caps() -> None:
     """After N closes within one UTC day, no further setups fire even
     when geometry is perfect."""
-    strat = XauLiquiditySweepReversal()
-    params = XauLiquiditySweepReversalParams(
+    strat = LiquiditySweepReversal()
+    params = LiquiditySweepReversalParams(
         sweep_buffer_atr=0.0, reentry_buffer_atr=0.0, min_rr=0.1,
         max_trades_per_session=2,
         cooldown_bars=0,
@@ -423,8 +423,8 @@ async def test_max_trades_per_session_hard_caps() -> None:
 async def test_sl_tp_use_atr_scaled_buffers() -> None:
     """SL must sit at bar.high + stop_buffer_atr * atr for a short.
     TP in mid mode must equal channels.middle."""
-    strat = XauLiquiditySweepReversal()
-    params = XauLiquiditySweepReversalParams(
+    strat = LiquiditySweepReversal()
+    params = LiquiditySweepReversalParams(
         sweep_buffer_atr=0.0, reentry_buffer_atr=0.0,
         stop_buffer_atr=0.5,  # large enough that the assertion is sensitive
         tp_mode="mid",
@@ -457,8 +457,8 @@ async def test_sl_tp_use_atr_scaled_buffers() -> None:
 
 @pytest.mark.asyncio
 async def test_tp_mode_fixed_r_uses_r_multiple() -> None:
-    strat = XauLiquiditySweepReversal()
-    params = XauLiquiditySweepReversalParams(
+    strat = LiquiditySweepReversal()
+    params = LiquiditySweepReversalParams(
         sweep_buffer_atr=0.0, reentry_buffer_atr=0.0, stop_buffer_atr=0.1,
         tp_mode="fixed_r", take_profit_r=2.0, min_rr=0.1,
     )
@@ -493,8 +493,8 @@ async def test_tp_mode_vwap_produces_finite_tp_near_session_vwap() -> None:
     have positive ``tick_volume`` (default 1000), vwap_session returns
     the weighted typical-price mean; for a symmetric synthetic range
     this lands inside the channel mid ± a small margin."""
-    strat = XauLiquiditySweepReversal()
-    params = XauLiquiditySweepReversalParams(
+    strat = LiquiditySweepReversal()
+    params = LiquiditySweepReversalParams(
         sweep_buffer_atr=0.0, reentry_buffer_atr=0.0, stop_buffer_atr=0.1,
         tp_mode="vwap", min_rr=0.1,
     )
@@ -521,8 +521,8 @@ async def test_tp_mode_vwap_falls_back_to_mid_when_session_empty() -> None:
     config anchors at hour 18 but bars are all from morning), session
     bars is empty → ``vwap_session`` returns None → strategy falls
     through to ``channels.middle``."""
-    strat = XauLiquiditySweepReversal()
-    params = XauLiquiditySweepReversalParams(
+    strat = LiquiditySweepReversal()
+    params = LiquiditySweepReversalParams(
         sweep_buffer_atr=0.0, reentry_buffer_atr=0.0, stop_buffer_atr=0.1,
         tp_mode="vwap", min_rr=0.1,
         # M5 bars span 00:00 - 03:15 UTC. Trigger at 10:00 UTC. Boundary
@@ -577,8 +577,8 @@ async def test_tp_mode_vwap_falls_back_to_mid_when_session_empty() -> None:
 
 @pytest.mark.asyncio
 async def test_on_position_closed_resets_cooldown_and_session_counter() -> None:
-    strat = XauLiquiditySweepReversal()
-    params = XauLiquiditySweepReversalParams()
+    strat = LiquiditySweepReversal()
+    params = LiquiditySweepReversalParams()
     ctx, _ = _build_ctx(params=params)
     # Pre-populate state as if a position has just closed.
     strat._bar_index = 50
@@ -602,8 +602,8 @@ async def test_time_exit_closes_position_after_max_hold_bars() -> None:
     invoked (captured via the ClosePositionRequestEvent on the bus)."""
     from stinger_fx.core.events import ClosePositionRequestEvent
 
-    strat = XauLiquiditySweepReversal()
-    params = XauLiquiditySweepReversalParams(
+    strat = LiquiditySweepReversal()
+    params = LiquiditySweepReversalParams(
         max_hold_bars=3, sweep_buffer_atr=0.0, reentry_buffer_atr=0.0,
     )
     ctx, _ = _build_ctx(params=params)

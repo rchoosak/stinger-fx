@@ -1,4 +1,12 @@
-"""XauLiquiditySweepReversal — sideway-regime liquidity-sweep reversal for XAU/USD.
+"""LiquiditySweepReversal — sideway-regime liquidity-sweep reversal.
+
+Designed against XAU/USD but symbol-agnostic: every threshold scales by
+the symbol's own ATR (sweep_buffer, reentry_buffer, stop_buffer, range
+width gates), so the same params transplant to any FX pair, index, or
+crypto that exhibits the same intraday range → false-breakout → revert
+behaviour. Tune ``atr_period`` / ``range_lookback_bars`` for the
+instrument's typical bar-rate; tune the ``*_atr`` multipliers for its
+typical false-breakout overshoot.
 
 Setup family
 ============
@@ -76,9 +84,12 @@ from stinger_fx.strategies.indicators import (
 from stinger_fx.strategies.parameters import StrategyParams
 
 
-class XauLiquiditySweepReversalParams(StrategyParams):
-    """Tunables. Defaults are XAU-friendly starting points; expect to
-    optimise per session and per broker spread."""
+class LiquiditySweepReversalParams(StrategyParams):
+    """Tunables. Defaults are XAUUSD-friendly starting points (the
+    strategy was originally designed around gold's intraday range
+    geometry), but every threshold is ATR-scaled, so the same defaults
+    are a reasonable starting point on any liquid intraday symbol.
+    Expect to re-optimise per instrument, session, and broker spread."""
 
     # --- Feed identity --------------------------------------------------
     symbol: str = "XAUUSD"
@@ -121,13 +132,13 @@ class XauLiquiditySweepReversalParams(StrategyParams):
     avoid_news: bool = False
 
 
-class XauLiquiditySweepReversal(BaseStrategy):
-    name = "xau_liquidity_sweep_reversal"
-    Params = XauLiquiditySweepReversalParams
+class LiquiditySweepReversal(BaseStrategy):
+    name = "liquidity_sweep_reversal"
+    Params = LiquiditySweepReversalParams
 
     @classmethod
     def subscriptions(cls, params: StrategyParams) -> list[Subscription]:
-        assert isinstance(params, XauLiquiditySweepReversalParams)
+        assert isinstance(params, LiquiditySweepReversalParams)
         return [
             Subscription(symbol=params.symbol, timeframe=params.entry_timeframe),
             Subscription(symbol=params.symbol, timeframe=params.structure_timeframe),
@@ -155,7 +166,7 @@ class XauLiquiditySweepReversal(BaseStrategy):
 
     async def on_bar(self, ctx: StrategyContext, bar: Bar) -> None:
         params = ctx.params
-        assert isinstance(params, XauLiquiditySweepReversalParams)
+        assert isinstance(params, LiquiditySweepReversalParams)
 
         # Multi-TF: ignore M5/M15 bars; only act on the entry timeframe for
         # the configured symbol. The HistoryView for each subscription is
@@ -267,7 +278,7 @@ class XauLiquiditySweepReversal(BaseStrategy):
     async def _maybe_enter_short(
         self,
         ctx: StrategyContext,
-        params: XauLiquiditySweepReversalParams,
+        params: LiquiditySweepReversalParams,
         bar: Bar,
         channels: DonchianChannels,
         sweep_buf: float,
@@ -289,12 +300,12 @@ class XauLiquiditySweepReversal(BaseStrategy):
         )
         if tp is None or not self._rr_ok(entry=entry, sl=sl, tp=tp, side=Side.SELL, params=params):
             return
-        await ctx.sell(params.volume, sl=sl, tp=tp, comment="xau_sweep_short")
+        await ctx.sell(params.volume, sl=sl, tp=tp, comment="sweep_reversal_short")
 
     async def _maybe_enter_long(
         self,
         ctx: StrategyContext,
-        params: XauLiquiditySweepReversalParams,
+        params: LiquiditySweepReversalParams,
         bar: Bar,
         channels: DonchianChannels,
         sweep_buf: float,
@@ -315,7 +326,7 @@ class XauLiquiditySweepReversal(BaseStrategy):
         )
         if tp is None or not self._rr_ok(entry=entry, sl=sl, tp=tp, side=Side.BUY, params=params):
             return
-        await ctx.buy(params.volume, sl=sl, tp=tp, comment="xau_sweep_long")
+        await ctx.buy(params.volume, sl=sl, tp=tp, comment="sweep_reversal_long")
 
     # ------------------------------------------------------------------ #
     # TP / RR helpers                                                     #
@@ -324,7 +335,7 @@ class XauLiquiditySweepReversal(BaseStrategy):
     def _compute_tp(
         self,
         *,
-        params: XauLiquiditySweepReversalParams,
+        params: LiquiditySweepReversalParams,
         side: Side,
         entry: float,
         sl: float,
@@ -355,7 +366,7 @@ class XauLiquiditySweepReversal(BaseStrategy):
     @staticmethod
     def _rr_ok(
         *, entry: float, sl: float, tp: float, side: Side,
-        params: XauLiquiditySweepReversalParams,
+        params: LiquiditySweepReversalParams,
     ) -> bool:
         risk = abs(sl - entry)
         reward = (entry - tp) if side is Side.SELL else (tp - entry)
@@ -368,7 +379,7 @@ class XauLiquiditySweepReversal(BaseStrategy):
     # ------------------------------------------------------------------ #
 
     def _maybe_roll_session(
-        self, now: datetime, params: XauLiquiditySweepReversalParams,
+        self, now: datetime, params: LiquiditySweepReversalParams,
     ) -> None:
         key = self._session_start(now, params.session_start_hour_utc).date().isoformat()
         if self._session_key != key:
@@ -389,13 +400,13 @@ class XauLiquiditySweepReversal(BaseStrategy):
 
     @staticmethod
     def _in_session(
-        now: datetime, params: XauLiquiditySweepReversalParams,
+        now: datetime, params: LiquiditySweepReversalParams,
     ) -> bool:
         # session_end_hour_utc=24 means "until midnight"; treat as 24 hours.
         hour = now.hour
         return params.session_start_hour_utc <= hour < params.session_end_hour_utc
 
-    def _on_cooldown(self, params: XauLiquiditySweepReversalParams) -> bool:
+    def _on_cooldown(self, params: LiquiditySweepReversalParams) -> bool:
         if self._last_close_bar_index is None:
             return False
         return (self._bar_index - self._last_close_bar_index) < params.cooldown_bars
@@ -408,9 +419,9 @@ class XauLiquiditySweepReversal(BaseStrategy):
         if not self._entry_bar_by_ticket:
             return
         params = ctx.params
-        assert isinstance(params, XauLiquiditySweepReversalParams)
+        assert isinstance(params, LiquiditySweepReversalParams)
         # Iterate a snapshot — ctx.close() may trigger on_position_closed
         # in the same dispatch which would mutate the dict.
         for ticket, entry_index in list(self._entry_bar_by_ticket.items()):
             if (self._bar_index - entry_index) >= params.max_hold_bars:
-                await ctx.close(ticket, reason="xau_sweep_time_exit")
+                await ctx.close(ticket, reason="sweep_reversal_time_exit")

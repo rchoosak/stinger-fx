@@ -1,4 +1,4 @@
-"""End-to-end multi-feed backtest for XauLiquiditySweepReversal.
+"""End-to-end multi-feed backtest for LiquiditySweepReversal.
 
 The strategy needs three timeframes wired through the backtester:
 
@@ -134,9 +134,9 @@ def _seed(root: Path, m1: list[Bar], m5: list[Bar], m15: list[Bar]) -> None:
 
 def _build_cfg(parquet_root: Path, base: datetime) -> BacktestRunConfig:
     return BacktestRunConfig(
-        id="xau_sweep_smoke",
+        id="sweep_reversal_smoke",
         mode="file",
-        strategy_id="xau_sweep",
+        strategy_id="sweep_reversal",
         symbols=[SYMBOL],
         timeframes=[Timeframe.M1, Timeframe.M5, Timeframe.M15],
         start=base,
@@ -148,10 +148,10 @@ def _build_cfg(parquet_root: Path, base: datetime) -> BacktestRunConfig:
 
 def _build_entry() -> StrategyEntry:
     return StrategyEntry(
-        id="xau_sweep",
+        id="sweep_reversal",
         class_path=(
-            "stinger_fx.strategies.examples.xau_liquidity_sweep_reversal"
-            ":XauLiquiditySweepReversal"
+            "stinger_fx.strategies.examples.liquidity_sweep_reversal"
+            ":LiquiditySweepReversal"
         ),
         enabled=True,
         params={
