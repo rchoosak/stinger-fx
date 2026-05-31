@@ -41,6 +41,7 @@ from stinger_fx.core.events import (
     TickEvent,
     TickStreamUnsubscribedEvent,
 )
+from stinger_fx.domain import Tick
 
 
 class _FakeMT5WithTickHistory:
@@ -358,8 +359,9 @@ async def test_disconnect_event_still_fires_before_gap_fill(monkeypatch) -> None
 @pytest.mark.asyncio
 async def test_replayed_ticks_are_tagged(monkeypatch) -> None:
     """Code review #2 / #3 — gap-fill must tag every replayed TickEvent
-    with ``tick.replayed=True`` so MetricsCollector can skip lag updates
-    and watchdog resets for them."""
+    with ``evt.replayed=True`` (the flag lives on TickEvent, not Tick)
+    so MetricsCollector can skip lag updates and watchdog resets for
+    them."""
     fake = _FakeMT5WithTickHistory()
     _install(monkeypatch, fake)
 
@@ -390,8 +392,8 @@ async def test_replayed_ticks_are_tagged(monkeypatch) -> None:
             await asyncio.sleep(0.01)
 
         assert captured, "expected at least one replayed tick"
-        assert all(evt.tick.replayed is True for evt in captured), (
-            "every gap-fill tick must carry replayed=True"
+        assert all(evt.replayed is True for evt in captured), (
+            "every gap-fill TickEvent must carry replayed=True"
         )
     finally:
         await broker.disconnect()
@@ -412,7 +414,7 @@ async def test_reconnected_event_fires_after_gap_fill(monkeypatch) -> None:
     order: list[str] = []
 
     async def collect_tick(evt: TickEvent) -> None:
-        if evt.tick.replayed:
+        if evt.replayed:
             order.append("tick")
 
     async def collect_rc(_evt: BrokerReconnectedEvent) -> None:
@@ -493,9 +495,13 @@ async def test_gap_fill_per_call_timeout_does_not_block(monkeypatch) -> None:
         )
 
         # Should return promptly (timeout aborts the hung call).
-        start = asyncio.get_event_loop().time()
+        # Round 2 #11 — use time.monotonic() instead of the deprecated
+        # asyncio.get_event_loop().time() pattern (DeprecationWarning in
+        # Python 3.10+ when called without a running loop).
+        import time as _time
+        start = _time.monotonic()
         await broker._gap_fill_after_reconnect()
-        elapsed = asyncio.get_event_loop().time() - start
+        elapsed = _time.monotonic() - start
         assert elapsed < 1.0, (
             f"gap_fill should abort hung SDK call quickly; took {elapsed:.2f}s"
         )
@@ -682,3 +688,147 @@ async def test_time_msc_precision_preserved(monkeypatch) -> None:
     finally:
         await broker.disconnect()
         await bus.close()
+
+
+# ---------------------------------------------------------------------- #
+# Round 2 regressions                                                      #
+# ---------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_out_of_order_ticks_are_all_published(monkeypatch) -> None:
+    """Round 2 #1 regression: gap-fill must publish every tick whose
+    timestamp is strictly after the pre-disconnect baseline, regardless
+    of intra-batch ordering. The previous per-iteration cutoff silently
+    dropped any tick whose timestamp was older than the latest already
+    published one within the same batch — a real data-loss bug when MT5
+    returns ticks slightly out of monotonic order."""
+    fake = _FakeMT5WithTickHistory()
+    _install(monkeypatch, fake)
+
+    bus = AsyncEventBus()
+    captured: list[TickEvent] = []
+
+    async def collect(evt: TickEvent) -> None:
+        captured.append(evt)
+
+    bus.subscribe(TickEvent, collect, name="probe.tick")
+
+    broker = _make_broker(bus)
+    try:
+        await broker.connect()
+        await broker.subscribe_ticks("XAUUSD")
+        baseline = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+        broker._last_tick_time["XAUUSD"] = baseline
+        # Three ticks all AFTER baseline but in non-monotonic order.
+        # Under the buggy per-iteration cutoff, the T+33 tick would be
+        # dropped because T+45 had already advanced the cutoff past it.
+        fake.stage_history([
+            {
+                "time": int(datetime(2024, 1, 1, 12, 0, 30, tzinfo=UTC).timestamp()),
+                "bid": 1902.0, "ask": 1902.2, "last": 1902.0,
+                "volume": 1, "flags": 0,
+            },
+            {
+                "time": int(datetime(2024, 1, 1, 12, 0, 45, tzinfo=UTC).timestamp()),
+                "bid": 1904.0, "ask": 1904.2, "last": 1904.0,
+                "volume": 1, "flags": 0,
+            },
+            {  # out-of-order — older than the previous tick in the batch
+                "time": int(datetime(2024, 1, 1, 12, 0, 33, tzinfo=UTC).timestamp()),
+                "bid": 1903.0, "ask": 1903.2, "last": 1903.0,
+                "volume": 1, "flags": 0,
+            },
+        ])
+
+        await broker._gap_fill_after_reconnect()
+        for _ in range(3):
+            await asyncio.sleep(0.01)
+
+        bids = sorted(evt.tick.bid for evt in captured)
+        assert bids == [1902.0, 1903.0, 1904.0], (
+            f"all three after-baseline ticks must be published "
+            f"regardless of order; got {bids}"
+        )
+    finally:
+        await broker.disconnect()
+        await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_gap_fill_aborts_remaining_symbols_on_timeout(monkeypatch) -> None:
+    """Round 2 #2 / #10 regression: when one symbol's copy_ticks_range
+    times out, gap-fill must abort the WHOLE batch rather than queue
+    further `_sdk(...)` calls behind the (still-blocked) executor thread.
+    We prove this by making EVERY copy_ticks_range call hang and
+    verifying only ONE symbol was ever queried (the first one), not
+    all subscribed symbols."""
+    import stinger_fx.brokers.mt5.broker as broker_mod
+
+    fake = _FakeMT5WithTickHistory()
+
+    queried: list[str] = []
+
+    def _always_hangs(symbol, _start, _end, _flags):
+        queried.append(symbol)
+        import time as _time
+        _time.sleep(5.0)  # simulate wedged SDK call
+        return []
+
+    fake.copy_ticks_range = _always_hangs  # type: ignore[method-assign]
+    _install(monkeypatch, fake)
+    monkeypatch.setattr(broker_mod, "GAP_FILL_PER_CALL_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(broker_mod, "GAP_FILL_OVERALL_TIMEOUT_SECONDS", 5.0)
+
+    bus = AsyncEventBus()
+    broker = _make_broker(bus)
+    try:
+        await broker.connect()
+        # Subscribe THREE symbols. After the first one times out, the
+        # outer loop must `break` — leaving the other two unattempted.
+        for sym in ("XAUUSD", "EURUSD", "USDJPY"):
+            await broker.subscribe_ticks(sym)
+            broker._last_tick_time[sym] = datetime(
+                2024, 1, 1, 12, 0, 0, tzinfo=UTC,
+            )
+
+        import time as _time
+        start = _time.monotonic()
+        await broker._gap_fill_after_reconnect()
+        elapsed = _time.monotonic() - start
+
+        # Per-call timeout 0.1s, abort after first → should finish in
+        # well under 1 second. Without abort, it would either hang the
+        # whole executor (worst case) or take 3 × 0.1s and time out per
+        # symbol (still > 0.3s with overhead).
+        assert elapsed < 1.0, (
+            f"gap-fill should abort after first timeout; took {elapsed:.2f}s"
+        )
+        # The key assertion: only ONE symbol was queried — abort worked.
+        # Without the `break`, all three would have been attempted (and
+        # the test would observe queried == 3, each fronted by a 0.1s
+        # wait_for + a stuck executor thread piling up underneath).
+        assert len(queried) == 1, (
+            f"gap-fill must abort after first per-call timeout; "
+            f"got {len(queried)} attempts: {queried}"
+        )
+    finally:
+        await broker.disconnect()
+        await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_tick_equality_independent_of_replay_origin(monkeypatch) -> None:
+    """Round 2 #3 — `Tick.__eq__` / `__hash__` must NOT depend on whether
+    the tick was delivered live or replayed. (The `replayed` flag lives
+    on TickEvent, not Tick.)"""
+    now = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+    t1 = Tick(symbol="XAUUSD", time=now, bid=1900.0, ask=1900.2)
+    t2 = Tick(symbol="XAUUSD", time=now, bid=1900.0, ask=1900.2)
+    assert t1 == t2, "two ticks with the same data must compare equal"
+    assert hash(t1) == hash(t2), "equal ticks must hash identically"
+    # And TickEvent carries replayed flag independent of the wrapped Tick.
+    e_live = TickEvent(tick=t1, replayed=False)
+    e_replay = TickEvent(tick=t1, replayed=True)
+    assert e_live.tick == e_replay.tick  # same underlying tick
+    assert e_live.replayed != e_replay.replayed

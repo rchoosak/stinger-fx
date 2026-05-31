@@ -552,24 +552,45 @@ class MT5Broker(BaseBroker):
         mt5 = self._mt5()
         now = datetime.now(UTC)
         for symbol in tuple(self._tick_subs):
+            # Round 2 #6 — re-check membership so an operator-issued
+            # unsubscribe partway through reconnect (which clears
+            # `_tick_subs` + fires TickStreamUnsubscribedEvent) doesn't
+            # leave us publishing ghost ticks for a retired stream.
+            if symbol not in self._tick_subs:
+                continue
             last_seen = self._last_tick_time.get(symbol)
             if last_seen is None:
                 continue
             try:
                 # MT5 returns ticks with time >= start.  Use last_seen
-                # itself (we'll dedupe via _last_tick_time below).
+                # itself (we'll dedupe via the `tick_time <= last_seen`
+                # check below).
                 ticks = await asyncio.wait_for(
                     self._sdk(
                         mt5.copy_ticks_range, symbol, last_seen, now, mt5.COPY_TICKS_ALL,
                     ),
                     timeout=GAP_FILL_PER_CALL_TIMEOUT_SECONDS,
                 )
+            # NOTE: the asyncio.TimeoutError handler MUST stay above
+            # the broad Exception handler — in Python 3.11+
+            # asyncio.TimeoutError aliases the builtin TimeoutError,
+            # which IS Exception. Swapping their order would silently
+            # lose the timeout-specific log + abort behavior.
             except asyncio.TimeoutError:
+                # Round 2 #2 — per-call timeout means the executor
+                # thread is still parked inside the SDK call (asyncio
+                # can cancel the awaiting coroutine but not the
+                # blocking call running in the thread pool). Queueing
+                # any *subsequent* `_sdk(...)` here would just wait
+                # behind the same hung thread. Abort the whole gap-fill;
+                # the broker will catch up on the next live tick or the
+                # next reconnect.
                 logger.warning(
-                    "mt5 gap-fill copy_ticks_range timed out symbol=%s after=%.0fs",
+                    "mt5 gap-fill copy_ticks_range timed out symbol=%s after=%.0fs "
+                    "— SDK likely wedged, aborting remaining symbols",
                     symbol, GAP_FILL_PER_CALL_TIMEOUT_SECONDS,
                 )
-                continue
+                break
             except Exception as e:
                 logger.warning(
                     "mt5 gap-fill copy_ticks_range failed symbol=%s err=%s",
@@ -582,12 +603,12 @@ class MT5Broker(BaseBroker):
             for raw in ticks:
                 try:
                     tick_time = self._tick_time_from_raw(raw)
-                    # Defensive dedupe: re-read _last_tick_time each
-                    # iteration. The live `_tick_loop` is paused (since
-                    # `_connected=False`) so this is currently redundant,
-                    # but keeps us safe if reconnect ordering ever changes.
-                    cutoff = self._last_tick_time.get(symbol, last_seen)
-                    if tick_time <= cutoff:
+                    # Round 2 #1 — baseline-only dedupe. `_tick_loop` is
+                    # paused (`_connected=False`) so the live loop cannot
+                    # have advanced `_last_tick_time` mid-replay; the
+                    # per-iteration cutoff we used to do here silently
+                    # dropped any out-of-order tick within the batch.
+                    if tick_time <= last_seen:
                         continue
                     self._last_tick_time[symbol] = tick_time
                     tick = Tick(
@@ -598,9 +619,9 @@ class MT5Broker(BaseBroker):
                         last=float(raw["last"]),
                         volume=int(raw["volume"]),
                         flags=int(raw["flags"]),
-                        replayed=True,
                     )
-                    await self.bus.publish(TickEvent(tick=tick))
+                    # Round 2 #3 — replay flag lives on the event, not the Tick.
+                    await self.bus.publish(TickEvent(tick=tick, replayed=True))
                     replayed += 1
                 except Exception as e:
                     # Per-tick guard: a single malformed row (missing
@@ -613,7 +634,7 @@ class MT5Broker(BaseBroker):
                     )
                     continue
             logger.info(
-                "mt5 gap-fill replayed symbol=%s ticks=%d from=%s to=%s",
+                "mt5 gap-fill replayed symbol=%s ticks=%d window=[%s, %s]",
                 symbol, replayed, last_seen.isoformat(), now.isoformat(),
             )
 
@@ -632,11 +653,17 @@ class MT5Broker(BaseBroker):
             field_names = raw.dtype.names  # type: ignore[union-attr]
         except AttributeError:
             field_names = None
+        msc_val: int | None = None
         if field_names is not None and "time_msc" in field_names:
-            return datetime.fromtimestamp(int(raw["time_msc"]) / 1000.0, tz=UTC)
-        # Dict-style fake (test) or SDK without time_msc.
-        if isinstance(raw, dict) and "time_msc" in raw:
-            return datetime.fromtimestamp(int(raw["time_msc"]) / 1000.0, tz=UTC)
+            msc_val = int(raw["time_msc"])
+        elif isinstance(raw, dict) and "time_msc" in raw:
+            msc_val = int(raw["time_msc"])
+        # Round 2 #5 — guard against `time_msc == 0` (some SDK builds
+        # return zero for the very first tick after symbol_select before
+        # the stream warms up). Falsy-zero would silently drop us back
+        # to second-resolution and break the dedupe `==` check downstream.
+        if msc_val is not None and msc_val > 0:
+            return datetime.fromtimestamp(msc_val / 1000.0, tz=UTC)
         return datetime.fromtimestamp(int(raw["time"]), tz=UTC)
 
     async def _tick_loop(self) -> None:
@@ -676,8 +703,11 @@ class MT5Broker(BaseBroker):
                     # version exposes it — same precision the historical
                     # `copy_ticks_range` path uses, so live and gap-fill
                     # timestamps line up at the ms level (Code review #10).
+                    # Round 2 #5 — use explicit None / >0 check so
+                    # `time_msc == 0` (cold start) falls back gracefully
+                    # rather than being silently truthy-discarded.
                     time_msc = getattr(raw, "time_msc", None)
-                    if time_msc:
+                    if time_msc is not None and time_msc > 0:
                         tick_time = datetime.fromtimestamp(
                             int(time_msc) / 1000.0, tz=UTC,
                         )

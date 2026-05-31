@@ -243,6 +243,15 @@ class MetricsCollector:
         self._watchdog_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
+        """Subscribe to bus events + start the watchdog task.
+
+        Lifecycle ordering (Round 2 #8): this collector must be started
+        *before* any broker emits ``TickStreamUnsubscribedEvent``, otherwise
+        the event is lost and the corresponding gauge label remains forever
+        (the leak the unsubscribe handler exists to prevent). The standard
+        runtime path is `engine.start → broker.start → metrics.start` which
+        is correct; custom orderings need to take care.
+        """
         self._subs = [
             self._bus.subscribe(EngineStartedEvent, self._on_engine_started, name="metrics.up"),
             self._bus.subscribe(EngineStoppedEvent, self._on_engine_stopped, name="metrics.down"),
@@ -321,7 +330,8 @@ class MetricsCollector:
         #     full disconnect duration as fake "latency")
         # We still count them in `ticks_received_total` so the volume
         # received from the broker matches reality.
-        if evt.tick.replayed:
+        # Round 2 #3 — `replayed` lives on TickEvent, not Tick.
+        if evt.replayed:
             return
         # A3 — record the wall-clock moment we observed this tick so
         # the watchdog task can compute "seconds since last tick"
@@ -349,6 +359,13 @@ class MetricsCollector:
         #6) and the watchdog keeps publishing a forever-climbing
         ``tick_stream_seconds_since_last`` for the dead label, triggering
         false alerts.
+
+        NOTE (Round 2 #9): ``tick_stream_seconds_since_last`` currently has
+        a single label (``symbol``). If you add more labels later (e.g.
+        ``broker_name`` for multi-broker setups), update the ``.remove()``
+        call below to pass every label value in the same declaration
+        order — otherwise it raises ``ValueError`` (not ``KeyError``) and
+        the broad-except handler will only log; state will leak silently.
         """
         self._last_tick_time.pop(evt.symbol, None)
         try:

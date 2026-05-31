@@ -40,6 +40,13 @@ class Event(BaseModel):
 
 class TickEvent(Event):
     tick: Tick
+    # True if this delivery is a gap-fill replay (broker re-publishing
+    # historical ticks after a reconnect), not a live observation.
+    # Consumers like MetricsCollector skip lag/watchdog updates for these
+    # so historical timestamps don't pollute "is the live stream healthy?"
+    # signals. Kept on the event (delivery metadata), not on Tick (data),
+    # so two ticks with identical fields stay equal regardless of origin.
+    replayed: bool = False
 
 
 class BarEvent(Event):
