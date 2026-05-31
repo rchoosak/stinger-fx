@@ -225,6 +225,16 @@ def strategy_scaffold(
 def backtest_run(
     run_id: str = typer.Option(..., "--run-id"),
     config_dir: Path = typer.Option(Path("config"), "--config-dir", "-c"),
+    speed: float | None = typer.Option(
+        None,
+        "--speed",
+        help=(
+            "Playback throttle. 0 = max speed (default). 1 = real-time. "
+            "60 = 1 sim-minute per wall-second. 0.5 = half real-time. "
+            "Overrides the run's `speed` field in backtest.yaml when provided."
+        ),
+        min=0,
+    ),
 ) -> None:
     """Execute one backtest run (by id) from backtest.yaml."""
     from stinger_fx.backtest import FileBacktester
@@ -245,6 +255,10 @@ def backtest_run(
     if strategy is None:
         typer.echo(f"ERROR: backtest references unknown strategy {run.strategy_id!r}", err=True)
         raise typer.Exit(code=1)
+
+    # CLI --speed wins over the YAML value when supplied.
+    if speed is not None:
+        run = run.model_copy(update={"speed": speed})
 
     sqlite = SqliteStore(cfg.app.data_dir / "stinger.db")
     sqlite.create_all()
