@@ -24,7 +24,7 @@ import pytest
 from prometheus_client import CollectorRegistry
 
 from stinger_fx.core import AsyncEventBus
-from stinger_fx.core.events import TickEvent
+from stinger_fx.core.events import TickEvent, TickStreamUnsubscribedEvent
 from stinger_fx.domain import Tick
 from stinger_fx.observability.metrics import MetricsCollector, make_metrics
 
@@ -159,6 +159,200 @@ async def test_per_symbol_isolation() -> None:
 
         assert xau_val < 2.0, f"XAUUSD should be fresh; got {xau_val}"
         assert eur_val >= 19.0, f"EURUSD should be stale; got {eur_val}"
+    finally:
+        await collector.stop()
+    await bus.close()
+
+
+# --- Code review #2 / #3 — replay tag isolation ----------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_replayed_tick_does_not_reset_watchdog() -> None:
+    """A tick carrying ``replayed=True`` (from broker gap-fill) must not
+    reset the watchdog gauge or update ``_last_tick_time`` — otherwise
+    a long replay would mask the fact that the live stream is still
+    dead.  Code review #3."""
+    bus = AsyncEventBus()
+    collector = _isolated_collector(bus)
+    collector._WATCHDOG_INTERVAL_SECONDS = 0.05  # type: ignore[misc]
+    try:
+        await collector.start()
+        # Pretend the live stream went silent 30s ago.
+        thirty_seconds_ago = datetime.now(UTC) - timedelta(seconds=30)
+        collector._last_tick_time[SYMBOL] = thirty_seconds_ago
+
+        # Now a replayed historical tick arrives — should be ignored by
+        # watchdog state.
+        replayed_tick = Tick(
+            symbol=SYMBOL,
+            time=datetime.now(UTC) - timedelta(minutes=20),
+            bid=1900.0,
+            ask=1900.2,
+            replayed=True,
+        )
+        await bus.publish(TickEvent(tick=replayed_tick))
+        for _ in range(3):
+            await asyncio.sleep(0)
+        await asyncio.sleep(0.1)  # one watchdog cycle
+
+        gauge_val = collector.metrics[
+            "tick_stream_seconds_since_last"
+        ].labels(symbol=SYMBOL)._value.get()
+        # Still climbing from the stale baseline — replay must not zero it.
+        assert gauge_val >= 29.0, (
+            f"watchdog should still see stale stream; got {gauge_val}"
+        )
+        # _last_tick_time must NOT be advanced by the replay tick.
+        assert collector._last_tick_time[SYMBOL] == thirty_seconds_ago
+    finally:
+        await collector.stop()
+    await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_replayed_tick_does_not_pollute_lag_metric() -> None:
+    """A replayed tick whose ``tick.time`` is 30 minutes old must not
+    push ``tick_pump_lag_seconds`` to 1800s — that would page on-call
+    for "tick lag SLO breach" every time we reconnect.  Code review #2."""
+    bus = AsyncEventBus()
+    collector = _isolated_collector(bus)
+    try:
+        await collector.start()
+        old_tick = Tick(
+            symbol=SYMBOL,
+            time=datetime.now(UTC) - timedelta(minutes=30),
+            bid=1900.0,
+            ask=1900.2,
+            replayed=True,
+        )
+        await bus.publish(TickEvent(tick=old_tick))
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+        # tick_pump_lag_seconds should NOT have been set by this replay.
+        # prometheus_client _value defaults to 0 if never set.
+        lag = collector.metrics[
+            "tick_pump_lag_seconds"
+        ].labels(symbol=SYMBOL)._value.get()
+        assert lag == pytest.approx(0.0, abs=0.001), (
+            f"replay must not push lag gauge; got {lag}"
+        )
+
+        # But the received counter SHOULD have incremented — we did
+        # observe a tick from the broker, even if it was replay.
+        count = collector.metrics[
+            "ticks_received_total"
+        ].labels(symbol=SYMBOL)._value.get()
+        assert count == 1
+    finally:
+        await collector.stop()
+    await bus.close()
+
+
+# --- Code review #6 — prune state on unsubscribe ---------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_event_prunes_state() -> None:
+    """``TickStreamUnsubscribedEvent`` must clear the symbol from
+    ``_last_tick_time`` and remove its gauge label so the watchdog
+    stops reporting forever-climbing staleness for a retired stream.
+    Code review #6."""
+    bus = AsyncEventBus()
+    collector = _isolated_collector(bus)
+    try:
+        await collector.start()
+        # Seed a tick so the symbol exists in collector state.
+        await bus.publish(TickEvent(tick=_tick(datetime.now(UTC))))
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert SYMBOL in collector._last_tick_time
+
+        # Broker says: stream retired.
+        await bus.publish(
+            TickStreamUnsubscribedEvent(broker_name="mt5", symbol=SYMBOL)
+        )
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+        assert SYMBOL not in collector._last_tick_time, (
+            "unsubscribe must prune symbol from _last_tick_time"
+        )
+        # Gauge label must be gone — re-accessing .labels() would
+        # re-create it, so check the internal metric registry directly.
+        gauge = collector.metrics["tick_stream_seconds_since_last"]
+        existing_labels = {tuple(m.name for m in c) for c in gauge._metrics.keys()} \
+            if hasattr(gauge, "_metrics") else None
+        # Either the label set is empty, or our symbol isn't in it.
+        assert all(
+            SYMBOL not in label_tuple
+            for label_tuple in (gauge._metrics if hasattr(gauge, "_metrics") else {})
+        ), "gauge label for unsubscribed symbol should be removed"
+    finally:
+        await collector.stop()
+    await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_for_unknown_symbol_is_noop() -> None:
+    """Receiving unsubscribe for a symbol we never tracked must not
+    raise — handler tolerates KeyError on the gauge .remove() call."""
+    bus = AsyncEventBus()
+    collector = _isolated_collector(bus)
+    try:
+        await collector.start()
+        await bus.publish(
+            TickStreamUnsubscribedEvent(broker_name="mt5", symbol="NEVER_SEEN")
+        )
+        for _ in range(3):
+            await asyncio.sleep(0)
+        # Watchdog still alive.
+        assert not collector._watchdog_task.done()  # type: ignore[union-attr]
+    finally:
+        await collector.stop()
+    await bus.close()
+
+
+# --- Code review #8 — watchdog resilience ---------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_watchdog_survives_exception_in_body() -> None:
+    """If a single watchdog iteration raises (e.g. a prometheus label op
+    blows up), the loop must log + continue rather than die silently.
+    Code review #8."""
+    bus = AsyncEventBus()
+    collector = _isolated_collector(bus)
+    collector._WATCHDOG_INTERVAL_SECONDS = 0.02  # type: ignore[misc]
+    try:
+        await collector.start()
+        # Inject a "symbol" whose label op will raise. Use a non-string
+        # value so prometheus_client's label coercion raises.
+        collector._last_tick_time[SYMBOL] = datetime.now(UTC) - timedelta(seconds=5)
+
+        # Monkey-patch the gauge to raise on .labels() once.
+        gauge = collector.metrics["tick_stream_seconds_since_last"]
+        real_labels = gauge.labels
+        call_count = {"n": 0}
+
+        def flaky_labels(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("simulated label op failure")
+            return real_labels(*args, **kwargs)
+
+        gauge.labels = flaky_labels  # type: ignore[method-assign]
+
+        # Let several watchdog cycles run.
+        await asyncio.sleep(0.15)
+
+        # Watchdog still alive after the failure.
+        assert collector._watchdog_task is not None
+        assert not collector._watchdog_task.done(), (
+            f"watchdog died on exception: {collector._watchdog_task.exception()}"
+        )
+        assert call_count["n"] >= 2, "watchdog should have retried after failure"
     finally:
         await collector.stop()
     await bus.close()

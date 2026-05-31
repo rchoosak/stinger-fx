@@ -216,10 +216,21 @@ class BrokerDisconnectedEvent(Event):
 
 class BrokerReconnectedEvent(Event):
     """Broker connection re-established after a disconnect.  Tick pumps and
-    order queues should resume."""
+    order queues should resume.  Fired *after* tick gap-fill (A3) completes so
+    callers see the broker as fully caught up by the time they observe this."""
 
     broker_name: str
     downtime_seconds: float = 0.0
+
+
+class TickStreamUnsubscribedEvent(Event):
+    """Broker stopped streaming ticks for a symbol.  Consumers that hold
+    per-symbol state (e.g. ``MetricsCollector`` watchdog dict) should prune
+    on receipt — otherwise long-running processes accumulate dead symbols and
+    fire false 'stale stream' alerts forever."""
+
+    broker_name: str
+    symbol: str
 
 
 class ReconciliationMismatchEvent(Event):

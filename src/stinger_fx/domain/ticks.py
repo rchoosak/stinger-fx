@@ -19,6 +19,9 @@ class Tick(BaseModel):
     last: float = 0.0             # 0 if not provided by broker
     volume: int = 0
     flags: int = 0                # broker-defined flag bits (MT5: TICK_FLAG_*)
+    replayed: bool = False        # True if replayed from history by gap-fill;
+                                  # consumers (MetricsCollector) skip live-stream
+                                  # signals (lag gauge, watchdog reset) for these.
 
     @property
     def spread(self) -> float:

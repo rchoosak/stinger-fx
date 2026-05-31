@@ -45,6 +45,7 @@ from stinger_fx.core.events import (
     SignalEvent,
     StrategyStateChangedEvent,
     TickEvent,
+    TickStreamUnsubscribedEvent,
 )
 
 logger = logging.getLogger("stinger.observability.metrics")
@@ -270,6 +271,14 @@ class MetricsCollector:
                 self._on_broker_reconnected,
                 name="metrics.broker_rc",
             ),
+            # Code review #6 — prune watchdog state when a symbol's tick
+            # stream is intentionally retired, otherwise the gauge for
+            # that label climbs forever and pages on-call.
+            self._bus.subscribe(
+                TickStreamUnsubscribedEvent,
+                self._on_tick_unsub,
+                name="metrics.tick_unsub",
+            ),
         ]
         # A3 — start the tick-stream watchdog task.
         self._watchdog_task = asyncio.create_task(
@@ -304,6 +313,16 @@ class MetricsCollector:
     async def _on_tick(self, evt: TickEvent) -> None:
         symbol = evt.tick.symbol
         self.metrics["ticks_received_total"].labels(symbol=symbol).inc()
+        # Code review #2 / #3 — replayed (gap-fill) ticks carry historical
+        # broker timestamps and are not evidence the live stream is healthy.
+        # Skip:
+        #   * watchdog reset (would mask a still-dead pump during replay)
+        #   * lag metrics (would pollute the histogram / gauge with the
+        #     full disconnect duration as fake "latency")
+        # We still count them in `ticks_received_total` so the volume
+        # received from the broker matches reality.
+        if evt.tick.replayed:
+            return
         # A3 — record the wall-clock moment we observed this tick so
         # the watchdog task can compute "seconds since last tick"
         # continuously instead of only on tick arrival.
@@ -323,6 +342,25 @@ class MetricsCollector:
         self.metrics["tick_e2e_seconds"].labels(symbol=symbol).observe(lag)
         self.metrics["tick_pump_lag_seconds"].labels(symbol=symbol).set(lag)
 
+    async def _on_tick_unsub(self, evt: TickStreamUnsubscribedEvent) -> None:
+        """Prune per-symbol watchdog state when a stream is retired.
+
+        Without this, ``_last_tick_time`` grows monotonically (Code review
+        #6) and the watchdog keeps publishing a forever-climbing
+        ``tick_stream_seconds_since_last`` for the dead label, triggering
+        false alerts.
+        """
+        self._last_tick_time.pop(evt.symbol, None)
+        try:
+            self.metrics["tick_stream_seconds_since_last"].remove(evt.symbol)
+        except KeyError:
+            # Gauge label was never set for this symbol — nothing to remove.
+            pass
+        except Exception:
+            logger.exception(
+                "failed to remove tick_stream gauge label symbol=%s", evt.symbol
+            )
+
     async def _tick_watchdog_loop(self) -> None:
         """A3 — periodic refresher for ``tick_stream_seconds_since_last``.
 
@@ -332,18 +370,30 @@ class MetricsCollector:
         ``tick_pump_lag_seconds`` (only refreshed when a tick arrives,
         so a fully-dead stream looks frozen at the last value), this
         gauge climbs continuously — the canonical alerting signal.
+
+        Resilience: each iteration is wrapped in its own try/except so a
+        transient error (e.g. a prometheus client raising on a label op)
+        doesn't kill the watchdog task and silently stop alerting (Code
+        review #8). CancelledError still propagates for clean shutdown.
         """
-        try:
-            while True:
+        while True:
+            try:
                 await asyncio.sleep(self._WATCHDOG_INTERVAL_SECONDS)
                 now = datetime.now(UTC)
-                for symbol, last_seen in self._last_tick_time.items():
+                # Snapshot via list() so a concurrent _on_tick / unsub
+                # mutation can't trip "dictionary changed size during
+                # iteration" if the loop body ever gains an `await`.
+                for symbol, last_seen in list(self._last_tick_time.items()):
                     staleness = max(0.0, (now - last_seen).total_seconds())
                     self.metrics["tick_stream_seconds_since_last"].labels(
                         symbol=symbol,
                     ).set(staleness)
-        except asyncio.CancelledError:
-            raise
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "tick_stream_watchdog iteration failed; continuing"
+                )
 
     async def _on_bar(self, evt: BarEvent) -> None:
         if not evt.bar.is_closed:

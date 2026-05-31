@@ -40,6 +40,7 @@ from stinger_fx.core.events import (
     PartialClosedEvent,
     PositionClosedEvent,
     TickEvent,
+    TickStreamUnsubscribedEvent,
 )
 from stinger_fx.domain import (
     AccountInfo,
@@ -66,6 +67,16 @@ HEALTH_CHECK_INTERVAL = 5.0  # seconds
 
 # Reconnect backoff schedule (seconds). Capped at the last value for further attempts.
 RECONNECT_BACKOFF = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0]
+
+# A3 gap-fill (post-reconnect tick replay) backstops.
+# * Per-call timeout — if `copy_ticks_range` for one symbol hangs (SDK wedge
+#   on broker side), we abort that symbol and continue with the next instead
+#   of locking the single-worker executor indefinitely.
+# * Overall timeout — even if every individual call returns, a huge multi-day
+#   gap could iterate forever; cap total replay time so we always reach the
+#   `BrokerReconnectedEvent` publish and exit the disconnect handler.
+GAP_FILL_PER_CALL_TIMEOUT_SECONDS = 15.0
+GAP_FILL_OVERALL_TIMEOUT_SECONDS = 60.0
 
 # How many times to re-attempt order_send on retryable broker errors.
 ORDER_MAX_RETRIES = 3
@@ -346,11 +357,27 @@ class MT5Broker(BaseBroker):
         logger.info("mt5 subscribed to bars symbol=%s tf=%s", symbol, tf.value)
 
     async def unsubscribe(self, symbol: str, tf: Timeframe | None = None) -> None:
+        # Track whether the tick stream actually went away so we only fire the
+        # lifecycle event when there's something for consumers to prune.
+        tick_stream_stopped = False
         if tf is None:
+            if symbol in self._tick_subs:
+                tick_stream_stopped = True
             self._tick_subs.discard(symbol)
             self._bar_subs = {(s, t) for (s, t) in self._bar_subs if s != symbol}
         else:
             self._bar_subs.discard((symbol, tf))
+        if tick_stream_stopped:
+            # Drop our own dedupe entry first — once gone, even a stray late
+            # tick from the live loop won't resurrect the symbol's state.
+            self._last_tick_time.pop(symbol, None)
+            # Notify subscribers (e.g. MetricsCollector watchdog) so they can
+            # prune per-symbol state — otherwise the staleness gauge for this
+            # symbol climbs forever and pages on-call for an intentionally
+            # retired stream (Code review #6).
+            await self.bus.publish(
+                TickStreamUnsubscribedEvent(broker_name=self.name, symbol=symbol)
+            )
 
     # --- Health-check + reconnect (Phase 6.1.A) -----------------------------
 
@@ -435,19 +462,19 @@ class MT5Broker(BaseBroker):
                 continue
             if not ok:
                 continue
-            # Reconnected.
+            # Reconnected (SDK init succeeded). NOTE: we intentionally keep
+            # `self._connected = False` through the gap-fill below so that
+            # `_tick_loop` (which gates on `_connected`) stays paused. This
+            # closes the race where the live loop could republish a tick that
+            # gap-fill also replays (Code review #1).
             downtime = (
                 (datetime.now(UTC) - self._disconnect_time).total_seconds()
                 if self._disconnect_time
                 else 0.0
             )
-            self._connected = True
-            self._disconnect_time = None
             logger.info(
-                "mt5 reconnected attempts=%s downtime_seconds=%.1f", attempt, downtime
-            )
-            await self.bus.publish(
-                BrokerReconnectedEvent(broker_name=self.name, downtime_seconds=downtime)
+                "mt5 reconnected attempts=%s downtime_seconds=%.1f (gap-fill pending)",
+                attempt, downtime,
             )
             # Re-arm any symbol subscriptions so the tick pump keeps working
             # after a reconnect — symbol_select is needed because MT5 forgets
@@ -464,29 +491,63 @@ class MT5Broker(BaseBroker):
             # emit any bars that were missed during the outage.  This
             # closes the OHLC-correctness gap that A2 alone left open
             # (A2 only covers the cold-start case).
-            await self._gap_fill_after_reconnect()
+            #
+            # Bounded by `GAP_FILL_OVERALL_TIMEOUT_SECONDS` so a hung SDK
+            # call cannot block the reconnect handler forever (which would
+            # also keep `_reconnecting=True` forever and mask any *new*
+            # disconnect — Code review #4 / #9).
+            try:
+                await asyncio.wait_for(
+                    self._gap_fill_after_reconnect(),
+                    timeout=GAP_FILL_OVERALL_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "mt5 gap-fill timed out after %.0fs — proceeding to live",
+                    GAP_FILL_OVERALL_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                logger.exception("mt5 gap-fill failed — proceeding to live anyway")
+            # Now flip live and notify. Consumers see BrokerReconnectedEvent
+            # only after catch-up is complete (or has timed out).
+            self._connected = True
+            self._disconnect_time = None
+            await self.bus.publish(
+                BrokerReconnectedEvent(broker_name=self.name, downtime_seconds=downtime)
+            )
             return
 
     async def _gap_fill_after_reconnect(self) -> None:
         """Fetch and replay ticks missed during a disconnect (Plan A3).
 
         For each subscribed symbol whose ``_last_tick_time`` we
-        remember, query MT5 for ticks in
-        ``[last_seen + 1us, now]`` and republish them as ``TickEvent``
-        on the bus.  The live ``BarAggregator`` instances wired by the
+        remember, query MT5 for ticks in ``[last_seen, now]`` and
+        republish them as ``TickEvent`` (tagged ``replayed=True``) on
+        the bus.  The live ``BarAggregator`` instances wired by the
         runtime (Plan A1) consume them via their existing TickEvent
         subscription, advance their OHLC state, and emit any bars that
         closed during the outage.
 
         Strict safety guarantees:
+          * Called while ``self._connected`` is still False — so
+            ``_tick_loop`` is paused and cannot race us (Code review #1).
           * If we never saw a tick for a symbol (e.g. fresh subscribe
             during outage), skip — no baseline to gap-fill from.
-          * Each replayed tick updates ``_last_tick_time`` so the live
-            ``_tick_loop`` doesn't immediately re-publish them as
-            "new" (the ``_last_tick_time`` check at line 497 dedupes).
-          * Errors are logged and swallowed — reconnect already
-            succeeded; a gap-fill failure mustn't roll the broker
-            back into disconnected state.
+          * Each ``copy_ticks_range`` call is bounded by
+            ``GAP_FILL_PER_CALL_TIMEOUT_SECONDS`` so an SDK wedge on one
+            symbol doesn't lock the executor (Code review #9).
+          * Each replayed tick is wrapped in its own try/except so a
+            malformed row doesn't abort gap-fill for the remaining
+            symbols (Code review #5).
+          * Sub-second precision: prefer ``time_msc`` (millisecond
+            epoch) over the lossy whole-second ``time`` field when the
+            SDK provides it (Code review #10).
+          * Tick objects carry ``replayed=True`` so MetricsCollector
+            can skip lag updates and watchdog resets for them
+            (Code review #2 / #3).
+          * MT5 SDK datetime convention: this codebase passes
+            UTC-aware datetimes throughout (see ``get_history_bars`` /
+            ``get_history_ticks``); we follow suit here (Code review #7).
         """
         mt5 = self._mt5()
         now = datetime.now(UTC)
@@ -497,9 +558,18 @@ class MT5Broker(BaseBroker):
             try:
                 # MT5 returns ticks with time >= start.  Use last_seen
                 # itself (we'll dedupe via _last_tick_time below).
-                ticks = await self._sdk(
-                    mt5.copy_ticks_range, symbol, last_seen, now, mt5.COPY_TICKS_ALL,
+                ticks = await asyncio.wait_for(
+                    self._sdk(
+                        mt5.copy_ticks_range, symbol, last_seen, now, mt5.COPY_TICKS_ALL,
+                    ),
+                    timeout=GAP_FILL_PER_CALL_TIMEOUT_SECONDS,
                 )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "mt5 gap-fill copy_ticks_range timed out symbol=%s after=%.0fs",
+                    symbol, GAP_FILL_PER_CALL_TIMEOUT_SECONDS,
+                )
+                continue
             except Exception as e:
                 logger.warning(
                     "mt5 gap-fill copy_ticks_range failed symbol=%s err=%s",
@@ -510,28 +580,64 @@ class MT5Broker(BaseBroker):
                 continue
             replayed = 0
             for raw in ticks:
-                tick_time = datetime.fromtimestamp(int(raw["time"]), tz=UTC)
-                # Strict dedupe — never replay a tick the live loop has
-                # already published.  ``_last_tick_time`` is the source
-                # of truth for "we have already seen at this timestamp".
-                if tick_time <= last_seen:
+                try:
+                    tick_time = self._tick_time_from_raw(raw)
+                    # Defensive dedupe: re-read _last_tick_time each
+                    # iteration. The live `_tick_loop` is paused (since
+                    # `_connected=False`) so this is currently redundant,
+                    # but keeps us safe if reconnect ordering ever changes.
+                    cutoff = self._last_tick_time.get(symbol, last_seen)
+                    if tick_time <= cutoff:
+                        continue
+                    self._last_tick_time[symbol] = tick_time
+                    tick = Tick(
+                        symbol=symbol,
+                        time=tick_time,
+                        bid=float(raw["bid"]),
+                        ask=float(raw["ask"]),
+                        last=float(raw["last"]),
+                        volume=int(raw["volume"]),
+                        flags=int(raw["flags"]),
+                        replayed=True,
+                    )
+                    await self.bus.publish(TickEvent(tick=tick))
+                    replayed += 1
+                except Exception as e:
+                    # Per-tick guard: a single malformed row (missing
+                    # field, bad type) must not abort gap-fill for the
+                    # rest of this symbol — or for subsequent symbols
+                    # (Code review #5).
+                    logger.warning(
+                        "mt5 gap-fill skipping bad tick symbol=%s err=%s",
+                        symbol, e,
+                    )
                     continue
-                self._last_tick_time[symbol] = tick_time
-                tick = Tick(
-                    symbol=symbol,
-                    time=tick_time,
-                    bid=float(raw["bid"]),
-                    ask=float(raw["ask"]),
-                    last=float(raw["last"]),
-                    volume=int(raw["volume"]),
-                    flags=int(raw["flags"]),
-                )
-                await self.bus.publish(TickEvent(tick=tick))
-                replayed += 1
             logger.info(
                 "mt5 gap-fill replayed symbol=%s ticks=%d from=%s to=%s",
                 symbol, replayed, last_seen.isoformat(), now.isoformat(),
             )
+
+    @staticmethod
+    def _tick_time_from_raw(raw: Any) -> datetime:
+        """Build a UTC datetime from an MT5 historical-tick row.
+
+        Prefer ``time_msc`` (millisecond epoch) when the SDK exposes it
+        — ``time`` alone is whole seconds and collapses multiple
+        intra-second ticks to the same timestamp, which breaks the
+        ``_last_tick_time`` dedupe (Code review #10).
+        """
+        # numpy structured arrays expose dtype.names; fall back to plain
+        # dict-style access for non-numpy fakes (used by tests).
+        try:
+            field_names = raw.dtype.names  # type: ignore[union-attr]
+        except AttributeError:
+            field_names = None
+        if field_names is not None and "time_msc" in field_names:
+            return datetime.fromtimestamp(int(raw["time_msc"]) / 1000.0, tz=UTC)
+        # Dict-style fake (test) or SDK without time_msc.
+        if isinstance(raw, dict) and "time_msc" in raw:
+            return datetime.fromtimestamp(int(raw["time_msc"]) / 1000.0, tz=UTC)
+        return datetime.fromtimestamp(int(raw["time"]), tz=UTC)
 
     async def _tick_loop(self) -> None:
         """Asyncio task: poll the latest tick for each subscribed symbol.
@@ -565,9 +671,18 @@ class MT5Broker(BaseBroker):
                         continue
                     if raw is None:
                         continue
-                    # MT5 returns time as epoch seconds in broker server tz;
-                    # convert to UTC.
-                    tick_time = datetime.fromtimestamp(raw.time, tz=UTC)
+                    # MT5 returns time as epoch seconds in broker server tz.
+                    # Prefer `time_msc` (millisecond epoch) when the SDK
+                    # version exposes it — same precision the historical
+                    # `copy_ticks_range` path uses, so live and gap-fill
+                    # timestamps line up at the ms level (Code review #10).
+                    time_msc = getattr(raw, "time_msc", None)
+                    if time_msc:
+                        tick_time = datetime.fromtimestamp(
+                            int(time_msc) / 1000.0, tz=UTC,
+                        )
+                    else:
+                        tick_time = datetime.fromtimestamp(raw.time, tz=UTC)
                     if self._last_tick_time.get(symbol) == tick_time:
                         continue
                     self._last_tick_time[symbol] = tick_time
