@@ -17,6 +17,7 @@ timeframe, side) so a scraping Prometheus stays small.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import TypedDict
@@ -72,6 +73,13 @@ class MetricsRegistry(TypedDict):
     broker_reconnects_total: Counter
     broker_downtime_seconds: Histogram
     tick_pump_lag_seconds: Gauge
+    # A3 — tick-stream watchdog.  ``tick_pump_lag_seconds`` only
+    # updates when a tick arrives, so a fully-dead stream looks stale
+    # at the value of the last tick we saw.  This gauge is refreshed
+    # by an in-process timer so it climbs continuously while no ticks
+    # arrive — the canonical "is the stream alive?" signal for
+    # alerting (e.g. PagerDuty when > 30s for any subscribed symbol).
+    tick_stream_seconds_since_last: Gauge
 
 
 def make_metrics(registry: CollectorRegistry | None = None) -> MetricsRegistry:
@@ -196,6 +204,15 @@ def make_metrics(registry: CollectorRegistry | None = None) -> MetricsRegistry:
             ["symbol"],
             registry=r,
         ),
+        "tick_stream_seconds_since_last": Gauge(
+            "stinger_tick_stream_seconds_since_last",
+            "Watchdog gauge — climbs continuously while no tick arrives "
+            "for a symbol.  Unlike tick_pump_lag_seconds (only refreshed "
+            "by TickEvent) this updates on a periodic timer so a dead "
+            "stream surfaces as a monotonically-growing value.",
+            ["symbol"],
+            registry=r,
+        ),
     }
 
 
@@ -205,6 +222,10 @@ class MetricsCollector:
     Lifetime = engine. start() subscribes; stop() unsubscribes.
     """
 
+    # Watchdog poll cadence — every 5 seconds is fine for human-scale
+    # alerting (PagerDuty rules typically fire on >30s thresholds).
+    _WATCHDOG_INTERVAL_SECONDS: float = 5.0
+
     def __init__(
         self,
         bus: AsyncEventBus,
@@ -213,6 +234,12 @@ class MetricsCollector:
         self._bus = bus
         self.metrics: MetricsRegistry = metrics or make_metrics()
         self._subs: list[Subscription] = []
+        # A3 — per-symbol last-seen tick time, mirror of MT5Broker's
+        # ``_last_tick_time`` but maintained from the bus side so the
+        # watchdog doesn't depend on broker internals.  Updated by
+        # ``_on_tick``; read by the watchdog task.
+        self._last_tick_time: dict[str, datetime] = {}
+        self._watchdog_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         self._subs = [
@@ -244,9 +271,22 @@ class MetricsCollector:
                 name="metrics.broker_rc",
             ),
         ]
+        # A3 — start the tick-stream watchdog task.
+        self._watchdog_task = asyncio.create_task(
+            self._tick_watchdog_loop(), name="metrics.tick_watchdog",
+        )
         logger.info("metrics_collector_started")
 
     async def stop(self) -> None:
+        # Cancel watchdog first so it doesn't try to access metrics
+        # mid-shutdown.
+        if self._watchdog_task is not None and not self._watchdog_task.done():
+            self._watchdog_task.cancel()
+            try:
+                await self._watchdog_task
+            except asyncio.CancelledError:
+                pass
+            self._watchdog_task = None
         for sub in self._subs:
             await sub.unsubscribe()
         self._subs.clear()
@@ -264,15 +304,46 @@ class MetricsCollector:
     async def _on_tick(self, evt: TickEvent) -> None:
         symbol = evt.tick.symbol
         self.metrics["ticks_received_total"].labels(symbol=symbol).inc()
+        # A3 — record the wall-clock moment we observed this tick so
+        # the watchdog task can compute "seconds since last tick"
+        # continuously instead of only on tick arrival.
+        now = datetime.now(UTC)
+        self._last_tick_time[symbol] = now
+        # The watchdog will zero the gauge on its next tick; set it
+        # here too so consumers see a fresh "0" immediately rather than
+        # waiting up to _WATCHDOG_INTERVAL_SECONDS.
+        self.metrics["tick_stream_seconds_since_last"].labels(symbol=symbol).set(0.0)
         # Phase 6.1.B — tick latency telemetry.  `tick.time` is broker-server
         # time stamped at the source; `now()` is the moment the collector
         # observed the bus event. The delta captures every hop the tick made.
         try:
-            lag = max(0.0, (datetime.now(UTC) - evt.tick.time).total_seconds())
+            lag = max(0.0, (now - evt.tick.time).total_seconds())
         except Exception:
             return
         self.metrics["tick_e2e_seconds"].labels(symbol=symbol).observe(lag)
         self.metrics["tick_pump_lag_seconds"].labels(symbol=symbol).set(lag)
+
+    async def _tick_watchdog_loop(self) -> None:
+        """A3 — periodic refresher for ``tick_stream_seconds_since_last``.
+
+        ``_on_tick`` records the wall-clock arrival of each tick.  This
+        loop wakes every ``_WATCHDOG_INTERVAL_SECONDS`` and sets the
+        gauge for every known symbol to ``now - last_seen``.  Unlike
+        ``tick_pump_lag_seconds`` (only refreshed when a tick arrives,
+        so a fully-dead stream looks frozen at the last value), this
+        gauge climbs continuously — the canonical alerting signal.
+        """
+        try:
+            while True:
+                await asyncio.sleep(self._WATCHDOG_INTERVAL_SECONDS)
+                now = datetime.now(UTC)
+                for symbol, last_seen in self._last_tick_time.items():
+                    staleness = max(0.0, (now - last_seen).total_seconds())
+                    self.metrics["tick_stream_seconds_since_last"].labels(
+                        symbol=symbol,
+                    ).set(staleness)
+        except asyncio.CancelledError:
+            raise
 
     async def _on_bar(self, evt: BarEvent) -> None:
         if not evt.bar.is_closed:
