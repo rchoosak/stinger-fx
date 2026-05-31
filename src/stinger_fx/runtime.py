@@ -357,18 +357,33 @@ class StingerApp:
                 await self._subscribe_one(broker, sub.symbol, sub.timeframe)
 
     async def _subscribe_one(self, broker, symbol: str, tf: Timeframe) -> None:
-        """Subscribe broker to (symbol, tf), wiring a BarAggregator if the
-        timeframe isn't native to MT5."""
+        """Subscribe broker to (symbol, tf) and wire a BarAggregator that
+        derives BarEvents from the broker's TickEvent stream.
+
+        The aggregator runs for **every** non-TICK timeframe — MT5 native
+        AND synthesized — so strategy code sees identical bar semantics
+        in live and tick-mode backtest.  This is the canonical Option A
+        from the live tick→bar pipeline design (see plan A1).
+
+        Pre-fix behaviour gated aggregator creation on
+        ``not tf.is_native_mt5``, which silently dropped BarEvent
+        delivery for M1/M5/M15/etc. — every strategy that subscribed to
+        a native MT5 timeframe (i.e. all 3 example strategies) never
+        received ``on_bar()`` in live mode.  ``BarEvent`` is published
+        in exactly one place (``BarAggregator._emit``); without the
+        aggregator there is no live bar stream at all.
+        """
         assert self.bus is not None
         await broker.subscribe_bars(symbol, tf)
-        if not tf.is_native_mt5 and tf.value != "TICK":
-            agg = BarAggregator(symbol, tf, self.bus)
-            self.bus.subscribe(
-                TickEvent,
-                agg.on_tick,  # type: ignore[arg-type]
-                name=f"agg.{symbol}.{tf.value}",
-            )
-            self.aggregators[(symbol, tf)] = agg
+        if tf.value == "TICK":
+            return  # TICK-subscribed strategies consume TickEvent directly
+        agg = BarAggregator(symbol, tf, self.bus)
+        self.bus.subscribe(
+            TickEvent,
+            agg.on_tick,  # type: ignore[arg-type]
+            name=f"agg.{symbol}.{tf.value}",
+        )
+        self.aggregators[(symbol, tf)] = agg
 
     def _build_reload_actions(self, broker) -> ReloadActions:
         magic_by_id: dict[str, int] = {sid: derive_magic(sid) for sid in self.runners}
