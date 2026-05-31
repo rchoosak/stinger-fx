@@ -12,3 +12,29 @@ strategies:
       fast: 10
       slow: 30
       volume: 0.01
+
+  # Backtest-only entry for the May-2026 XAUUSD tick replay
+  # (`stinger-fx backtest run --run-id xauusd_may2026`).  ``enabled: false``
+  # keeps it out of the live engine — the backtester loads the strategy
+  # by id directly and ignores this flag.
+  - id: orb_xauusd_may2026
+    class_path: stinger_fx.strategies.examples.opening_range_breakout:OpeningRangeBreakout
+    enabled: false
+    params:
+      symbol: XAUUSD
+      entry_timeframe: M1
+      structure_timeframe: M5
+      # London-open ORB defaults from the strategy spec — proven on XAU.
+      session_start_hour_utc: 7
+      session_end_hour_utc: 16
+      opening_range_minutes: 15
+      atr_period: 14
+      breakout_buffer_atr: 0.1
+      stop_buffer_atr: 0.3
+      min_or_range_atr: 0.5
+      max_or_range_atr: 3.0
+      sl_mode: opposite_or
+      tp_mode: or_range
+      min_rr: 0.8
+      volume: 0.01
+      max_trades_per_session: 1
