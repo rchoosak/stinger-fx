@@ -254,3 +254,112 @@ async def test_tick_mode_sl_fires_on_exact_tick(tmp_path: Path) -> None:
         assert trade.close_ts == base + timedelta(seconds=3)
     finally:
         sys.path.remove(str(tmp_path))
+
+
+# ---------------------------------------------------------------------- #
+# Playback speed (feature: --speed)                                       #
+# ---------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_tick_replay_default_speed_is_max(
+    trending_tick_root: Path, tmp_path: Path
+) -> None:
+    """Sanity: with no ``speed`` set, the replay finishes near-instantly
+    (no throttling, current default behavior unchanged)."""
+    import time as _time
+    entry = StrategyEntry(
+        id="ma_tick",
+        class_path="stinger_fx.strategies.examples.ma_crossover:MACrossover",
+        enabled=True,
+        params={
+            "symbol": "EURUSD", "timeframe": "M1",
+            "fast": 2, "slow": 5, "volume": 0.1,
+        },
+    )
+    cfg = BacktestRunConfig(
+        id="tick_speed_default",
+        mode="file",
+        strategy_id="ma_tick",
+        symbol="EURUSD",
+        timeframe=Timeframe.M1,
+        start=datetime(2024, 1, 1, tzinfo=UTC),
+        end=datetime(2024, 1, 1, tzinfo=UTC) + timedelta(minutes=20),
+        initial_balance=10_000.0,
+        granularity="tick",
+        data_source=trending_tick_root,
+        # speed is omitted → default 0.0 (no throttle)
+    )
+    bt = FileBacktester(
+        strategy=entry,
+        parquet_root=trending_tick_root,
+        sqlite_store=in_memory_store(),
+        report_dir=tmp_path / "reports",
+    )
+    start = _time.monotonic()
+    await bt.run(cfg)
+    elapsed = _time.monotonic() - start
+    # The fixture is 10 minutes of sim time. Max-speed replay should be
+    # well under a second on any modern machine.
+    assert elapsed < 5.0, f"max-speed replay too slow: {elapsed:.2f}s"
+
+
+@pytest.mark.asyncio
+async def test_tick_replay_honors_speed_throttle(
+    tmp_path: Path
+) -> None:
+    """A small tick window with `speed=10` should take roughly
+    (sim_duration / 10) wall-seconds — proving the throttle is wiring
+    through `_replay_ticks`. Uses a tiny 1-second sim window so the test
+    completes in ~0.1s instead of waiting for a long real-time replay."""
+    import time as _time
+    # Stage 11 ticks over exactly 1.0 sim second (0, 100ms, 200ms, ...).
+    root = tmp_path / "parquet"
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    _seed_ticks(
+        root, "EURUSD", base,
+        [1.1000 + 0.00001 * i for i in range(11)],
+        step_ms=100,
+    )
+
+    entry = StrategyEntry(
+        id="ma_tick",
+        class_path="stinger_fx.strategies.examples.ma_crossover:MACrossover",
+        enabled=True,
+        params={
+            "symbol": "EURUSD", "timeframe": "M1",
+            "fast": 2, "slow": 5, "volume": 0.1,
+        },
+    )
+    cfg = BacktestRunConfig(
+        id="tick_speed_throttled",
+        mode="file",
+        strategy_id="ma_tick",
+        symbol="EURUSD",
+        timeframe=Timeframe.M1,
+        start=base,
+        end=base + timedelta(seconds=2),
+        initial_balance=10_000.0,
+        granularity="tick",
+        data_source=root,
+        speed=10.0,   # 1 sim-sec compresses to 0.1 wall-sec
+    )
+    bt = FileBacktester(
+        strategy=entry,
+        parquet_root=root,
+        sqlite_store=in_memory_store(),
+        report_dir=tmp_path / "reports",
+    )
+    start = _time.monotonic()
+    await bt.run(cfg)
+    elapsed = _time.monotonic() - start
+
+    # 1.0s sim window at speed=10 → expect at least ~0.08s wall (lower bound
+    # proves throttle fired) but bounded so CI flake doesn't bite (upper
+    # bound is generous to allow GC / scheduler hiccups).
+    assert elapsed >= 0.05, (
+        f"speed=10 must throttle (1s sim → ≥0.1s wall); took only {elapsed:.3f}s"
+    )
+    assert elapsed < 3.0, (
+        f"throttled replay still finished too slow; took {elapsed:.3f}s"
+    )

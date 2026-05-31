@@ -301,6 +301,15 @@ class BacktestRunConfig(BaseModel):
     slippage_model: Literal["fixed", "spread", "volatility"] = "fixed"
     slippage_volatility_factor: float = Field(0.25, gt=0)
     granularity: Literal["bar", "tick"] = "bar"
+    # Playback throttle for the backtest replay loop.
+    #   0   → max speed (default, current behavior — replay as fast as possible)
+    #   1   → real-time (1 sim-second per wall-second)
+    #   >1  → faster than real-time (e.g. 60 = 1 sim-minute per wall-second)
+    #   <1  → slow-motion (e.g. 0.5 = half real-time)
+    # The throttle paces *event delivery* to the bus; it does not affect
+    # SimClock or any computed metric. Use it for UI replay, demos, debug
+    # sessions, or stress-testing async paths at sub-real-time pacing.
+    speed: float = Field(0.0, ge=0)
 
     @field_validator("start", "end")
     @classmethod

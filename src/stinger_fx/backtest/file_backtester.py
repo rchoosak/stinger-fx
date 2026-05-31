@@ -15,6 +15,7 @@ from pathlib import Path
 
 from stinger_fx.backtest.base import BaseBacktester
 from stinger_fx.backtest.order_router import OrderRouter
+from stinger_fx.backtest.playback import PlaybackThrottle
 from stinger_fx.backtest.replay_broker import SimBroker
 from stinger_fx.backtest.reports import BacktestReport
 from stinger_fx.backtest.slippage import build_slippage_model
@@ -202,7 +203,10 @@ class FileBacktester(BaseBacktester):
         merged = heapq.merge(*feed_iters, key=lambda b: b.time)
         last_close: dict[str, float] = {}
         count = 0
+        # Playback throttle — no-op when cfg.speed == 0 (default).
+        throttle = PlaybackThrottle(cfg.speed)
         for bar in merged:
+            await throttle.wait_for(bar.time)
             sim_clock.advance(bar.time)
             broker.advance_clock(bar.time)
             broker.set_market(bar.symbol, bar.close)
@@ -269,7 +273,10 @@ class FileBacktester(BaseBacktester):
         count = 0
         last_equity_minute: int | None = None
         last_tick: Tick | None = None
+        # Playback throttle — no-op when cfg.speed == 0 (default).
+        throttle = PlaybackThrottle(cfg.speed)
         for tick in merged:
+            await throttle.wait_for(tick.time)
             sim_clock.advance(tick.time)
             broker.advance_clock(tick.time)
             # Store both bid AND ask so spread/volatility slippage models have
