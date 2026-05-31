@@ -183,15 +183,14 @@ async def test_replayed_tick_does_not_reset_watchdog() -> None:
         collector._last_tick_time[SYMBOL] = thirty_seconds_ago
 
         # Now a replayed historical tick arrives — should be ignored by
-        # watchdog state.
+        # watchdog state. `replayed` now lives on the event, not the Tick.
         replayed_tick = Tick(
             symbol=SYMBOL,
             time=datetime.now(UTC) - timedelta(minutes=20),
             bid=1900.0,
             ask=1900.2,
-            replayed=True,
         )
-        await bus.publish(TickEvent(tick=replayed_tick))
+        await bus.publish(TickEvent(tick=replayed_tick, replayed=True))
         for _ in range(3):
             await asyncio.sleep(0)
         await asyncio.sleep(0.1)  # one watchdog cycle
@@ -224,9 +223,8 @@ async def test_replayed_tick_does_not_pollute_lag_metric() -> None:
             time=datetime.now(UTC) - timedelta(minutes=30),
             bid=1900.0,
             ask=1900.2,
-            replayed=True,
         )
-        await bus.publish(TickEvent(tick=old_tick))
+        await bus.publish(TickEvent(tick=old_tick, replayed=True))
         for _ in range(3):
             await asyncio.sleep(0)
 
@@ -281,14 +279,14 @@ async def test_unsubscribe_event_prunes_state() -> None:
         )
         # Gauge label must be gone — re-accessing .labels() would
         # re-create it, so check the internal metric registry directly.
+        # Round 2 #4 — previous comprehension used `m.name` on a string
+        # which would AttributeError if the gauge had any label.
         gauge = collector.metrics["tick_stream_seconds_since_last"]
-        existing_labels = {tuple(m.name for m in c) for c in gauge._metrics.keys()} \
-            if hasattr(gauge, "_metrics") else None
-        # Either the label set is empty, or our symbol isn't in it.
-        assert all(
-            SYMBOL not in label_tuple
-            for label_tuple in (gauge._metrics if hasattr(gauge, "_metrics") else {})
-        ), "gauge label for unsubscribed symbol should be removed"
+        if hasattr(gauge, "_metrics"):
+            label_keys = list(gauge._metrics.keys())  # each key is a tuple
+            assert all(SYMBOL not in label_tuple for label_tuple in label_keys), (
+                f"gauge label for {SYMBOL} should be removed; got {label_keys}"
+            )
     finally:
         await collector.stop()
     await bus.close()
