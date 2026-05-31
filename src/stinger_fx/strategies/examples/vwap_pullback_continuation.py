@@ -172,6 +172,37 @@ class VwapPullbackContinuation(BaseStrategy):
             Subscription(symbol=params.symbol, timeframe=params.regime_timeframe),
         ]
 
+    @classmethod
+    def warmup_bars(
+        cls, params: StrategyParams,
+    ) -> dict[Subscription, int] | None:
+        """Per-feed warmup for live-mode startup backfill (Plan A2).
+
+        VPC's M5 structure-tf needs the **session VWAP** anchor, which
+        re-anchors at every UTC midnight (or the configured session
+        start hour).  So the M5 window must cover a *full day* worth of
+        bars (288 closed M5 bars = 24h) — otherwise the first signal
+        after engine start uses a partial VWAP.
+
+        The other periods (swing/Donchian/ATR/EMA) all fit within 24h,
+        so we use ``max(24h, indicator-bars)`` to be safe.
+        """
+        assert isinstance(params, VwapPullbackContinuationParams)
+        m5_indicator_bars = max(
+            params.swing_lookback,
+            params.prev_extreme_lookback,
+            params.vwap_slope_lookback + 2,
+            params.atr_period + 1,
+        ) + 1
+        m5_session_bars = 24 * 60 // 5  # 24h of M5 = 288
+        return {
+            Subscription(symbol=params.symbol, timeframe=params.entry_timeframe): 1,
+            Subscription(symbol=params.symbol, timeframe=params.structure_timeframe):
+                max(m5_indicator_bars, m5_session_bars),
+            Subscription(symbol=params.symbol, timeframe=params.regime_timeframe):
+                max(2 * params.adx_period, params.ema_slow + 1),
+        }
+
     def __init__(self) -> None:
         super().__init__()
         self._last_close_bar_index: int | None = None

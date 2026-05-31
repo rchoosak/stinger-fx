@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from stinger_fx.backtest.order_router import OrderRouter
@@ -32,6 +33,7 @@ from stinger_fx.core.events import (
     TickEvent,
 )
 from stinger_fx.data import SqliteStore
+from stinger_fx.domain import Tick
 from stinger_fx.domain.timeframes import Timeframe
 from stinger_fx.log import configure as configure_logs
 from stinger_fx.log import set_level
@@ -46,6 +48,18 @@ from stinger_fx.ui.handle import EngineHandle
 from stinger_fx.ui.normal import NormalUI
 
 logger = logging.getLogger("stinger.runtime")
+
+
+# Conservative default tick-history warmup window for live-mode startup.
+# Covers indicators up to EMA(96) on H1 (~4 days of M15 = 96 closed bars
+# × 900s = 86400s = 1 day; 96 closed H1 bars × 3600 = ~4 days — wait
+# actually 96 * 3600 = 345600s ≈ 4 days, so 48h covers EMA(48 on H1)
+# only.  48h is the practical sweet spot: covers session-anchored
+# indicators (VWAP session, daily-open levels), most multi-day swing
+# patterns up to ~M15+50 / H1+48, and stays well under MT5 broker tick
+# history caps (30-90 days).  Strategies needing longer override via
+# `BaseStrategy.warmup_bars()` per-feed.
+_DEFAULT_WARMUP_SECONDS: int = 48 * 3600
 
 
 class StingerApp:
@@ -326,6 +340,7 @@ class StingerApp:
         out per-broker.
         """
         assert self.bus is not None
+        warmup_seconds = self._compute_warmup_windows()
         seen: set[tuple[str, Timeframe]] = set()
         for runner in self.runners.values():
             for sub in runner.strategy.subscriptions(runner._params):
@@ -333,7 +348,10 @@ class StingerApp:
                 if key in seen:
                     continue
                 seen.add(key)
-                await self._subscribe_one(broker, sub.symbol, sub.timeframe)
+                await self._subscribe_one(
+                    broker, sub.symbol, sub.timeframe,
+                    backfill_seconds=warmup_seconds.get(key, _DEFAULT_WARMUP_SECONDS),
+                )
 
     async def _wire_broker_subscriptions_multi(self) -> None:
         """Multi-account variant: for each strategy, subscribe only the broker
@@ -341,6 +359,7 @@ class StingerApp:
         idle (no symbol subscriptions, no tick pump cost).
         """
         assert self.bus is not None
+        warmup_seconds = self._compute_warmup_windows()
         # Track per-broker dedupe so the same symbol isn't subscribed twice
         # for the same broker even when multiple strategies share it.
         per_broker_seen: dict[str, set[tuple[str, Timeframe]]] = {
@@ -354,29 +373,52 @@ class StingerApp:
                 if key in per_broker_seen[account_id]:
                     continue
                 per_broker_seen[account_id].add(key)
-                await self._subscribe_one(broker, sub.symbol, sub.timeframe)
+                await self._subscribe_one(
+                    broker, sub.symbol, sub.timeframe,
+                    backfill_seconds=warmup_seconds.get(key, _DEFAULT_WARMUP_SECONDS),
+                )
 
-    async def _subscribe_one(self, broker, symbol: str, tf: Timeframe) -> None:
+    async def _subscribe_one(
+        self,
+        broker,
+        symbol: str,
+        tf: Timeframe,
+        *,
+        backfill_seconds: int = 0,
+    ) -> None:
         """Subscribe broker to (symbol, tf) and wire a BarAggregator that
         derives BarEvents from the broker's TickEvent stream.
 
         The aggregator runs for **every** non-TICK timeframe — MT5 native
         AND synthesized — so strategy code sees identical bar semantics
-        in live and tick-mode backtest.  This is the canonical Option A
-        from the live tick→bar pipeline design (see plan A1).
+        in live and tick-mode backtest (canonical Option A from the live
+        tick→bar pipeline design — see plan A1).
 
-        Pre-fix behaviour gated aggregator creation on
+        Pre-A1 behaviour gated aggregator creation on
         ``not tf.is_native_mt5``, which silently dropped BarEvent
-        delivery for M1/M5/M15/etc. — every strategy that subscribed to
-        a native MT5 timeframe (i.e. all 3 example strategies) never
-        received ``on_bar()`` in live mode.  ``BarEvent`` is published
-        in exactly one place (``BarAggregator._emit``); without the
-        aggregator there is no live bar stream at all.
+        delivery for M1/M5/M15/etc. — every strategy subscribed to a
+        native MT5 timeframe never received ``on_bar()`` in live mode.
+        ``BarEvent`` is published in exactly one place
+        (``BarAggregator._emit``); without the aggregator there is no
+        live bar stream at all.
+
+        Ordering (matters for A2's backfill semantics):
+          1. Create aggregator + register on bus.  Bus subscription
+             is set up BEFORE ``broker.subscribe_bars`` so the
+             aggregator can't miss the first tick the broker emits.
+          2. Backfill the aggregator from historical ticks via
+             ``broker.get_history_ticks`` (silently disabled by
+             ``emit_bars=False`` so no backdated BarEvents reach the
+             bus).
+          3. Start the live tick subscription via
+             ``broker.subscribe_bars`` — first live tick lands on
+             warmed state.
         """
         assert self.bus is not None
-        await broker.subscribe_bars(symbol, tf)
         if tf.value == "TICK":
+            await broker.subscribe_bars(symbol, tf)
             return  # TICK-subscribed strategies consume TickEvent directly
+
         agg = BarAggregator(symbol, tf, self.bus)
         self.bus.subscribe(
             TickEvent,
@@ -384,6 +426,107 @@ class StingerApp:
             name=f"agg.{symbol}.{tf.value}",
         )
         self.aggregators[(symbol, tf)] = agg
+
+        if backfill_seconds > 0:
+            await self._backfill_aggregator(broker, agg, backfill_seconds)
+
+        await broker.subscribe_bars(symbol, tf)
+
+    # ----------------------------------------------------------------- #
+    # A2 — warmup window computation + historical-tick backfill         #
+    # ----------------------------------------------------------------- #
+
+    def _compute_warmup_windows(self) -> dict[tuple[str, Timeframe], int]:
+        """For each live (symbol, tf) feed, return the warmup window in
+        seconds — the max across all strategies that subscribe to it.
+
+        Strategies declare per-feed warmup via
+        ``BaseStrategy.warmup_bars(params)``.  Missing entries (or
+        ``warmup_bars()`` returning ``None``) fall back to
+        ``_DEFAULT_WARMUP_SECONDS`` (48 hours).  See
+        :py:meth:`BaseStrategy.warmup_bars` for rationale.
+        """
+        result: dict[tuple[str, Timeframe], int] = {}
+        for runner in self.runners.values():
+            params = runner._params
+            declared = runner.strategy.warmup_bars(params)
+            for sub in runner.strategy.subscriptions(params):
+                if sub.timeframe.value == "TICK":
+                    continue
+                key = (sub.symbol, sub.timeframe)
+                if declared is not None and sub in declared:
+                    seconds = declared[sub] * sub.timeframe.seconds
+                else:
+                    seconds = _DEFAULT_WARMUP_SECONDS
+                result[key] = max(result.get(key, 0), int(seconds))
+        return result
+
+    async def _backfill_aggregator(
+        self,
+        broker,
+        live_agg: BarAggregator,
+        backfill_seconds: int,
+    ) -> None:
+        """Warm ``live_agg``'s OHLC state from historical ticks fetched
+        via ``broker.get_history_ticks``.
+
+        Emits no ``BarEvent`` during replay — temporarily flips
+        ``emit_bars=False`` so backdated bars don't reach the bus.  The
+        live aggregator finishes the replay sitting on the most recent
+        in-progress bar's state, ready for the first live tick to
+        either extend the current bar or cross a boundary and emit it
+        as closed.
+
+        Best-effort: brokers that don't implement ``get_history_ticks``
+        (or that return an empty table) leave the aggregator cold and
+        warmup falls back to the live tick stream.
+        """
+        now = datetime.now(UTC)
+        from_time = now - timedelta(seconds=backfill_seconds)
+        try:
+            table = await broker.get_history_ticks(
+                live_agg.symbol, from_time, now,
+            )
+        except (NotImplementedError, AttributeError):
+            logger.warning(
+                "warmup skipped: broker has no get_history_ticks; "
+                "symbol=%s tf=%s",
+                live_agg.symbol, live_agg.tf.value,
+            )
+            return
+        except Exception as exc:  # surface as warning; startup must not die over warmup
+            logger.warning(
+                "warmup tick fetch failed: symbol=%s tf=%s err=%r",
+                live_agg.symbol, live_agg.tf.value, exc,
+            )
+            return
+        n_rows = len(table)
+        if n_rows == 0:
+            logger.info(
+                "warmup tick fetch empty: symbol=%s tf=%s window=%ds",
+                live_agg.symbol, live_agg.tf.value, backfill_seconds,
+            )
+            return
+
+        live_agg.emit_bars = False
+        try:
+            for row in table.to_pylist():
+                tick = Tick(
+                    symbol=live_agg.symbol,
+                    time=row["time_ns"],
+                    bid=float(row["bid"]),
+                    ask=float(row["ask"]),
+                )
+                await live_agg.on_tick(TickEvent(tick=tick))
+        finally:
+            live_agg.emit_bars = True
+
+        logger.info(
+            "warmup complete: symbol=%s tf=%s ticks_replayed=%d "
+            "open_time=%s",
+            live_agg.symbol, live_agg.tf.value, n_rows,
+            live_agg._open_time.isoformat() if live_agg._open_time else None,
+        )
 
     def _build_reload_actions(self, broker) -> ReloadActions:
         magic_by_id: dict[str, int] = {sid: derive_magic(sid) for sid in self.runners}
