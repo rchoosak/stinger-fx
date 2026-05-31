@@ -39,17 +39,53 @@ def _bar_open_time(t: datetime, tf: Timeframe) -> datetime:
 
 
 class BarAggregator:
-    """Stateful per-(symbol, tf) aggregator. One instance per (symbol, tf)."""
+    """Stateful per-(symbol, tf) aggregator. One instance per (symbol, tf).
 
-    def __init__(self, symbol: str, tf: Timeframe, bus: AsyncEventBus) -> None:
+    ``emit_bars`` controls whether closed bars are published to the bus.
+    Set to ``False`` for warmup replay during live-mode startup (Plan
+    A2): a throwaway aggregator consumes historical ticks to compute
+    the most-recent bar's state without flooding the bus with backdated
+    BarEvents, then ``copy_state_into()`` transfers that state into the
+    real live aggregator.
+    """
+
+    def __init__(
+        self, symbol: str, tf: Timeframe, bus: AsyncEventBus,
+        *, emit_bars: bool = True,
+    ) -> None:
         if tf is Timeframe.TICK:
             raise ValueError("BarAggregator requires a non-TICK timeframe")
         self.symbol = symbol
         self.tf = tf
         self.bus = bus
+        self.emit_bars = emit_bars
         self._open_time: datetime | None = None
         self._o = self._h = self._l = self._c = 0.0
         self._tick_count = 0
+
+    def copy_state_into(self, other: BarAggregator) -> None:
+        """Transfer accumulated OHLC state into ``other`` so the receiver
+        looks like it has been running since this aggregator's open time.
+
+        Used by the live-mode startup backfill (Plan A2): we run a
+        throwaway ``emit_bars=False`` aggregator across historical ticks
+        to learn the most-recent in-progress bar's state, then copy that
+        into the live aggregator before the live tick pump starts.  The
+        first live tick then resumes the bar at the correct OHLC instead
+        of cold-starting a half-formed bar.
+        """
+        if other.symbol != self.symbol or other.tf is not self.tf:
+            raise ValueError(
+                f"cannot copy state into mismatched aggregator: "
+                f"src=({self.symbol},{self.tf.value}) "
+                f"dst=({other.symbol},{other.tf.value})"
+            )
+        other._open_time = self._open_time
+        other._o = self._o
+        other._h = self._h
+        other._l = self._l
+        other._c = self._c
+        other._tick_count = self._tick_count
 
     async def on_tick(self, evt: TickEvent) -> None:
         t = evt.tick
@@ -84,6 +120,11 @@ class BarAggregator:
 
     async def _emit(self, *, is_closed: bool) -> None:
         assert self._open_time is not None
+        if not self.emit_bars:
+            # Warmup-replay mode (A2): accumulate state silently so a
+            # later live aggregator can adopt it.  No BarEvent reaches
+            # the bus → strategies don't see backdated bars from history.
+            return
         bar = Bar(
             symbol=self.symbol,
             timeframe=self.tf,

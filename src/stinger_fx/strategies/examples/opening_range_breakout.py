@@ -167,6 +167,35 @@ class OpeningRangeBreakout(BaseStrategy):
             Subscription(symbol=params.symbol, timeframe=params.structure_timeframe),
         ]
 
+    @classmethod
+    def warmup_bars(
+        cls, params: StrategyParams,
+    ) -> dict[Subscription, int] | None:
+        """Per-feed warmup for live-mode startup backfill (Plan A2).
+
+        ORB needs only a small window: the M1 entry-tf needs enough
+        bars to build the opening range (15 by default) and the M5
+        structure-tf needs ``atr_period + 1`` closed bars.  Engines
+        started mid-session will still build the OR from the bars seen
+        after engine start — backfill makes the FIRST session work end
+        to end if the engine boots between session anchor and OR-close.
+
+        We size M1 to cover the largest possible OR window + a buffer
+        so the freeze logic finds bars in
+        ``[anchor, anchor + opening_range_minutes)``.  M5 is just the
+        ATR warmup.
+        """
+        assert isinstance(params, OpeningRangeBreakoutParams)
+        # M1: at least one OR window worth, plus enough buffer to make
+        # the freeze-after-window logic find data.
+        m1_bars = max(params.opening_range_minutes * 2, 60)
+        return {
+            Subscription(symbol=params.symbol, timeframe=params.entry_timeframe):
+                m1_bars,
+            Subscription(symbol=params.symbol, timeframe=params.structure_timeframe):
+                params.atr_period + 1,
+        }
+
     def __init__(self) -> None:
         super().__init__()
         # Per-session state — reset by _maybe_roll_session.

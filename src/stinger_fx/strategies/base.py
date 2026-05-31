@@ -38,6 +38,49 @@ class BaseStrategy(ABC):  # noqa: B024 — lifecycle hooks are intentionally all
         """Override to declare which (symbol, timeframe) feeds the strategy needs."""
         return []
 
+    @classmethod
+    def warmup_bars(
+        cls, params: StrategyParams,
+    ) -> dict[Subscription, int] | None:
+        """Override to declare per-feed warmup requirements for live mode.
+
+        Return a dict mapping each declared subscription to the number of
+        **closed bars** the strategy needs before its indicators / state
+        are warm.  The live runtime translates this to a tick-history
+        window (``bars × tf.seconds``) and backfills the BarAggregator
+        via ``MT5Broker.get_history_ticks`` before opening the live tick
+        pump — so the strategy's first ``on_bar()`` lands on already-warm
+        history rather than a cold-start partial bar.
+
+        Return ``None`` (default) to accept the conservative 48-hour
+        backfill applied to every subscription.  48h covers:
+          * Indicators up to ``EMA(96)`` on H1
+          * Session-anchored indicators (VWAP session, daily-open levels)
+          * Most multi-day swing patterns
+
+        Strategies that need longer (e.g. ``EMA(200)`` on H4) should
+        override; strategies that want faster startup (ORB needs only
+        ~2h) should override too to avoid over-fetching.
+
+        The dict only needs entries for subscriptions whose default 48h
+        would be *too small* OR where the strategy wants a tighter
+        window than the default.  Missing entries fall back to the 48h
+        default.
+
+        Example::
+
+            @classmethod
+            def warmup_bars(cls, params):
+                return {
+                    Subscription(params.symbol, Timeframe.M1): 1,
+                    Subscription(params.symbol, Timeframe.M5):
+                        max(params.range_lookback_bars, params.atr_period + 1),
+                    Subscription(params.symbol, Timeframe.M15):
+                        2 * params.adx_period,
+                }
+        """
+        return None
+
     # --- Lifecycle hooks (all optional) ------------------------------------
 
     async def on_start(self, ctx: StrategyContext) -> None: ...

@@ -145,6 +145,30 @@ class LiquiditySweepReversal(BaseStrategy):
             Subscription(symbol=params.symbol, timeframe=params.regime_timeframe),
         ]
 
+    @classmethod
+    def warmup_bars(
+        cls, params: StrategyParams,
+    ) -> dict[Subscription, int] | None:
+        """Per-feed warmup so live-mode startup backfill (Plan A2)
+        fetches exactly enough ticks for ADX / Donchian / ATR to be
+        warm — not the conservative 48h default.
+
+        * M1 entry-tf needs essentially nothing — the trigger reads the
+          single incoming bar.
+        * M5 structure-tf needs ``max(range_lookback_bars, atr_period+1)``
+          closed bars for Donchian + ATR.
+        * M15 regime-tf needs ``2 × adx_period`` closed bars before
+          ``adx()`` returns a non-None value.
+        """
+        assert isinstance(params, LiquiditySweepReversalParams)
+        return {
+            Subscription(symbol=params.symbol, timeframe=params.entry_timeframe): 1,
+            Subscription(symbol=params.symbol, timeframe=params.structure_timeframe):
+                max(params.range_lookback_bars, params.atr_period + 1),
+            Subscription(symbol=params.symbol, timeframe=params.regime_timeframe):
+                2 * params.adx_period,
+        }
+
     def __init__(self) -> None:
         super().__init__()
         # Cooldown anchor — index of the entry-tf bar at which the most
