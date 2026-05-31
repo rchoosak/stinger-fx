@@ -21,6 +21,37 @@ runs:
     end: 2024-04-01T00:00:00Z
     initial_balance: 10000.0
 
+  # XAUUSD Opening-Range Breakout — replays Dukascopy tick data we
+  # downloaded into data/parquet/XAUUSD/TICK/ for May 2026.  Two
+  # feeds (M1 entry + M5 structure) are synthesised from the tick
+  # stream by BarAggregator at replay time.  Run with:
+  #   stinger-fx backtest run --run-id xauusd_may2026
+  # Optional throttle for visual / debug:
+  #   stinger-fx backtest run --run-id xauusd_may2026 --speed 60
+  - id: xauusd_may2026
+    mode: file
+    strategy_id: orb_xauusd_may2026
+    feeds:
+      - symbol: XAUUSD
+        timeframe: M1
+      - symbol: XAUUSD
+        timeframe: M5
+    start: 2026-05-01T00:00:00Z
+    end: 2026-05-30T00:00:00Z
+    initial_balance: 10000.0
+    # Use the broker's real bid/ask spread from Dukascopy ticks for
+    # execution pricing instead of a fixed-pips approximation. The
+    # `slippage_pips: 0` adds no extra on top — change if you want
+    # to model worse fills.
+    slippage_model: spread
+    slippage_pips: 0.0
+    granularity: tick
+    # parquet_root — FileBacktester expects the root that contains
+    # `<SYMBOL>/TICK/<YYYY-MM-DD>.parquet`, NOT the per-symbol leaf.
+    data_source: ./data/parquet
+    # speed: 0 (default) → max-speed replay.  Override at the CLI with
+    # `--speed 1` for real-time, `--speed 60` for 1-min/sec dashboard pace.
+
 
 # Parameter sweeps. Trigger via `stinger-fx backtest sweep --sweep-id <id>`.
 # Each cell of the cartesian product of `parameter_grid` is backtested in turn

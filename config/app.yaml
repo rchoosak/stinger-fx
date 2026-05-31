@@ -4,7 +4,7 @@
 mode: normal                   # normal | tui | web
 
 broker:
-  type: mt5                    # mt5 (Phase 1) | mt4 (Phase 2)
+  type: mt5                      # mt5 (Phase 1) | mt4 (Phase 2)
   mt5:
     # Path to terminal64.exe (used for Strategy Tester subprocess). Leave empty to auto-detect.
     terminal_path: ""
