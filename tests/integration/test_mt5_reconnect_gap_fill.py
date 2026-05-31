@@ -39,6 +39,7 @@ from stinger_fx.core.events import (
     BrokerDisconnectedEvent,
     BrokerReconnectedEvent,
     TickEvent,
+    TickStreamUnsubscribedEvent,
 )
 
 
@@ -344,6 +345,340 @@ async def test_disconnect_event_still_fires_before_gap_fill(monkeypatch) -> None
 
         assert len(dc) == 1
         assert len(rc) == 1
+    finally:
+        await broker.disconnect()
+        await bus.close()
+
+
+# --------------------------------------------------------------------- #
+# Code review fixes                                                       #
+# --------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_replayed_ticks_are_tagged(monkeypatch) -> None:
+    """Code review #2 / #3 — gap-fill must tag every replayed TickEvent
+    with ``tick.replayed=True`` so MetricsCollector can skip lag updates
+    and watchdog resets for them."""
+    fake = _FakeMT5WithTickHistory()
+    _install(monkeypatch, fake)
+
+    bus = AsyncEventBus()
+    captured: list[TickEvent] = []
+
+    async def collect(evt: TickEvent) -> None:
+        captured.append(evt)
+
+    bus.subscribe(TickEvent, collect, name="probe.tick")
+
+    broker = _make_broker(bus)
+    try:
+        await broker.connect()
+        await broker.subscribe_ticks("XAUUSD")
+        baseline = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+        broker._last_tick_time["XAUUSD"] = baseline
+        fake.stage_history([
+            {
+                "time": int(datetime(2024, 1, 1, 12, 0, 30, tzinfo=UTC).timestamp()),
+                "bid": 1902.0, "ask": 1902.2, "last": 1902.0,
+                "volume": 1, "flags": 0,
+            },
+        ])
+
+        await broker._gap_fill_after_reconnect()
+        for _ in range(3):
+            await asyncio.sleep(0.01)
+
+        assert captured, "expected at least one replayed tick"
+        assert all(evt.tick.replayed is True for evt in captured), (
+            "every gap-fill tick must carry replayed=True"
+        )
+    finally:
+        await broker.disconnect()
+        await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_reconnected_event_fires_after_gap_fill(monkeypatch) -> None:
+    """Code review #1 / #4 — ``BrokerReconnectedEvent`` must be
+    published AFTER the gap-fill TickEvents land on the bus, so
+    downstream consumers see the broker as fully caught up when they
+    observe the reconnect."""
+    fake = _FakeMT5WithTickHistory()
+    _install(monkeypatch, fake)
+
+    bus = AsyncEventBus()
+    # Recorded order of events as they arrive at subscribers.
+    order: list[str] = []
+
+    async def collect_tick(evt: TickEvent) -> None:
+        if evt.tick.replayed:
+            order.append("tick")
+
+    async def collect_rc(_evt: BrokerReconnectedEvent) -> None:
+        order.append("reconnected")
+
+    bus.subscribe(TickEvent, collect_tick, name="probe.tick")
+    bus.subscribe(BrokerReconnectedEvent, collect_rc, name="probe.rc")
+
+    broker = _make_broker(bus)
+    try:
+        await broker.connect()
+        await broker.subscribe_ticks("XAUUSD")
+        baseline = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+        broker._last_tick_time["XAUUSD"] = baseline
+        fake.stage_history([
+            {
+                "time": int(datetime(2024, 1, 1, 12, 0, 30, tzinfo=UTC).timestamp()),
+                "bid": 1902.0, "ask": 1902.2, "last": 1902.0,
+                "volume": 1, "flags": 0,
+            },
+            {
+                "time": int(datetime(2024, 1, 1, 12, 0, 45, tzinfo=UTC).timestamp()),
+                "bid": 1903.0, "ask": 1903.2, "last": 1903.0,
+                "volume": 1, "flags": 0,
+            },
+        ])
+
+        fake.terminal_info_none_count = 1
+        for _ in range(80):
+            await asyncio.sleep(0.02)
+            if "reconnected" in order:
+                break
+        for _ in range(5):
+            await asyncio.sleep(0.01)
+
+        # Every replayed "tick" must precede "reconnected".
+        rc_idx = order.index("reconnected")
+        assert rc_idx > 0, f"reconnected fired before any gap-fill tick: {order}"
+        assert all(label == "tick" for label in order[:rc_idx])
+    finally:
+        await broker.disconnect()
+        await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_gap_fill_per_call_timeout_does_not_block(monkeypatch) -> None:
+    """Code review #9 — if ``copy_ticks_range`` hangs for one symbol,
+    we abort that symbol via per-call timeout and continue.  The
+    reconnect handler must NOT block forever."""
+    import stinger_fx.brokers.mt5.broker as broker_mod
+
+    fake = _FakeMT5WithTickHistory()
+
+    def _hanging_copy_ticks_range(*_args, **_kwargs):
+        # Simulate a wedged SDK call by blocking the executor thread.
+        # The per-call asyncio.wait_for must abort us anyway.
+        import time as _time
+        _time.sleep(5.0)
+        return []
+
+    fake.copy_ticks_range = _hanging_copy_ticks_range  # type: ignore[method-assign]
+    _install(monkeypatch, fake)
+    # Shrink the timeout so the test runs fast.
+    monkeypatch.setattr(
+        broker_mod, "GAP_FILL_PER_CALL_TIMEOUT_SECONDS", 0.1,
+    )
+    monkeypatch.setattr(
+        broker_mod, "GAP_FILL_OVERALL_TIMEOUT_SECONDS", 2.0,
+    )
+
+    bus = AsyncEventBus()
+    broker = _make_broker(bus)
+    try:
+        await broker.connect()
+        await broker.subscribe_ticks("XAUUSD")
+        broker._last_tick_time["XAUUSD"] = datetime(
+            2024, 1, 1, 12, 0, 0, tzinfo=UTC,
+        )
+
+        # Should return promptly (timeout aborts the hung call).
+        start = asyncio.get_event_loop().time()
+        await broker._gap_fill_after_reconnect()
+        elapsed = asyncio.get_event_loop().time() - start
+        assert elapsed < 1.0, (
+            f"gap_fill should abort hung SDK call quickly; took {elapsed:.2f}s"
+        )
+        # Broker must still be marked connected — gap-fill failure
+        # mustn't roll the connection state back.
+        assert broker._connected is True
+    finally:
+        await broker.disconnect()
+        await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_inner_loop_exception_does_not_abort_other_symbols(monkeypatch) -> None:
+    """Code review #5 — if one tick in the batch fails to deserialize,
+    gap-fill must skip it and continue with the rest (and with other
+    symbols)."""
+    fake = _FakeMT5WithTickHistory()
+    _install(monkeypatch, fake)
+
+    bus = AsyncEventBus()
+    captured: list[TickEvent] = []
+
+    async def collect(evt: TickEvent) -> None:
+        captured.append(evt)
+
+    bus.subscribe(TickEvent, collect, name="probe.tick")
+
+    broker = _make_broker(bus)
+    try:
+        await broker.connect()
+        await broker.subscribe_ticks("XAUUSD")
+        baseline = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+        broker._last_tick_time["XAUUSD"] = baseline
+        # Stage a batch where the FIRST tick is malformed (missing 'bid')
+        # and the second is fine.
+        fake.stage_history([
+            {
+                "time": int(datetime(2024, 1, 1, 12, 0, 30, tzinfo=UTC).timestamp()),
+                # 'bid' key intentionally missing → KeyError in float(raw["bid"])
+                "ask": 1902.2, "last": 1902.0,
+                "volume": 1, "flags": 0,
+            },
+            {
+                "time": int(datetime(2024, 1, 1, 12, 0, 45, tzinfo=UTC).timestamp()),
+                "bid": 1903.0, "ask": 1903.2, "last": 1903.0,
+                "volume": 1, "flags": 0,
+            },
+        ])
+
+        await broker._gap_fill_after_reconnect()
+        for _ in range(3):
+            await asyncio.sleep(0.01)
+
+        # The second (well-formed) tick must still have been published.
+        bids = sorted(evt.tick.bid for evt in captured)
+        assert bids == [1903.0], (
+            f"well-formed tick should survive bad sibling; got {bids}"
+        )
+    finally:
+        await broker.disconnect()
+        await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_publishes_tick_stream_event(monkeypatch) -> None:
+    """Code review #6 — broker.unsubscribe(symbol) must fire a
+    ``TickStreamUnsubscribedEvent`` so MetricsCollector can prune
+    watchdog state."""
+    fake = _FakeMT5WithTickHistory()
+    _install(monkeypatch, fake)
+
+    bus = AsyncEventBus()
+    events: list[TickStreamUnsubscribedEvent] = []
+
+    async def collect(evt: TickStreamUnsubscribedEvent) -> None:
+        events.append(evt)
+
+    bus.subscribe(TickStreamUnsubscribedEvent, collect, name="probe.unsub")
+
+    broker = _make_broker(bus)
+    try:
+        await broker.connect()
+        await broker.subscribe_ticks("XAUUSD")
+        broker._last_tick_time["XAUUSD"] = datetime(
+            2024, 1, 1, 12, 0, 0, tzinfo=UTC,
+        )
+
+        await broker.unsubscribe("XAUUSD")
+        for _ in range(3):
+            await asyncio.sleep(0.01)
+
+        assert len(events) == 1
+        assert events[0].symbol == "XAUUSD"
+        assert events[0].broker_name == "mt5"
+        # Broker also pruned its own dedupe state.
+        assert "XAUUSD" not in broker._last_tick_time
+    finally:
+        await broker.disconnect()
+        await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_for_non_subscribed_symbol_is_silent(monkeypatch) -> None:
+    """Unsubscribing a symbol we never subscribed to must not fire a
+    spurious TickStreamUnsubscribedEvent — only real stream stops
+    generate the lifecycle signal."""
+    fake = _FakeMT5WithTickHistory()
+    _install(monkeypatch, fake)
+
+    bus = AsyncEventBus()
+    events: list[TickStreamUnsubscribedEvent] = []
+
+    async def collect(evt: TickStreamUnsubscribedEvent) -> None:
+        events.append(evt)
+
+    bus.subscribe(TickStreamUnsubscribedEvent, collect, name="probe.unsub")
+
+    broker = _make_broker(bus)
+    try:
+        await broker.connect()
+        # Never subscribed.
+        await broker.unsubscribe("XAUUSD")
+        for _ in range(3):
+            await asyncio.sleep(0.01)
+        assert events == []
+    finally:
+        await broker.disconnect()
+        await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_time_msc_precision_preserved(monkeypatch) -> None:
+    """Code review #10 — gap-fill must use ``time_msc`` when available
+    to preserve sub-second precision; multiple ticks within the same
+    second must not collapse to the same timestamp."""
+    fake = _FakeMT5WithTickHistory()
+    _install(monkeypatch, fake)
+
+    bus = AsyncEventBus()
+    captured: list[TickEvent] = []
+
+    async def collect(evt: TickEvent) -> None:
+        captured.append(evt)
+
+    bus.subscribe(TickEvent, collect, name="probe.tick")
+
+    broker = _make_broker(bus)
+    try:
+        await broker.connect()
+        await broker.subscribe_ticks("XAUUSD")
+        baseline = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+        broker._last_tick_time["XAUUSD"] = baseline
+        # Two ticks within the same second — only ``time_msc``
+        # distinguishes them.
+        base_ts_sec = int(datetime(2024, 1, 1, 12, 0, 1, tzinfo=UTC).timestamp())
+        fake.stage_history([
+            {
+                "time": base_ts_sec,
+                "time_msc": base_ts_sec * 1000 + 100,
+                "bid": 1902.0, "ask": 1902.2, "last": 1902.0,
+                "volume": 1, "flags": 0,
+            },
+            {
+                "time": base_ts_sec,
+                "time_msc": base_ts_sec * 1000 + 700,
+                "bid": 1903.0, "ask": 1903.2, "last": 1903.0,
+                "volume": 1, "flags": 0,
+            },
+        ])
+
+        await broker._gap_fill_after_reconnect()
+        for _ in range(3):
+            await asyncio.sleep(0.01)
+
+        # Both ticks should be present with distinct sub-second times.
+        times = sorted(evt.tick.time for evt in captured)
+        assert len(times) == 2, (
+            f"sub-second ticks should not collapse; got {times}"
+        )
+        assert times[0] != times[1]
+        # And the microseconds should reflect the 100 ms / 700 ms split.
+        assert times[0].microsecond == 100_000
+        assert times[1].microsecond == 700_000
     finally:
         await broker.disconnect()
         await bus.close()
