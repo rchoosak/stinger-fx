@@ -166,4 +166,6 @@ def test_replay_page_includes_candle_canvas(client_with_data) -> None:
     r = client.get("/backtest/smoke")
     assert r.status_code == 200
     assert 'id="candle-chart"' in r.text
+    assert 'id="candle-status"' in r.text
     assert "chartjs-chart-financial" in r.text
+    assert "/static/backtest_replay.js" in r.text

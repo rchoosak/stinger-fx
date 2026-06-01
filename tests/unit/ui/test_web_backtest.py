@@ -153,11 +153,43 @@ def test_replay_page_renders_chart_canvas(client_with_data) -> None:
     r = client.get("/backtest/smoke")
     assert r.status_code == 200
     assert "EURUSD" in r.text
-    # The canvas exists for Chart.js
+    assert 'id="backtest-replay"' in r.text
+    assert 'data-run-id="smoke"' in r.text
+    assert 'class="metric-strip"' in r.text
+    assert "Net PnL" in r.text
+    assert "Wins / Losses" in r.text
     assert 'id="replay-chart"' in r.text
+    assert 'id="candle-chart"' in r.text
+    assert 'id="candle-status"' in r.text
     # Both chart.js and the date adapter are loaded from CDN
     assert "chart.js" in r.text
     assert "chartjs-adapter-date-fns" in r.text
+    assert "chartjs-chart-financial" in r.text
+    assert "/static/backtest_replay.js" in r.text
+    # Chart data should be fetched by the static asset, not embedded inline.
+    assert "meta.trades | tojson" not in r.text
+
+
+def test_replay_page_handles_no_trades(client_with_data) -> None:
+    client, data_dir = client_with_data
+    _write_trades_sidecar(data_dir, "empty", trade_count=0)
+    r = client.get("/backtest/empty")
+    assert r.status_code == 200
+    assert "Trades" in r.text
+    assert "<strong>0</strong>" in r.text
+    assert "0 / 0" in r.text
+
+
+def test_static_replay_js_defines_order_marker_groups() -> None:
+    js_path = Path("src/stinger_fx/ui/web/static/backtest_replay.js")
+    js = js_path.read_text()
+    assert "Open buy" in js
+    assert "Open sell" in js
+    assert "Close profit" in js
+    assert "Close loss" in js
+    assert "splitPriceMarkers" in js
+    assert "open_price" in js
+    assert "close_price" in js
 
 
 def test_replay_page_404_when_no_sidecar(client_with_data) -> None:
