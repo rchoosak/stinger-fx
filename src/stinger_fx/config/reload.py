@@ -91,6 +91,12 @@ class ConfigReloader:
         if old.broker_list != new.broker_list:
             result.needs_restart.append("broker.*")
 
+        if (
+            old.allow_unsafe_inprocess_mt5_multi_account
+            != new.allow_unsafe_inprocess_mt5_multi_account
+        ):
+            result.needs_restart.append("allow_unsafe_inprocess_mt5_multi_account")
+
         # Web bind host/port — restart-required; everything else in WebConfig is hot.
         if (old.web.host, old.web.port) != (new.web.host, new.web.port):
             result.needs_restart.append("web.host/port")

@@ -73,12 +73,14 @@ class SimBroker(BaseBroker):
         slippage_pips: float = 0.0,
         slippage_fn: SlippageModel | None = None,
         contract_size: float = 100_000.0,
+        symbol_contract_sizes: dict[str, float] | None = None,
         point: float = 0.0001,
     ) -> None:
         super().__init__(bus)
         self.balance = initial_balance
         self._slippage_pips = slippage_pips
-        self._contract = contract_size
+        self._default_contract_size = contract_size
+        self._symbol_contract_sizes = dict(symbol_contract_sizes or {})
         self._point = point
         self._next_ticket = 1
         self._positions: dict[int, Position] = {}
@@ -122,6 +124,10 @@ class SimBroker(BaseBroker):
     def realized_balance(self) -> float:
         return self.balance
 
+    def contract_size_for(self, symbol: str) -> float:
+        """Return the simulated contract size for ``symbol``."""
+        return self._symbol_contract_sizes.get(symbol, self._default_contract_size)
+
     # --- BaseBroker -------------------------------------------------------
 
     async def connect(self) -> None:
@@ -151,7 +157,12 @@ class SimBroker(BaseBroker):
             mid = self._last_price.get(p.symbol)
             if mid is None:
                 continue
-            unrealized += (mid - p.open_price) * p.side.sign * p.volume * self._contract
+            unrealized += (
+                (mid - p.open_price)
+                * p.side.sign
+                * p.volume
+                * self.contract_size_for(p.symbol)
+            )
         equity = self.balance + unrealized
         return AccountSnapshot(
             account_id="sim",
@@ -169,7 +180,7 @@ class SimBroker(BaseBroker):
             symbol=symbol,
             digits=5,
             point=self._point,
-            contract_size=self._contract,
+            contract_size=self.contract_size_for(symbol),
             volume_min=0.01,
             volume_max=100.0,
             volume_step=0.01,
@@ -478,7 +489,12 @@ class SimBroker(BaseBroker):
         ask = self._last_ask.get(pos.symbol, mid)
         close_price = self._slippage_fn(close_side, bid=bid, ask=ask)
         # P&L on the closed chunk only.
-        pnl = (close_price - pos.open_price) * pos.side.sign * close_qty * self._contract
+        pnl = (
+            (close_price - pos.open_price)
+            * pos.side.sign
+            * close_qty
+            * self.contract_size_for(pos.symbol)
+        )
         self.balance += pnl
         self._trades.append(
             TradeRecord(

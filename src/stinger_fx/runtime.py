@@ -12,8 +12,7 @@ import signal
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from stinger_fx.backtest.order_router import OrderRouter
-from stinger_fx.brokers import BrokerPool, build_broker
+from stinger_fx.brokers import BrokerPool, OrderQueue, build_broker
 from stinger_fx.brokers.bar_aggregator import BarAggregator
 from stinger_fx.config import (
     ConfigReloader,
@@ -35,6 +34,7 @@ from stinger_fx.core.events import (
 from stinger_fx.data import SqliteStore
 from stinger_fx.domain import Tick
 from stinger_fx.domain.timeframes import Timeframe
+from stinger_fx.execution import OrderRouter
 from stinger_fx.log import configure as configure_logs
 from stinger_fx.log import set_level
 from stinger_fx.risk import RiskMonitor
@@ -78,6 +78,7 @@ class StingerApp:
         self._watcher: ConfigWatcher | None = None
         self._reloader: ConfigReloader | None = None
         self._router: OrderRouter | None = None
+        self._order_queue: OrderQueue | None = None
         self._ui: NormalUI | None = None
         self._pool: BrokerPool = BrokerPool()
         self._strategy_accounts: dict[str, str] = {}
@@ -100,6 +101,11 @@ class StingerApp:
             app_cfg.mode,
             app_cfg.primary_broker_config.type,
         )
+        if app_cfg.allow_unsafe_inprocess_mt5_multi_account:
+            logger.warning(
+                "unsafe_inprocess_mt5_multi_account_enabled accounts=%s",
+                [bcfg.id for bcfg in app_cfg.broker_list if bcfg.type == "mt5"],
+            )
 
         self.sqlite = SqliteStore(app_cfg.data_dir / "stinger.db")
         self.sqlite.create_all()
@@ -147,6 +153,14 @@ class StingerApp:
                 continue
             await self._add_strategy_internal(entry, magic_by_id)
 
+        def broker_for_strategy(strategy_id: str):
+            account_id = strategy_accounts.get(strategy_id)
+            if account_id is not None and self._pool.has(account_id):
+                return self._pool.get(account_id)
+            return self._pool.primary()
+
+        self._order_queue = OrderQueue(self.sqlite, broker_lookup=broker_for_strategy)
+
         # Order router — multi-account aware. handle_signal picks the broker
         # from the pool based on the strategy → account mapping; unknown
         # strategies fall back to the primary broker.
@@ -156,6 +170,7 @@ class StingerApp:
             strategy_magic=magic_by_id,
             strategy_accounts=strategy_accounts,
             risk=self._risk,
+            queue=self._order_queue,
         )
         await self._router.attach()
 
@@ -226,6 +241,7 @@ class StingerApp:
             5.0, self._publish_account_snapshot, name="account_snapshot"
         )
         await self.engine.start()
+        await self._replay_pending_order_queue()
         # Now that every broker is connected (via engine.start), subscribe
         # each one to the (symbol, timeframe) pairs its strategies declared.
         await self._wire_broker_subscriptions_multi()
@@ -285,6 +301,14 @@ class StingerApp:
         if self._risk is not None:
             await self._risk.stop()
         await self.engine.stop()
+
+    async def _replay_pending_order_queue(self) -> int:
+        if self._router is None:
+            return 0
+        replayed = await self._router.replay_pending_orders()
+        if replayed:
+            logger.warning("order_queue_replayed count=%d", replayed)
+        return replayed
 
     async def _publish_account_snapshot(self) -> None:
         """Scheduler job: pull account state from every broker, fan out on bus.

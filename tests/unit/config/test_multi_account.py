@@ -28,6 +28,7 @@ def test_legacy_single_broker_keeps_working() -> None:
 
 def test_new_multi_broker_list_resolves() -> None:
     cfg = _app_with(
+        allow_unsafe_inprocess_mt5_multi_account=True,
         brokers=[
             BrokerConfig(id="primary", type="mt5", mt5=MT5Config()),
             BrokerConfig(id="secondary", type="mt5", mt5=MT5Config()),
@@ -35,6 +36,28 @@ def test_new_multi_broker_list_resolves() -> None:
     )
     bl = cfg.broker_list
     assert [b.id for b in bl] == ["primary", "secondary"]
+
+
+def test_multi_mt5_broker_list_rejected_by_default() -> None:
+    with pytest.raises(ValidationError) as exc:
+        _app_with(
+            brokers=[
+                BrokerConfig(id="primary", type="mt5", mt5=MT5Config()),
+                BrokerConfig(id="secondary", type="mt5", mt5=MT5Config()),
+            ]
+        )
+    assert "multiple in-process MT5 brokers are disabled" in str(exc.value)
+
+
+def test_unsafe_flag_allows_multi_mt5_broker_list() -> None:
+    cfg = _app_with(
+        allow_unsafe_inprocess_mt5_multi_account=True,
+        brokers=[
+            BrokerConfig(id="primary", type="mt5", mt5=MT5Config()),
+            BrokerConfig(id="secondary", type="mt5", mt5=MT5Config()),
+        ],
+    )
+    assert len(cfg.broker_list) == 2
 
 
 def test_both_broker_and_brokers_rejected() -> None:

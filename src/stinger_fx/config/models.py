@@ -124,6 +124,7 @@ class AppConfig(BaseModel):
     risk: RiskConfig = RiskConfig()
     metrics: MetricsConfig = MetricsConfig()
     notifications: list[NotificationChannelConfig] = Field(default_factory=list)
+    allow_unsafe_inprocess_mt5_multi_account: bool = False
 
     @field_validator("brokers")
     @classmethod
@@ -148,6 +149,15 @@ class AppConfig(BaseModel):
         if self.broker is not None and self.brokers:
             raise ValueError(
                 "AppConfig has both `broker:` and `brokers:` — keep only one"
+            )
+        mt5_count = sum(1 for broker in self.broker_list if broker.type == "mt5")
+        if mt5_count > 1 and not self.allow_unsafe_inprocess_mt5_multi_account:
+            raise ValueError(
+                "multiple in-process MT5 brokers are disabled by default because "
+                "the MetaTrader5 Python SDK is process-global and not safely "
+                "isolated per account. Use one MT5 account per process/terminal, "
+                "or set allow_unsafe_inprocess_mt5_multi_account: true only for "
+                "explicit testing."
             )
         return self
 
@@ -279,6 +289,15 @@ def _coerce_feed_list(
     return deduped
 
 
+def _validate_symbol_contract_sizes(v: dict[str, float]) -> dict[str, float]:
+    for symbol, contract_size in v.items():
+        if contract_size <= 0:
+            raise ValueError(
+                f"symbol_contract_sizes[{symbol!r}] must be > 0"
+            )
+    return v
+
+
 class BacktestRunConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -296,6 +315,7 @@ class BacktestRunConfig(BaseModel):
     start: datetime
     end: datetime
     initial_balance: float = Field(10_000.0, gt=0)
+    symbol_contract_sizes: dict[str, float] = Field(default_factory=dict)
     data_source: Path | None = None
     slippage_pips: float = Field(0.0, ge=0)
     slippage_model: Literal["fixed", "spread", "volatility"] = "fixed"
@@ -317,6 +337,11 @@ class BacktestRunConfig(BaseModel):
         if v.tzinfo is None:
             raise ValueError("start/end must include a timezone (e.g. ...T00:00:00Z)")
         return v
+
+    @field_validator("symbol_contract_sizes")
+    @classmethod
+    def _contract_sizes_positive(cls, v: dict[str, float]) -> dict[str, float]:
+        return _validate_symbol_contract_sizes(v)
 
     @model_validator(mode="after")
     def _normalise_feeds(self) -> BacktestRunConfig:
@@ -385,6 +410,7 @@ class SweepRunConfig(BaseModel):
     start: datetime
     end: datetime
     initial_balance: float = Field(10_000.0, gt=0)
+    symbol_contract_sizes: dict[str, float] = Field(default_factory=dict)
     slippage_pips: float = Field(0.0, ge=0)
     slippage_model: Literal["fixed", "spread", "volatility"] = "fixed"
     slippage_volatility_factor: float = Field(0.25, gt=0)
@@ -422,6 +448,11 @@ class SweepRunConfig(BaseModel):
         if v.tzinfo is None:
             raise ValueError("start/end must include a timezone (e.g. ...T00:00:00Z)")
         return v
+
+    @field_validator("symbol_contract_sizes")
+    @classmethod
+    def _contract_sizes_positive(cls, v: dict[str, float]) -> dict[str, float]:
+        return _validate_symbol_contract_sizes(v)
 
     @field_validator("parameter_grid")
     @classmethod
@@ -478,6 +509,7 @@ class WalkForwardConfig(BaseModel):
     start: datetime
     end: datetime
     initial_balance: float = Field(10_000.0, gt=0)
+    symbol_contract_sizes: dict[str, float] = Field(default_factory=dict)
     data_source: Path
     # Walk-forward specific
     n_folds: int = Field(5, ge=2)
@@ -503,6 +535,11 @@ class WalkForwardConfig(BaseModel):
         if v.tzinfo is None:
             raise ValueError("start/end must include a timezone (e.g. ...T00:00:00Z)")
         return v
+
+    @field_validator("symbol_contract_sizes")
+    @classmethod
+    def _contract_sizes_positive(cls, v: dict[str, float]) -> dict[str, float]:
+        return _validate_symbol_contract_sizes(v)
 
     @field_validator("parameter_grid")
     @classmethod

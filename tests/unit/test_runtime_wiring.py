@@ -14,9 +14,12 @@ from pathlib import Path
 
 import pyarrow as pa
 import pytest
+from sqlmodel import select
 
 from stinger_fx.brokers.base import BaseBroker
 from stinger_fx.core import AsyncEventBus
+from stinger_fx.core.events import OrderFilledEvent
+from stinger_fx.data.schemas import PendingOrderRequestRow
 from stinger_fx.domain import (
     AccountInfo,
     AccountSnapshot,
@@ -24,7 +27,9 @@ from stinger_fx.domain import (
     OrderRequest,
     OrderResult,
     OrderStatus,
+    OrderType,
     Position,
+    Side,
     SymbolInfo,
     Timeframe,
 )
@@ -108,6 +113,33 @@ class _RecordingBroker(BaseBroker):
 
     async def get_open_orders(self) -> list[Order]:
         return []
+
+
+class _FillingBroker(_RecordingBroker):
+    def __init__(self, bus: AsyncEventBus) -> None:
+        super().__init__(bus)
+        self.calls: list[OrderRequest] = []
+
+    async def place_order(self, req: OrderRequest) -> OrderResult:
+        self.calls.append(req)
+        order = Order(
+            ticket=100 + len(self.calls),
+            strategy_id=req.strategy_id,
+            symbol=req.symbol,
+            side=req.side,
+            type=req.type,
+            volume=req.volume,
+            filled_volume=req.volume,
+            fill_price=1.10,
+            status=OrderStatus.FILLED,
+            client_order_id=req.client_order_id,
+            requested_at=_dt.now(UTC),
+            filled_at=_dt.now(UTC),
+            magic=req.magic,
+        )
+        return OrderResult(
+            ok=True, ticket=order.ticket, status=OrderStatus.FILLED, order=order
+        )
 
 
 @pytest.mark.asyncio
@@ -204,3 +236,103 @@ async def test_account_snapshot_is_published_to_bus(monkeypatch, tmp_path: Path)
     assert received[0].snapshot.balance == 10_000
 
     await app.engine.bus.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_wires_durable_order_queue(monkeypatch, tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "app.yaml").write_text(
+        "mode: normal\n"
+        "broker:\n  type: mt5\n  mt5: {}\n"
+        f"data_dir: {tmp_path / 'data'}\n"
+    )
+    (config_dir / "strategies.yaml").write_text("strategies: []\n")
+    (config_dir / "backtest.yaml").write_text("runs: []\n")
+
+    monkeypatch.setattr(
+        "stinger_fx.runtime.build_broker",
+        lambda cfg, bus: _RecordingBroker(bus),
+    )
+
+    app = StingerApp(config_dir)
+    await app.setup()
+
+    assert app._order_queue is not None
+    assert app._router is not None
+    assert app._router.queue is app._order_queue
+
+    await app.engine.bus.close()  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_runtime_replays_pending_orders_after_broker_connect(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "app.yaml").write_text(
+        "mode: normal\n"
+        "broker:\n  type: mt5\n  mt5: {}\n"
+        f"data_dir: {tmp_path / 'data'}\n"
+    )
+    (config_dir / "strategies.yaml").write_text("strategies: []\n")
+    (config_dir / "backtest.yaml").write_text("runs: []\n")
+
+    broker_box: dict[str, _FillingBroker] = {}
+    monkeypatch.setattr(
+        "stinger_fx.runtime.build_broker",
+        lambda cfg, bus: broker_box.setdefault("broker", _FillingBroker(bus)),
+    )
+
+    app = StingerApp(config_dir)
+    await app.setup()
+    assert app.sqlite is not None
+
+    req = OrderRequest(
+        strategy_id="unknown",
+        symbol="EURUSD",
+        side=Side.BUY,
+        type=OrderType.MARKET,
+        volume=0.1,
+        client_order_id="recover-live-1",
+    )
+    with app.sqlite.session() as s:
+        s.add(
+            PendingOrderRequestRow(
+                client_order_id=req.client_order_id,
+                strategy_id=req.strategy_id,
+                request_json=req.model_dump_json(),
+                enqueued_at=_dt.now(UTC),
+                status="pending",
+            )
+        )
+        s.commit()
+
+    fills: list[OrderFilledEvent] = []
+
+    async def collect(evt: OrderFilledEvent) -> None:
+        fills.append(evt)
+
+    assert app.bus is not None
+    app.bus.subscribe(OrderFilledEvent, collect, name="test.fill")
+
+    assert app.engine is not None
+    await app.engine.start()
+    replayed = await app._replay_pending_order_queue()
+    for _ in range(3):
+        await __import__("asyncio").sleep(0)
+
+    assert replayed == 1
+    assert len(broker_box["broker"].calls) == 1
+    assert len(fills) == 1
+    with app.sqlite.session() as s:
+        row = s.exec(
+            select(PendingOrderRequestRow).where(
+                PendingOrderRequestRow.client_order_id == "recover-live-1"
+            )
+        ).first()
+    assert row is not None
+    assert row.status == "sent"
+
+    await app.engine.stop()

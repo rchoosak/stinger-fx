@@ -2,7 +2,6 @@
 
 from stinger_fx.backtest.base import BaseBacktester, Granularity
 from stinger_fx.backtest.file_backtester import FileBacktester
-from stinger_fx.backtest.order_router import OrderRouter
 from stinger_fx.backtest.replay_broker import SimBroker
 from stinger_fx.backtest.reports import BacktestReport, TradeRecord
 from stinger_fx.backtest.sweep import (
@@ -11,6 +10,7 @@ from stinger_fx.backtest.sweep import (
     SweepReport,
     enumerate_grid,
 )
+from stinger_fx.execution import OrderRouter
 
 __all__ = [
     "BacktestReport",
