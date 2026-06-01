@@ -239,6 +239,35 @@ async def test_replay_pending_resubmits_only_pending() -> None:
 
 
 @pytest.mark.asyncio
+async def test_replay_pending_routes_by_strategy_lookup() -> None:
+    bus = AsyncEventBus()
+    store = in_memory_store()
+    primary = _RecordingBroker(bus)
+    secondary = _RecordingBroker(bus)
+    brokers = {"s1": primary, "s2": secondary}
+    queue = OrderQueue(store, broker_lookup=lambda sid: brokers[sid])
+
+    with store.session() as s:
+        req = _req("route-1").model_copy(update={"strategy_id": "s2"})
+        s.add(PendingOrderRequestRow(
+            client_order_id=req.client_order_id,
+            strategy_id=req.strategy_id,
+            request_json=req.model_dump_json(),
+            enqueued_at=datetime.now(UTC),
+            status="pending",
+        ))
+        s.commit()
+
+    try:
+        replayed = await queue.replay_pending()
+        assert replayed == 1
+        assert primary.calls == []
+        assert [c.client_order_id for c in secondary.calls] == ["route-1"]
+    finally:
+        await bus.close()
+
+
+@pytest.mark.asyncio
 async def test_pending_count_reflects_state() -> None:
     """pending_count() returns the number of un-completed rows."""
     bus = AsyncEventBus()

@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from datetime import UTC, date, datetime
 from pathlib import Path
+from uuid import uuid4
 
 import pyarrow as pa
 import pyarrow.dataset as pads
@@ -44,6 +45,9 @@ BAR_SCHEMA = pa.schema(
         ("spread", pa.int64()),
     ]
 )
+
+TICK_DEDUPE_KEYS = ("time_ns", "bid", "ask", "last", "volume", "flags")
+BAR_DEDUPE_KEYS = ("time",)
 
 
 def _utc_date(ts: datetime) -> date:
@@ -99,7 +103,13 @@ class ParquetStore:
                 ],
                 schema=TICK_SCHEMA,
             )
-            self._append_day(self._day_file(folder, d), tbl, TICK_SCHEMA)
+            self._append_day(
+                self._day_file(folder, d),
+                tbl,
+                TICK_SCHEMA,
+                sort_by="time_ns",
+                dedupe_keys=TICK_DEDUPE_KEYS,
+            )
             n += len(day_rows)
         return n
 
@@ -135,18 +145,46 @@ class ParquetStore:
                 ],
                 schema=BAR_SCHEMA,
             )
-            self._append_day(self._day_file(folder, d), tbl, BAR_SCHEMA)
+            self._append_day(
+                self._day_file(folder, d),
+                tbl,
+                BAR_SCHEMA,
+                sort_by="time",
+                dedupe_keys=BAR_DEDUPE_KEYS,
+            )
             n += len(day_rows)
         return n
 
     @staticmethod
-    def _append_day(path: Path, new_table: pa.Table, schema: pa.Schema) -> None:
+    def _append_day(
+        path: Path,
+        new_table: pa.Table,
+        schema: pa.Schema,
+        *,
+        sort_by: str,
+        dedupe_keys: tuple[str, ...],
+    ) -> None:
         if path.exists():
-            existing = pq.read_table(path)
+            existing = pq.read_table(path, schema=schema)
             combined = pa.concat_tables([existing, new_table])
         else:
             combined = new_table
-        pq.write_table(combined, path, compression="zstd")
+        combined = _sort_and_dedupe(combined, schema, sort_by, dedupe_keys)
+        _write_table_atomic(combined, path)
+
+    def duplicate_count(self, symbol: str, tf: Timeframe, d: date) -> int:
+        """Return duplicate rows beyond the first for one daily partition."""
+        path = (
+            self._day_file(self._ticks_dir(symbol), d)
+            if tf is Timeframe.TICK
+            else self._day_file(self._bars_dir(symbol, tf), d)
+        )
+        if not path.exists():
+            return 0
+        schema = TICK_SCHEMA if tf is Timeframe.TICK else BAR_SCHEMA
+        keys = TICK_DEDUPE_KEYS if tf is Timeframe.TICK else BAR_DEDUPE_KEYS
+        table = pq.read_table(path, schema=schema)
+        return _duplicate_count(table, keys)
 
     # --- read ----------------------------------------------------------------
 
@@ -175,3 +213,36 @@ class ParquetStore:
             pads.field("time_ns") < pa.scalar(end, type=TICK_SCHEMA.field("time_ns").type)
         )
         return ds.to_table(filter=filt).sort_by("time_ns")
+
+
+def _sort_and_dedupe(
+    table: pa.Table,
+    schema: pa.Schema,
+    sort_by: str,
+    dedupe_keys: tuple[str, ...],
+) -> pa.Table:
+    """Sort a partition and drop duplicate keys, preserving the last row."""
+    if table.num_rows <= 1:
+        return table.cast(schema)
+    df = table.to_pandas()
+    df = df.drop_duplicates(subset=list(dedupe_keys), keep="last")
+    df = df.sort_values(sort_by, kind="mergesort")
+    return pa.Table.from_pandas(df, schema=schema, preserve_index=False)
+
+
+def _duplicate_count(table: pa.Table, keys: tuple[str, ...]) -> int:
+    if table.num_rows <= 1:
+        return 0
+    df = table.to_pandas()
+    return int(df.duplicated(subset=list(keys)).sum())
+
+
+def _write_table_atomic(table: pa.Table, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        pq.write_table(table, tmp, compression="zstd")
+        tmp.replace(path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from sqlmodel import select
@@ -42,6 +43,14 @@ logger = logging.getLogger("stinger.brokers.order_queue")
 # request to the right broker on replay (when the strategy_id is the only
 # routing information available from the persisted row).
 BrokerLookup = Callable[[str], BaseBroker]
+
+
+@dataclass(frozen=True)
+class ReplayedOrder:
+    """One recovered order request plus the broker result from replay."""
+
+    request: OrderRequest
+    result: OrderResult
 
 
 class OrderQueue:
@@ -108,11 +117,8 @@ class OrderQueue:
 
     # --- Replay -------------------------------------------------------------
 
-    async def replay_pending(self) -> int:
-        """Re-submit any rows still marked ``pending``.  Used at engine
-        startup to recover requests written before a previous crash.
-
-        Returns the number of rows replayed.
+    async def replay_pending_results(self) -> list[ReplayedOrder]:
+        """Re-submit rows still marked ``pending`` and return broker results.
 
         Note: this may produce duplicate broker-side orders if the broker
         actually executed the request before the crash. The trade-off is
@@ -129,10 +135,10 @@ class OrderQueue:
                 )
             )
         if not rows:
-            return 0
+            return []
 
         logger.warning("order_queue_replay rows=%s", len(rows))
-        replayed = 0
+        replayed: list[ReplayedOrder] = []
         for row in rows:
             req = OrderRequest.model_validate_json(row.request_json)
             broker = self._broker_lookup(req.strategy_id)
@@ -142,8 +148,12 @@ class OrderQueue:
                 self._mark_failed(row.id, error=f"replay {type(e).__name__}: {e}")
                 continue
             self._update_status(row.id, result)
-            replayed += 1
+            replayed.append(ReplayedOrder(request=req, result=result))
         return replayed
+
+    async def replay_pending(self) -> int:
+        """Re-submit pending rows and return the number replayed."""
+        return len(await self.replay_pending_results())
 
     # --- Introspection ------------------------------------------------------
 

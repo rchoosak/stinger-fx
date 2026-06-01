@@ -57,6 +57,7 @@ from stinger_fx.runtime import StingerApp
 def _write_multi_account_app_yaml(path: Path, data_dir: Path) -> None:
     path.write_text(
         "mode: normal\n"
+        "allow_unsafe_inprocess_mt5_multi_account: true\n"
         f"data_dir: {data_dir}\n"
         "brokers:\n"
         "  - id: demo_a\n"

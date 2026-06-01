@@ -234,6 +234,7 @@ class ParameterSweep:
             start=cfg.start,
             end=cfg.end,
             initial_balance=cfg.initial_balance,
+            symbol_contract_sizes=cfg.symbol_contract_sizes,
             slippage_pips=cfg.slippage_pips,
             data_source=cfg.data_source,
         )

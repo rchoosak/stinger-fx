@@ -27,6 +27,11 @@ broker:
 #   - id: hedge
 #     type: mt5
 #     mt5: { terminal_path: "", login: 22222, password: "...", server: "Demo" }
+#
+# Safety: more than one in-process MT5 account is rejected by default because
+# the MetaTrader5 Python SDK is process-global. Prefer one engine process per
+# terminal/account. Set this only for explicit lab testing:
+# allow_unsafe_inprocess_mt5_multi_account: true
 
 data_dir: ./data
 log_level: INFO

@@ -310,6 +310,7 @@ class WalkForward:
             start=fold.out_of_sample[0],
             end=fold.out_of_sample[1],
             initial_balance=cfg.initial_balance,
+            symbol_contract_sizes=cfg.symbol_contract_sizes,
             data_source=cfg.data_source,
         )
         bt = FileBacktester(

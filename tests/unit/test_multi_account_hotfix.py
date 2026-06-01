@@ -28,6 +28,7 @@ from stinger_fx.runtime import StingerApp
 def _write_multi_account_app_yaml(path: Path, data_dir: Path) -> None:
     path.write_text(
         "mode: normal\n"
+        "allow_unsafe_inprocess_mt5_multi_account: true\n"
         f"data_dir: {data_dir}\n"
         "brokers:\n"
         "  - id: demo_a\n"
@@ -59,6 +60,7 @@ def test_primary_broker_config_multi_account_returns_first() -> None:
     """When `brokers:` (list) is supplied, primary_broker_config returns the
     first entry — no AttributeError from `broker` being None."""
     cfg = AppConfig(
+        allow_unsafe_inprocess_mt5_multi_account=True,
         brokers=[
             BrokerConfig(id="demo_a", type="mt5", mt5=MT5Config()),
             BrokerConfig(id="demo_b", type="mt5", mt5=MT5Config()),
@@ -131,6 +133,27 @@ async def test_setup_runs_with_multi_account_config(monkeypatch, tmp_path: Path)
     assert len(list(app._pool.items())) == 2
 
     # Cleanup
+    for runner in list(app.runners.values()):
+        await runner.stop()
+    await app.engine.bus.close()  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_setup_logs_warning_when_unsafe_multi_mt5_enabled(
+    monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    _write_multi_account_app_yaml(config_dir / "app.yaml", tmp_path / "data")
+    _write_strategies_yaml(config_dir / "strategies.yaml")
+    (config_dir / "backtest.yaml").write_text("runs: []\n")
+    monkeypatch.setattr("stinger_fx.runtime.build_broker", lambda cfg, bus: _StubBroker(bus))
+
+    app = StingerApp(config_dir)
+    await app.setup()
+
+    assert "unsafe_inprocess_mt5_multi_account_enabled" in capsys.readouterr().out
+
     for runner in list(app.runners.values()):
         await runner.stop()
     await app.engine.bus.close()  # type: ignore[union-attr]

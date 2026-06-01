@@ -14,7 +14,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from stinger_fx.backtest.base import BaseBacktester
-from stinger_fx.backtest.order_router import OrderRouter
 from stinger_fx.backtest.playback import PlaybackThrottle
 from stinger_fx.backtest.replay_broker import SimBroker
 from stinger_fx.backtest.reports import BacktestReport
@@ -30,8 +29,9 @@ from stinger_fx.core.events import (
     SignalEvent,
     TickEvent,
 )
-from stinger_fx.data import BacktestRepo, SqliteStore, iter_bars, iter_ticks
+from stinger_fx.data import BacktestRepo, SqliteStore, iter_bars
 from stinger_fx.domain import Tick
+from stinger_fx.execution import OrderRouter
 from stinger_fx.strategies import (
     StrategyRunner,
     derive_magic,
@@ -84,6 +84,7 @@ class FileBacktester(BaseBacktester):
             initial_balance=cfg.initial_balance,
             slippage_pips=cfg.slippage_pips,
             slippage_fn=slippage_fn,
+            symbol_contract_sizes=cfg.symbol_contract_sizes,
         )
 
         strategy_cls = load_strategy_class(self._strategy_entry.class_path)
@@ -182,6 +183,7 @@ class FileBacktester(BaseBacktester):
                     "end": cfg.end.isoformat(),
                     "initial_balance": cfg.initial_balance,
                     "final_balance": report.final_balance,
+                    "symbol_contract_sizes": cfg.symbol_contract_sizes,
                     "trades": report.trades_to_jsonable(),
                 },
                 indent=2,
@@ -243,7 +245,12 @@ class FileBacktester(BaseBacktester):
                 ref = last_close.get(p.symbol)
                 if ref is None:
                     continue
-                mtm += (ref - p.open_price) * p.side.sign * p.volume * 100_000.0
+                mtm += (
+                    (ref - p.open_price)
+                    * p.side.sign
+                    * p.volume
+                    * broker.contract_size_for(p.symbol)
+                )
             equity_value = broker.balance + mtm
             equity_curve.append((bar.time, equity_value))
             # Live-backtest UIs subscribe to BacktestEquitySampleEvent for the
@@ -318,7 +325,7 @@ class FileBacktester(BaseBacktester):
                     )
 
         merged = heapq.merge(
-            *(_gen(sym, tbl) for sym, tbl in zip(symbols, per_symbol_tables)),
+            *(_gen(sym, tbl) for sym, tbl in zip(symbols, per_symbol_tables, strict=True)),
             key=lambda t: t.time,
         )
 
@@ -361,7 +368,12 @@ class FileBacktester(BaseBacktester):
                     ref = last_mid.get(p.symbol)
                     if ref is None:
                         continue
-                    mtm += (ref - p.open_price) * p.side.sign * p.volume * 100_000.0
+                    mtm += (
+                        (ref - p.open_price)
+                        * p.side.sign
+                        * p.volume
+                        * broker.contract_size_for(p.symbol)
+                    )
                 equity_value = broker.balance + mtm
                 equity_curve.append((tick.time, equity_value))
                 # Publish for live-backtest UIs (chart equity line). Rate is
