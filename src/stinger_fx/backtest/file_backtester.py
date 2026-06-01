@@ -24,7 +24,12 @@ from stinger_fx.config.models import BacktestRunConfig, StrategyEntry
 from stinger_fx.core import AsyncEventBus, SimClock
 from stinger_fx.core.errors import BacktestError
 from stinger_fx.core.event_bus import Subscription as BusSubscription
-from stinger_fx.core.events import BarEvent, SignalEvent, TickEvent
+from stinger_fx.core.events import (
+    BacktestEquitySampleEvent,
+    BarEvent,
+    SignalEvent,
+    TickEvent,
+)
 from stinger_fx.data import BacktestRepo, SqliteStore, iter_bars, iter_ticks
 from stinger_fx.domain import Tick
 from stinger_fx.strategies import (
@@ -47,11 +52,18 @@ class FileBacktester(BaseBacktester):
         parquet_root: Path,
         sqlite_store: SqliteStore | None = None,
         report_dir: Path | None = None,
+        bus: AsyncEventBus | None = None,
     ) -> None:
         self._strategy_entry = strategy
         self._parquet_root = parquet_root
         self._sqlite = sqlite_store
         self._report_dir = report_dir or Path("./data/backtests")
+        # Optional external bus — when supplied the backtester publishes
+        # tick/bar/signal/order/equity events to this shared bus instead of
+        # creating an isolated one. Live-backtest mode (web UI) uses this to
+        # subscribe SSE listeners to the running replay. CLI standalone path
+        # leaves it None and gets the legacy private-bus behavior.
+        self._external_bus = bus
 
     async def run(self, cfg: BacktestRunConfig) -> BacktestReport:
         if cfg.strategy_id != self._strategy_entry.id:
@@ -60,7 +72,7 @@ class FileBacktester(BaseBacktester):
                 f"strategy is {self._strategy_entry.id!r}"
             )
 
-        bus = AsyncEventBus()
+        bus = self._external_bus or AsyncEventBus()
         sim_clock = SimClock(cfg.start)
         slippage_fn = build_slippage_model(
             cfg.slippage_model,
@@ -131,7 +143,11 @@ class FileBacktester(BaseBacktester):
 
         await runner.stop()
         await router.detach()
-        await bus.close()
+        # Only close the bus we created. When the caller supplied an external
+        # bus (live-backtest mode), it owns the lifecycle — closing it here
+        # would tear down the web UI's other subscribers.
+        if self._external_bus is None:
+            await bus.close()
 
         finished_at = datetime.now(UTC)
         report = BacktestReport(
@@ -228,7 +244,16 @@ class FileBacktester(BaseBacktester):
                 if ref is None:
                     continue
                 mtm += (ref - p.open_price) * p.side.sign * p.volume * 100_000.0
-            equity_curve.append((bar.time, broker.balance + mtm))
+            equity_value = broker.balance + mtm
+            equity_curve.append((bar.time, equity_value))
+            # Live-backtest UIs subscribe to BacktestEquitySampleEvent for the
+            # equity curve. Internal-only when no external bus (cheap no-op
+            # subscribers).
+            await bus.publish(
+                BacktestEquitySampleEvent(
+                    time=bar.time, balance=broker.balance, equity=equity_value,
+                )
+            )
             count += 1
         return count
 
@@ -263,11 +288,39 @@ class FileBacktester(BaseBacktester):
 
         # Unique symbols from feed_list — ticks aren't tf-keyed
         symbols = sorted({sub.symbol for sub in cfg.feed_list})
-        tick_iters = [
-            iter_ticks(self._parquet_root, sym, cfg.start, cfg.end)
-            for sym in symbols
-        ]
-        merged = heapq.merge(*tick_iters, key=lambda t: t.time)
+
+        # Read each symbol's Arrow table on a worker thread so the loop
+        # stays responsive. `ParquetStore.read_ticks` materialises the
+        # full date-range table — for a 30-day XAUUSD window that's
+        # ~8M rows of pyarrow data, multiple seconds of pure-Python
+        # filtering. Doing it on the asyncio loop would freeze every
+        # SSE client and HTTP handler for the duration.
+        from stinger_fx.data.parquet_store import ParquetStore as _PS
+
+        def _load_table(sym: str):
+            return _PS(self._parquet_root).read_ticks(sym, cfg.start, cfg.end)
+
+        per_symbol_tables = await asyncio.gather(*[
+            asyncio.to_thread(_load_table, sym) for sym in symbols
+        ])
+
+        def _gen(sym: str, table):
+            for batch in table.to_batches():
+                for row in batch.to_pylist():
+                    yield Tick(
+                        symbol=sym,
+                        time=row["time_ns"],
+                        bid=row["bid"],
+                        ask=row["ask"],
+                        last=row.get("last") or 0.0,
+                        volume=row.get("volume") or 0,
+                        flags=row.get("flags") or 0,
+                    )
+
+        merged = heapq.merge(
+            *(_gen(sym, tbl) for sym, tbl in zip(symbols, per_symbol_tables)),
+            key=lambda t: t.time,
+        )
 
         last_mid: dict[str, float] = {}
         count = 0
@@ -309,7 +362,16 @@ class FileBacktester(BaseBacktester):
                     if ref is None:
                         continue
                     mtm += (ref - p.open_price) * p.side.sign * p.volume * 100_000.0
-                equity_curve.append((tick.time, broker.balance + mtm))
+                equity_value = broker.balance + mtm
+                equity_curve.append((tick.time, equity_value))
+                # Publish for live-backtest UIs (chart equity line). Rate is
+                # 1/minute of sim time, so it doesn't flood the bus even at
+                # max replay speed.
+                await bus.publish(
+                    BacktestEquitySampleEvent(
+                        time=tick.time, balance=broker.balance, equity=equity_value,
+                    )
+                )
                 last_equity_minute = tick_minute
             last_tick = tick
             count += 1

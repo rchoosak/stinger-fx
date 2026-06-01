@@ -230,6 +230,24 @@ class BrokerReconnectedEvent(Event):
     downtime_seconds: float = 0.0
 
 
+class BacktestEquitySampleEvent(Event):
+    """Periodic equity snapshot published by ``FileBacktester`` during replay.
+
+    Bar mode emits one per bar; tick mode emits one per UTC-minute boundary
+    (matches the existing ``equity_curve`` sampling cadence). Live-backtest
+    UIs subscribe to this so the equity chart can advance progressively
+    rather than waiting for the run to finish.
+
+    Time is the simulated bar/tick time, not wall-clock. ``balance`` is the
+    realised cash balance; ``equity`` = balance + open-position MTM at
+    sample time.
+    """
+
+    time: datetime
+    balance: float
+    equity: float
+
+
 class TickStreamUnsubscribedEvent(Event):
     """Broker stopped streaming ticks for a symbol.  Consumers that hold
     per-symbol state (e.g. ``MetricsCollector`` watchdog dict) should prune

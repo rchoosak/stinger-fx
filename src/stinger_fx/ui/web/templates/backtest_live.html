@@ -1,0 +1,284 @@
+{% extends "base.html" %}
+{% block title %}{{ run_id }} · Live · Stinger-Fx{% endblock %}
+{% block content %}
+<section class="panel widest">
+  <h2>{{ run_id }} · Live backtest</h2>
+
+  <div id="controls" style="margin: 1em 0; display: flex; gap: 1em; align-items: center; flex-wrap: wrap;">
+    <label>Speed:
+      <select id="speed-select">
+        <option value="1">1× (real-time)</option>
+        <option value="10">10×</option>
+        <option value="60" selected>60× (1 min/sec)</option>
+        <option value="300">300×</option>
+        <option value="3600">3600× (1 hr/sec)</option>
+      </select>
+    </label>
+    <button id="btn-start" type="button">▶ Start</button>
+    <button id="btn-stop" type="button" disabled>■ Stop</button>
+    <span class="muted" id="state-label">idle</span>
+  </div>
+
+  <div id="ticker" style="font-family: ui-monospace, monospace; padding: 0.5em 0; min-height: 1.5em;">
+    <span class="muted">waiting for ticks…</span>
+  </div>
+
+  <h3>Equity</h3>
+  <div class="chart-wrap">
+    <canvas id="equity-chart" height="300"></canvas>
+  </div>
+
+  <h3 style="margin-top: 1.5em;">Candles (M1)</h3>
+  <div class="chart-wrap">
+    <canvas id="candle-chart" height="380"></canvas>
+  </div>
+  <p class="muted small" id="candle-status">No bars yet — click Start.</p>
+</section>
+<p class="muted"><a href="/backtest">← back to backtest list</a></p>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial@0.2.1/dist/chartjs-chart-financial.min.js"></script>
+<script>
+(function () {
+  const RUN_ID = {{ run_id | tojson }};
+  const btnStart  = document.getElementById('btn-start');
+  const btnStop   = document.getElementById('btn-stop');
+  const speedSel  = document.getElementById('speed-select');
+  const stateLbl  = document.getElementById('state-label');
+  const ticker    = document.getElementById('ticker');
+  const candleStatus = document.getElementById('candle-status');
+
+  // --- chart setup -----------------------------------------------------
+
+  const equityChart = new Chart(document.getElementById('equity-chart'), {
+    type: 'line',
+    data: {
+      datasets: [
+        {
+          label: 'Equity',
+          data: [],
+          borderColor: '#3b82f6',
+          backgroundColor: 'rgba(59,130,246,0.08)',
+          parsing: false,
+          fill: true,
+          tension: 0.15,
+          pointRadius: 0,
+        },
+        {
+          label: 'Buy fills',
+          data: [],
+          type: 'scatter',
+          parsing: false,
+          backgroundColor: '#10b981',
+          borderColor: '#10b981',
+          pointStyle: 'triangle',
+          pointRadius: 7,
+        },
+        {
+          label: 'Sell fills',
+          data: [],
+          type: 'scatter',
+          parsing: false,
+          backgroundColor: '#ef4444',
+          borderColor: '#ef4444',
+          pointStyle: 'triangle',
+          rotation: 180,
+          pointRadius: 7,
+        },
+      ],
+    },
+    options: {
+      animation: false,
+      scales: {
+        x: { type: 'time', time: { unit: 'minute' } },
+        y: { beginAtZero: false },
+      },
+      plugins: { legend: { position: 'top' } },
+    },
+  });
+
+  const candleChart = new Chart(document.getElementById('candle-chart'), {
+    type: 'candlestick',
+    data: {
+      datasets: [
+        {
+          label: 'OHLC',
+          data: [],
+          // NOTE: the financial plugin auto-parses {x, o, h, l, c} only
+          // when `parsing` is enabled (default). Leaving it off here.
+          color: { up: '#10b981', down: '#ef4444', unchanged: '#6b7280' },
+          borderColor: { up: '#10b981', down: '#ef4444', unchanged: '#6b7280' },
+        },
+      ],
+    },
+    options: {
+      animation: false,
+      scales: {
+        x: { type: 'time', time: { unit: 'minute' } },
+        y: { beginAtZero: false },
+      },
+      plugins: { legend: { display: false } },
+    },
+  });
+
+  // Cap each dataset to avoid an unbounded growth at high replay speeds —
+  // the browser starts to chug past ~10k points on the line chart.
+  const MAX_EQUITY_POINTS = 5000;
+  const MAX_CANDLES       = 1500;
+  const MAX_TRADE_MARKERS = 500;
+
+  function trimDataset(ds, max) {
+    if (ds.data.length > max) ds.data.splice(0, ds.data.length - max);
+  }
+
+  // Batch chart re-renders to one per animation frame. Without this, a
+  // high-speed replay (300x+) fires ~hundreds of bar/equity events per
+  // second — calling chart.update() on each one freezes the browser tab
+  // because each call walks the dataset and re-tessellates the canvas.
+  // With rAF batching we run at most ~60 redraws/sec regardless of how
+  // many events arrive between frames, while still showing every datapoint.
+  let equityDirty = false;
+  let candleDirty = false;
+  function scheduleUpdates() {
+    if (!equityDirty && !candleDirty) return;
+    requestAnimationFrame(() => {
+      if (equityDirty) { equityChart.update('none'); equityDirty = false; }
+      if (candleDirty) { candleChart.update('none'); candleDirty = false; }
+    });
+  }
+
+  // --- EventSource lifecycle ------------------------------------------
+
+  let es = null;
+
+  function openStream() {
+    if (es) { es.close(); }
+    es = new EventSource('/stream/backtest-live');
+
+    es.addEventListener('tick', (e) => {
+      const t = JSON.parse(e.data);
+      ticker.innerHTML =
+        `<strong>${t.symbol}</strong> &nbsp; bid <code>${t.bid.toFixed(3)}</code> ` +
+        `· ask <code>${t.ask.toFixed(3)}</code> ` +
+        `· spread <code>${((t.ask - t.bid) * 100).toFixed(1)}¢</code> ` +
+        `<span class="muted small">${t.time.slice(11, 19)}</span>`;
+    });
+
+    es.addEventListener('bar', (e) => {
+      const b = JSON.parse(e.data);
+      // Only M1 bars on the candle chart — strategies can be on higher tf
+      // but the chart we render here is the entry timeframe.
+      if (b.timeframe !== 'M1') return;
+      const candleDs = candleChart.data.datasets[0];
+      candleDs.data.push({
+        x: new Date(b.time).getTime(),
+        o: b.open, h: b.high, l: b.low, c: b.close,
+      });
+      trimDataset(candleDs, MAX_CANDLES);
+      candleDirty = true;
+      scheduleUpdates();
+      candleStatus.textContent =
+        `${candleDs.data.length} bar(s) · latest close ${b.close.toFixed(3)}`;
+    });
+
+    es.addEventListener('equity', (e) => {
+      const p = JSON.parse(e.data);
+      const eqDs = equityChart.data.datasets[0];
+      eqDs.data.push({ x: new Date(p.time).getTime(), y: p.equity });
+      trimDataset(eqDs, MAX_EQUITY_POINTS);
+      equityDirty = true;
+      scheduleUpdates();
+    });
+
+    es.addEventListener('trade', (e) => {
+      const tr = JSON.parse(e.data);
+      const ts = tr.ts ? new Date(tr.ts).getTime() : Date.now();
+      const ds = tr.side === 'buy'
+        ? equityChart.data.datasets[1]    // buy fills (green ▲)
+        : equityChart.data.datasets[2];   // sell fills (red ▼)
+      // Plot at the entry/exit price on the equity axis. Equity chart's y
+      // is balance, so we re-use the latest equity value as the marker y.
+      const eqDs = equityChart.data.datasets[0];
+      const yVal = eqDs.data.length ? eqDs.data[eqDs.data.length - 1].y : null;
+      if (yVal !== null) {
+        ds.data.push({ x: ts, y: yVal });
+        trimDataset(ds, MAX_TRADE_MARKERS);
+        equityDirty = true;
+        scheduleUpdates();
+      }
+    });
+
+    es.addEventListener('ping', () => { /* heartbeat */ });
+
+    es.onerror = (err) => {
+      console.warn('SSE error', err);
+      // Don't auto-reopen — Start/Stop drives this.
+    };
+  }
+
+  function closeStream() {
+    if (es) { es.close(); es = null; }
+  }
+
+  // --- button wiring --------------------------------------------------
+
+  async function refreshStatus() {
+    const resp = await fetch(`/backtest-live/${RUN_ID}/status`);
+    if (!resp.ok) return;
+    const st = await resp.json();
+    if (!st.enabled) {
+      stateLbl.textContent = '(live mode disabled on this server)';
+      btnStart.disabled = true;
+      btnStop.disabled = true;
+      return;
+    }
+    if (st.running) {
+      btnStart.disabled = true;
+      btnStop.disabled = false;
+      stateLbl.textContent = `running · ${st.run_id} @ ${st.speed}×`;
+      if (!es) openStream();
+    } else {
+      btnStart.disabled = false;
+      btnStop.disabled = true;
+      stateLbl.textContent = 'idle';
+    }
+  }
+
+  btnStart.addEventListener('click', async () => {
+    btnStart.disabled = true;
+    const speed = parseFloat(speedSel.value);
+    // Reset chart datasets for a fresh run.
+    for (const ds of equityChart.data.datasets) ds.data.length = 0;
+    candleChart.data.datasets[0].data.length = 0;
+    equityChart.update('none'); candleChart.update('none');
+    candleStatus.textContent = 'No bars yet — waiting for data…';
+    openStream();
+    const resp = await fetch(
+      `/backtest-live/${RUN_ID}/start?speed=${speed}`,
+      { method: 'POST' },
+    );
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+      stateLbl.textContent = `error: ${err.detail || resp.statusText}`;
+      closeStream();
+      btnStart.disabled = false;
+      return;
+    }
+    await refreshStatus();
+  });
+
+  btnStop.addEventListener('click', async () => {
+    btnStop.disabled = true;
+    await fetch(`/backtest-live/${RUN_ID}/stop`, { method: 'POST' });
+    closeStream();
+    await refreshStatus();
+  });
+
+  // Initial status fetch + light poll so a backtest started in another tab
+  // is reflected here without a manual refresh.
+  refreshStatus();
+  setInterval(refreshStatus, 5000);
+})();
+</script>
+{% endblock %}

@@ -40,9 +40,11 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from stinger_fx.brokers.pool import BrokerPool  # noqa: E402
+from stinger_fx.config import load_all  # noqa: E402
 from stinger_fx.core.event_bus import AsyncEventBus  # noqa: E402
 from stinger_fx.data import SqliteStore  # noqa: E402
 from stinger_fx.ui.handle import EngineHandle  # noqa: E402
+from stinger_fx.ui.web.live_backtest import LiveBacktestController  # noqa: E402
 from stinger_fx.ui.web.server import create_app  # noqa: E402
 
 
@@ -57,6 +59,10 @@ def main(
         Path("data"), "--data-dir",
         help="Directory holding backtests/ and stinger.db",
     ),
+    config_dir: Path = typer.Option(
+        Path("config"), "--config-dir", "-c",
+        help="YAML config dir — used to look up live-backtest run ids",
+    ),
 ) -> None:
     """Start a read-only backtest-viewer web UI."""
     sqlite_path = data_dir / "stinger.db"
@@ -70,7 +76,7 @@ def main(
 
     sqlite_store = SqliteStore(sqlite_path)
     # Empty BrokerPool — pages that require a live broker will 500, but
-    # the /backtest/* pages this server is for do not touch it.
+    # the /backtest/* and /backtest-live/* pages do not touch it.
     handle = EngineHandle(
         bus=AsyncEventBus(),
         brokers=BrokerPool(),
@@ -81,8 +87,30 @@ def main(
         sqlite_store=sqlite_store,
     )
 
+    # Attach the live-backtest controller so /backtest-live/* endpoints
+    # work. The controller spawns the backtester on the SAME asyncio loop
+    # as the FastAPI server + shares the bus, so SSE clients see every
+    # event the replay publishes.
+    cfg = load_all(config_dir)
+    fastapi_app.state.live_bt_controller = LiveBacktestController(
+        handle=handle,
+        cfg=cfg,
+        sqlite_store=sqlite_store,
+        report_dir=data_dir / "backtests",
+    )
+
     typer.echo(f"backtest viewer → http://{host}:{port}/backtest")
+    typer.echo(f"live backtest  → http://{host}:{port}/backtest-live/<run_id>")
     typer.echo("(dashboard / live tick stream will 500 — no engine attached)")
+    # Configure Python's root logger BEFORE uvicorn.run so live-backtest
+    # status messages (and any backtester errors) actually surface.
+    # uvicorn's own access log stays at WARNING via its log_config so
+    # we don't drown in request lines.
+    import logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     uvicorn.run(fastapi_app, host=host, port=port, log_level="warning")
 
 

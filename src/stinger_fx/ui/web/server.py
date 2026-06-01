@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time as _time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +27,7 @@ from fastapi.templating import Jinja2Templates
 from sse_starlette.sse import EventSourceResponse
 
 from stinger_fx.core.events import (
+    BacktestEquitySampleEvent,
     BarEvent,
     DecisionEvent,
     OrderFilledEvent,
@@ -97,6 +99,10 @@ def create_app(
     )
     # Best-known time the engine entered service — used by /health.
     app.state.started_at = datetime.now().isoformat()
+    # Optional LiveBacktestController — when None, the /backtest-live/*
+    # endpoints return 503. The standalone viewer (scripts/serve_backtest_ui.py)
+    # attaches one; the full live-engine path does too.
+    app.state.live_bt_controller = None
 
     app.mount("/static", StaticFiles(directory=str(_HERE / "static")), name="static")
 
@@ -415,6 +421,183 @@ def create_app(
             random_seed=seed,
         )
         return JSONResponse(result.to_json())
+
+    # --- Live backtest (SSE-driven replay viewer) -------------------------
+    #
+    # The static `/backtest/{run_id}` views above show a finished run from
+    # sidecar JSON. These routes let the operator run a backtest *inside*
+    # the web process and watch the chart move event-by-event over SSE.
+    # Gated on `app.state.live_bt_controller` being attached — the standalone
+    # viewer script wires it up; pure read-only deployments leave it None.
+
+    @app.get("/backtest-live/{run_id}", response_class=HTMLResponse)
+    async def backtest_live_page(run_id: str, request: Request):
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="backtest_live.html",
+            context={"run_id": run_id},
+        )
+
+    @app.post("/backtest-live/{run_id}/start")
+    async def backtest_live_start(run_id: str, speed: float = 1.0):
+        from fastapi.responses import JSONResponse
+
+        from stinger_fx.ui.web.live_backtest import LiveBacktestError
+
+        controller = app.state.live_bt_controller
+        if controller is None:
+            raise HTTPException(503, "live backtest not enabled in this server")
+        try:
+            await controller.start(run_id, speed)
+        except LiveBacktestError as e:
+            # 409 for state conflicts (already running, bad args); 404 if the
+            # message hints at a missing run id — keep it simple, both map to
+            # the same human-readable detail.
+            code = 404 if "no backtest run" in str(e) else 409
+            raise HTTPException(code, str(e)) from e
+        return JSONResponse(controller.status)
+
+    @app.post("/backtest-live/{run_id}/stop")
+    async def backtest_live_stop(run_id: str):
+        from fastapi.responses import JSONResponse
+
+        controller = app.state.live_bt_controller
+        if controller is None:
+            raise HTTPException(503, "live backtest not enabled in this server")
+        await controller.stop()
+        return JSONResponse({"running": False, "stopped": run_id})
+
+    @app.get("/backtest-live/{run_id}/status")
+    async def backtest_live_status(run_id: str):
+        """Cheap poll endpoint — used by the page to render the Start/Stop
+        button state without an extra round of SSE plumbing."""
+        from fastapi.responses import JSONResponse
+
+        controller = app.state.live_bt_controller
+        if controller is None:
+            return JSONResponse({"running": False, "enabled": False})
+        return JSONResponse({**controller.status, "enabled": True})
+
+    @app.get("/stream/backtest-live")
+    async def stream_backtest_live(request: Request):
+        """SSE feed for the live backtest page.
+
+        Forwards four event types from the shared bus to the browser:
+
+          * ``tick``   — last-write-wins per symbol at 10 Hz (subsampled to
+                         keep the SSE queue from drowning at high speed).
+          * ``bar``    — closed BarEvent only.
+          * ``trade``  — OrderFilledEvent (chart drops ▲/▼ markers).
+          * ``equity`` — BacktestEquitySampleEvent (per-minute progress).
+
+        Unlike `/stream/events` (which lives for the engine's lifetime),
+        this stream unsubscribes its handlers on disconnect so repeated
+        Start/Stop cycles don't leak subscriptions onto the bus.
+        """
+        queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=500)
+
+        # Subsample tick stream: 10 Hz per symbol max. At speed=60 the raw
+        # rate is ~5,500 ticks/sec — browser would drown.
+        MIN_TICK_INTERVAL_SEC = 0.1
+        last_tick_emit: dict[str, float] = {}
+
+        def _enqueue(payload: dict[str, str]) -> None:
+            if queue.full():
+                try:
+                    queue.get_nowait()  # drop oldest (bursty publishers)
+                except asyncio.QueueEmpty:
+                    pass
+            queue.put_nowait(payload)
+
+        async def on_tick(evt: TickEvent) -> None:
+            now = _time.monotonic()
+            last = last_tick_emit.get(evt.tick.symbol, 0.0)
+            if now - last < MIN_TICK_INTERVAL_SEC:
+                return
+            last_tick_emit[evt.tick.symbol] = now
+            _enqueue({
+                "event": "tick",
+                "data": json.dumps({
+                    "symbol": evt.tick.symbol,
+                    "time": evt.tick.time.isoformat(),
+                    "bid": evt.tick.bid,
+                    "ask": evt.tick.ask,
+                }),
+            })
+
+        async def on_bar(evt: BarEvent) -> None:
+            if not evt.bar.is_closed:
+                return
+            _enqueue({
+                "event": "bar",
+                "data": json.dumps({
+                    "symbol": evt.bar.symbol,
+                    "timeframe": evt.bar.timeframe.value,
+                    "time": evt.bar.time.isoformat(),
+                    "open": evt.bar.open,
+                    "high": evt.bar.high,
+                    "low": evt.bar.low,
+                    "close": evt.bar.close,
+                }),
+            })
+
+        async def on_trade(evt: OrderFilledEvent) -> None:
+            _enqueue({
+                "event": "trade",
+                "data": json.dumps({
+                    "strategy": evt.order.strategy_id,
+                    "symbol": evt.order.symbol,
+                    "side": evt.order.side.value,
+                    "volume": evt.order.volume,
+                    "price": evt.order.fill_price,
+                    "ts": (
+                        evt.order.filled_at.isoformat()
+                        if evt.order.filled_at else None
+                    ),
+                }),
+            })
+
+        async def on_equity(evt: BacktestEquitySampleEvent) -> None:
+            _enqueue({
+                "event": "equity",
+                "data": json.dumps({
+                    "time": evt.time.isoformat(),
+                    "balance": evt.balance,
+                    "equity": evt.equity,
+                }),
+            })
+
+        # Capture subscriptions so we can unsubscribe on client disconnect.
+        subs = [
+            handle.bus.subscribe(TickEvent, on_tick, name="web.bt_live.tick"),
+            handle.bus.subscribe(BarEvent, on_bar, name="web.bt_live.bar"),
+            handle.bus.subscribe(OrderFilledEvent, on_trade, name="web.bt_live.fill"),
+            handle.bus.subscribe(
+                BacktestEquitySampleEvent, on_equity, name="web.bt_live.equity",
+            ),
+        ]
+
+        async def gen():
+            try:
+                while True:
+                    if await request.is_disconnected():
+                        return
+                    try:
+                        msg = await asyncio.wait_for(queue.get(), timeout=15)
+                    except TimeoutError:
+                        yield {"event": "ping", "data": ""}
+                        continue
+                    yield msg
+            except asyncio.CancelledError:
+                return
+            finally:
+                for sub in subs:
+                    try:
+                        await sub.unsubscribe()
+                    except Exception:
+                        logger.exception("failed to unsubscribe SSE handler")
+
+        return EventSourceResponse(gen())
 
     # --- Portfolio aggregation (Phase 7.A) -------------------------------
 

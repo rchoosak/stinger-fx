@@ -28,6 +28,41 @@ runs:
   #   stinger-fx backtest run --run-id xauusd_may2026
   # Optional throttle for visual / debug:
   #   stinger-fx backtest run --run-id xauusd_may2026 --speed 60
+  # Tiny EURUSD smoke for live-backtest mode UI debugging — 180 ticks
+  # over 3 minutes, MACrossover strategy (single-feed M1).  Matches the
+  # `test_sse_stream_delivers_events_during_run` integration fixture so
+  # if this works in the browser, the live wiring is fully functional.
+  - id: eurusd_3min_smoke
+    mode: file
+    strategy_id: ma_eurusd_m15
+    symbol: EURUSD
+    timeframe: M1
+    start: 2024-01-01T00:00:00Z
+    end: 2024-01-01T00:03:00Z
+    initial_balance: 10000.0
+    slippage_pips: 0.5
+    granularity: tick
+    data_source: ./data/parquet
+
+  # Tiny single-day variant for live-backtest smoke testing — same
+  # config as xauusd_may2026 but only May 1 so the UI shows movement
+  # within seconds instead of minutes.
+  - id: xauusd_may2026_smoke
+    mode: file
+    strategy_id: orb_xauusd_may2026
+    feeds:
+      - symbol: XAUUSD
+        timeframe: M1
+      - symbol: XAUUSD
+        timeframe: M5
+    start: 2026-05-01T00:00:00Z
+    end: 2026-05-02T00:00:00Z
+    initial_balance: 10000.0
+    slippage_model: spread
+    slippage_pips: 0.0
+    granularity: tick
+    data_source: ./data/parquet
+
   - id: xauusd_may2026
     mode: file
     strategy_id: orb_xauusd_may2026
