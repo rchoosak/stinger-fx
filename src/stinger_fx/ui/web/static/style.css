@@ -52,7 +52,7 @@ footer {
 }
 
 .panel.wide { grid-column: span 1; }
-.panel.widest { grid-column: span 2; max-height: 280px; overflow: hidden; }
+.panel.widest { grid-column: span 2; }
 
 .panel h2 {
   margin: 0 0 8px 0;
