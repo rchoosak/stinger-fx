@@ -1,236 +1,74 @@
 {% extends "base.html" %}
 {% block title %}{{ run_id }} · Replay · Stinger-Fx{% endblock %}
 {% block content %}
-<section class="panel widest">
-  <h2>{{ run_id }} · {{ meta.strategy_id }} · {{ meta.symbol }} {{ meta.timeframe }}</h2>
-  <p class="muted">
-    {{ meta.start[:19] | replace("T", " ") }} → {{ meta.end[:19] | replace("T", " ") }}
-    · trades: {{ meta.trades | length }}
-    · initial: {{ meta.initial_balance }}
-    · final: {{ meta.final_balance }}
-  </p>
-  <div class="chart-wrap">
-    <canvas id="replay-chart" height="380"></canvas>
+{% set trades = meta.trades or [] %}
+{% set initial = meta.initial_balance | float %}
+{% set final = meta.final_balance | float %}
+{% set net = final - initial %}
+{% set wins = trades | selectattr("pnl", "ge", 0) | list | length %}
+{% set losses = trades | selectattr("pnl", "lt", 0) | list | length %}
+
+<section class="panel widest replay-dashboard" id="backtest-replay" data-run-id="{{ run_id }}">
+  <div class="replay-header">
+    <div>
+      <p class="eyebrow">Completed backtest</p>
+      <h2>{{ run_id }}</h2>
+      <p class="muted replay-meta">
+        <span>{{ meta.strategy_id }} · {{ meta.symbol }} {{ meta.timeframe }}</span>
+        <span>{{ meta.start[:19] | replace("T", " ") }} → {{ meta.end[:19] | replace("T", " ") }}</span>
+      </p>
+    </div>
+    <a class="btn-link" href="/backtest">Back to list</a>
   </div>
-  <h3 style="margin-top: 1.5em;">Candlestick · {{ meta.symbol }} {{ meta.timeframe }}</h3>
-  <div class="chart-wrap">
-    <canvas id="candle-chart" height="380"></canvas>
+
+  <div class="metric-strip" aria-label="Backtest summary">
+    <div class="metric-card">
+      <span>Initial</span>
+      <strong>{{ "%.2f" | format(initial) }}</strong>
+    </div>
+    <div class="metric-card">
+      <span>Final</span>
+      <strong>{{ "%.2f" | format(final) }}</strong>
+    </div>
+    <div class="metric-card {{ 'profit' if net >= 0 else 'loss' }}">
+      <span>Net PnL</span>
+      <strong>{{ "%+.2f" | format(net) }}</strong>
+    </div>
+    <div class="metric-card">
+      <span>Trades</span>
+      <strong>{{ trades | length }}</strong>
+    </div>
+    <div class="metric-card">
+      <span>Wins / Losses</span>
+      <strong>{{ wins }} / {{ losses }}</strong>
+    </div>
   </div>
-  <p class="muted small" id="candle-status">Loading candles…</p>
+
+  <div class="replay-chart-grid">
+    <section class="chart-panel">
+      <div class="chart-heading">
+        <h3>Equity Curve</h3>
+        <p class="muted small">Entries and exits are projected onto equity at trade time.</p>
+      </div>
+      <div class="chart-wrap replay-chart-wrap">
+        <canvas id="replay-chart"></canvas>
+      </div>
+    </section>
+
+    <section class="chart-panel">
+      <div class="chart-heading">
+        <h3>Candlestick · {{ meta.symbol }} {{ meta.timeframe }}</h3>
+        <p class="muted small" id="candle-status">Loading candles...</p>
+      </div>
+      <div class="chart-wrap replay-chart-wrap candle-chart-wrap">
+        <canvas id="candle-chart"></canvas>
+      </div>
+    </section>
+  </div>
 </section>
-<p class="muted"><a href="/backtest">← back to backtest list</a></p>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial@0.2.1/dist/chartjs-chart-financial.min.js"></script>
-<script>
-(async function () {
-  const resp = await fetch(`/backtest/{{ run_id }}/data.json`);
-  if (!resp.ok) { console.error("data fetch failed"); return; }
-  const data = await resp.json();
-
-  // Equity curve → main line
-  const equityPoints = (data.equity || []).map(p => ({ x: p.time, y: p.equity }));
-
-  // Trade markers: green ▲ at entry, red ▼ at exit (relative to where the
-  // equity curve sits at that timestamp — we don't know the equity at the
-  // exact trade timestamp without interpolation; use the trade's own
-  // close_price baseline as the marker y if the equity curve is empty,
-  // otherwise linearly interpolate the equity value at the trade time).
-  function interpEquity(tIso) {
-    const t = new Date(tIso).getTime();
-    if (!equityPoints.length) return null;
-    let prev = equityPoints[0];
-    for (let i = 1; i < equityPoints.length; i++) {
-      const cur = equityPoints[i];
-      const tPrev = new Date(prev.x).getTime();
-      const tCur  = new Date(cur.x).getTime();
-      if (t >= tPrev && t <= tCur) {
-        const frac = tCur === tPrev ? 0 : (t - tPrev) / (tCur - tPrev);
-        return prev.y + frac * (cur.y - prev.y);
-      }
-      prev = cur;
-    }
-    return prev.y;
-  }
-
-  const entries = [];
-  const exitsProfit = [];
-  const exitsLoss = [];
-  for (const tr of data.meta.trades || []) {
-    const entryY = interpEquity(tr.open_ts);
-    const exitY  = interpEquity(tr.close_ts);
-    if (entryY != null) entries.push({ x: tr.open_ts, y: entryY, side: tr.side });
-    if (exitY != null) {
-      const pt = { x: tr.close_ts, y: exitY, pnl: tr.pnl };
-      (tr.pnl >= 0 ? exitsProfit : exitsLoss).push(pt);
-    }
-  }
-
-  const ctx = document.getElementById("replay-chart").getContext("2d");
-  new Chart(ctx, {
-    type: "line",
-    data: {
-      datasets: [
-        {
-          label: "Equity",
-          data: equityPoints,
-          borderColor: "#58a6ff",
-          backgroundColor: "rgba(88,166,255,0.08)",
-          fill: true,
-          tension: 0,
-          pointRadius: 0,
-          borderWidth: 1.5,
-          parsing: false,
-        },
-        {
-          label: "Entry",
-          type: "scatter",
-          data: entries,
-          backgroundColor: "#3fb950",
-          pointStyle: "triangle",
-          radius: 6,
-          parsing: false,
-        },
-        {
-          label: "Exit (profit)",
-          type: "scatter",
-          data: exitsProfit,
-          backgroundColor: "#3fb950",
-          pointStyle: "rectRot",
-          radius: 5,
-          parsing: false,
-        },
-        {
-          label: "Exit (loss)",
-          type: "scatter",
-          data: exitsLoss,
-          backgroundColor: "#f85149",
-          pointStyle: "rectRot",
-          radius: 5,
-          parsing: false,
-        },
-      ],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      scales: {
-        x: {
-          type: "time",
-          ticks: { color: "#8b949e" },
-          grid: { color: "#21262d" },
-        },
-        y: {
-          ticks: { color: "#8b949e" },
-          grid: { color: "#21262d" },
-        },
-      },
-      plugins: {
-        legend: { labels: { color: "#e6edf3" } },
-        tooltip: {
-          callbacks: {
-            label: (ctx) => {
-              const r = ctx.raw;
-              if (ctx.dataset.label === "Equity") return `equity: ${r.y.toFixed(2)}`;
-              if (ctx.dataset.label === "Entry") return `entry · ${r.side.toUpperCase()}`;
-              return `exit · pnl ${r.pnl >= 0 ? "+" : ""}${r.pnl}`;
-            },
-          },
-        },
-      },
-    },
-  });
-})();
-
-// --- Candlestick overlay ----------------------------------------------------
-(async function () {
-  const status = document.getElementById("candle-status");
-  const resp = await fetch(`/backtest/{{ run_id }}/candles.json`);
-  if (!resp.ok) { status.textContent = "candle data unavailable"; return; }
-  const data = await resp.json();
-  const bars = data.candles || [];
-  if (bars.length === 0) {
-    status.textContent = "no bar data found for this run (run `stinger-fx data download` first)";
-    return;
-  }
-  status.textContent = `${bars.length} bars · ${bars.length === 5000 ? "(truncated)" : ""}`;
-
-  const ohlc = bars.map(b => ({
-    x: new Date(b.time).getTime(),
-    o: b.open, h: b.high, l: b.low, c: b.close,
-  }));
-
-  // Trade markers on candle chart — use bar's close as y-coord since the
-  // candle's own price domain is what's plotted (vs equity domain above).
-  const entries = [];
-  const exitsProfit = [];
-  const exitsLoss = [];
-  for (const tr of (data.candles ? {{ meta.trades | tojson | safe }} : [])) {
-    entries.push({ x: new Date(tr.open_ts).getTime(), y: tr.open_price, side: tr.side });
-    const pt = { x: new Date(tr.close_ts).getTime(), y: tr.close_price, pnl: tr.pnl };
-    (tr.pnl >= 0 ? exitsProfit : exitsLoss).push(pt);
-  }
-
-  const ctxC = document.getElementById("candle-chart").getContext("2d");
-  new Chart(ctxC, {
-    type: "candlestick",
-    data: {
-      datasets: [
-        {
-          label: "OHLC",
-          data: ohlc,
-          color: { up: "#3fb950", down: "#f85149", unchanged: "#8b949e" },
-          borderColor: { up: "#3fb950", down: "#f85149", unchanged: "#8b949e" },
-        },
-        {
-          label: "Entry",
-          type: "scatter",
-          data: entries,
-          backgroundColor: "#58a6ff",
-          pointStyle: "triangle",
-          radius: 6,
-          parsing: false,
-        },
-        {
-          label: "Exit (profit)",
-          type: "scatter",
-          data: exitsProfit,
-          backgroundColor: "#3fb950",
-          pointStyle: "rectRot",
-          radius: 5,
-          parsing: false,
-        },
-        {
-          label: "Exit (loss)",
-          type: "scatter",
-          data: exitsLoss,
-          backgroundColor: "#f85149",
-          pointStyle: "rectRot",
-          radius: 5,
-          parsing: false,
-        },
-      ],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      scales: {
-        x: {
-          type: "time",
-          ticks: { color: "#8b949e" },
-          grid: { color: "#21262d" },
-        },
-        y: {
-          ticks: { color: "#8b949e" },
-          grid: { color: "#21262d" },
-        },
-      },
-      plugins: {
-        legend: { labels: { color: "#e6edf3" } },
-      },
-    },
-  });
-})();
-</script>
+<script src="/static/backtest_replay.js"></script>
 {% endblock %}
