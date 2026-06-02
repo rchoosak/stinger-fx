@@ -28,6 +28,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from stinger_fx.core.events import (
     BacktestEquitySampleEvent,
+    BacktestTradeClosedEvent,
     BarEvent,
     DecisionEvent,
     OrderFilledEvent,
@@ -542,9 +543,14 @@ def create_app(
             })
 
         async def on_trade(evt: OrderFilledEvent) -> None:
+            # `ticket` is included so the Orders table can match the row
+            # this event opens with the later `close` event that fills in
+            # close_price / close_ts / pnl. Without it the JS would have to
+            # guess which row to update.
             _enqueue({
                 "event": "trade",
                 "data": json.dumps({
+                    "ticket": evt.order.ticket,
                     "strategy": evt.order.strategy_id,
                     "symbol": evt.order.symbol,
                     "side": evt.order.side.value,
@@ -554,6 +560,20 @@ def create_app(
                         evt.order.filled_at.isoformat()
                         if evt.order.filled_at else None
                     ),
+                }),
+            })
+
+        async def on_close(evt: BacktestTradeClosedEvent) -> None:
+            # Update payload for the existing row identified by ticket.
+            # Only carries the fields that change at close — the rest
+            # were already sent in the `trade` event.
+            _enqueue({
+                "event": "close",
+                "data": json.dumps({
+                    "ticket": evt.ticket,
+                    "close_price": evt.close_price,
+                    "close_ts": evt.close_ts.isoformat(),
+                    "pnl": evt.pnl,
                 }),
             })
 
@@ -572,6 +592,9 @@ def create_app(
             handle.bus.subscribe(TickEvent, on_tick, name="web.bt_live.tick"),
             handle.bus.subscribe(BarEvent, on_bar, name="web.bt_live.bar"),
             handle.bus.subscribe(OrderFilledEvent, on_trade, name="web.bt_live.fill"),
+            handle.bus.subscribe(
+                BacktestTradeClosedEvent, on_close, name="web.bt_live.close",
+            ),
             handle.bus.subscribe(
                 BacktestEquitySampleEvent, on_equity, name="web.bt_live.equity",
             ),
