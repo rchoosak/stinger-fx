@@ -1,6 +1,53 @@
 {% extends "base.html" %}
 {% block title %}{{ run_id }} · Live · Stinger-Fx{% endblock %}
 {% block content %}
+<style>
+  /* 50/50 split — charts left, Orders table right.  Collapses to a
+     single stacked column below 1100 px so the table doesn't get
+     squished on laptop screens. */
+  .bt-live-split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    align-items: start;
+  }
+  @media (max-width: 1100px) {
+    .bt-live-split { grid-template-columns: 1fr; }
+  }
+  .bt-live-orders { min-width: 0; }   /* allow shrink under content */
+  .orders-scroll {
+    max-height: 780px;
+    overflow: auto;
+    border: 1px solid var(--border, #2c2f36);
+    border-radius: 6px;
+  }
+  .orders-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85em;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .orders-table thead th {
+    position: sticky;
+    top: 0;
+    background: var(--panel-bg, #1c1e22);
+    text-align: left;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border, #2c2f36);
+    font-weight: 600;
+    z-index: 1;
+  }
+  .orders-table tbody td {
+    padding: 4px 8px;
+    border-bottom: 1px solid rgba(127,127,127,0.12);
+    white-space: nowrap;
+  }
+  .orders-table tbody tr.open td { opacity: 0.72; }    /* dim until close lands */
+  .orders-table .pnl-pos { color: #10b981; }
+  .orders-table .pnl-neg { color: #ef4444; }
+  .orders-empty { padding: 1em; text-align: center; }
+</style>
+
 <section class="panel widest">
   <h2>{{ run_id }} · Live backtest</h2>
 
@@ -23,16 +70,45 @@
     <span class="muted">waiting for ticks…</span>
   </div>
 
-  <h3>Equity</h3>
-  <div class="chart-wrap">
-    <canvas id="equity-chart" height="300"></canvas>
-  </div>
+  <div class="bt-live-split">
+    <div class="bt-live-charts">
+      <h3>Equity</h3>
+      <div class="chart-wrap">
+        <canvas id="equity-chart" height="280"></canvas>
+      </div>
 
-  <h3 style="margin-top: 1.5em;">Candles (M1)</h3>
-  <div class="chart-wrap">
-    <canvas id="candle-chart" height="380"></canvas>
+      <h3 style="margin-top: 1.5em;">Candles (M1)</h3>
+      <div class="chart-wrap">
+        <canvas id="candle-chart" height="340"></canvas>
+      </div>
+      <p class="muted small" id="candle-status">No bars yet — click Start.</p>
+    </div>
+
+    <div class="bt-live-orders">
+      <h3>Orders <span class="muted small" id="orders-count">(0)</span></h3>
+      <div class="orders-scroll">
+        <table id="orders-table" class="orders-table">
+          <thead>
+            <tr>
+              <th>Strategy</th>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th>Vol</th>
+              <th>Open price</th>
+              <th>Close price</th>
+              <th>Open time</th>
+              <th>Close time</th>
+              <th>P&amp;L</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="orders-empty-row"><td colspan="9" class="orders-empty muted">no orders yet</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="muted small">Sorted by open time (latest first). Rows dim until the position closes.</p>
+    </div>
   </div>
-  <p class="muted small" id="candle-status">No bars yet — click Start.</p>
 </section>
 <p class="muted"><a href="/backtest">← back to backtest list</a></p>
 
@@ -48,6 +124,46 @@
   const stateLbl  = document.getElementById('state-label');
   const ticker    = document.getElementById('ticker');
   const candleStatus = document.getElementById('candle-status');
+  const ordersBody  = document.querySelector('#orders-table tbody');
+  const ordersCount = document.getElementById('orders-count');
+  const ordersEmptyRow = document.getElementById('orders-empty-row');
+
+  // --- Orders table state ---------------------------------------------
+
+  // ticket → <tr> element, so the `close` event can find the row that
+  // was inserted by the matching `trade` (open) event.
+  const ordersByTicket = new Map();
+  const MAX_ORDER_ROWS = 500;
+
+  function fmtTime(iso) {
+    // Show "YYYY-MM-DD HH:MM:SS" — the date here is the simulated broker
+    // time from the data being replayed, not wall-clock, so it tells the
+    // operator which day in the dataset the trade happened on. ISO is
+    // "YYYY-MM-DDTHH:MM:SS[.ffffff][+TZ]" — slice(0, 19) gives us the
+    // date + seconds; replace 'T' with a space for readability.
+    return iso ? iso.slice(0, 19).replace('T', ' ') : '—';
+  }
+  function fmtPrice(p) {
+    return p != null ? Number(p).toFixed(3) : '—';
+  }
+  function setPnlCell(td, pnl) {
+    td.textContent = (pnl >= 0 ? '+' : '') + Number(pnl).toFixed(2);
+    td.classList.add(pnl >= 0 ? 'pnl-pos' : 'pnl-neg');
+  }
+  function refreshOrdersCount() {
+    const n = ordersByTicket.size;
+    ordersCount.textContent = `(${n})`;
+    // hide the "no orders" placeholder once anything lands
+    if (ordersEmptyRow) ordersEmptyRow.style.display = n === 0 ? '' : 'none';
+  }
+  function resetOrdersTable() {
+    ordersByTicket.clear();
+    // wipe everything except the empty-row placeholder
+    for (const row of Array.from(ordersBody.children)) {
+      if (row.id !== 'orders-empty-row') row.remove();
+    }
+    refreshOrdersCount();
+  }
 
   // --- chart setup -----------------------------------------------------
 
@@ -193,12 +309,12 @@
 
     es.addEventListener('trade', (e) => {
       const tr = JSON.parse(e.data);
+      // 1) Drop a marker on the equity chart at the entry time, plotted
+      //    on the latest equity value (the chart's y axis).
       const ts = tr.ts ? new Date(tr.ts).getTime() : Date.now();
       const ds = tr.side === 'buy'
         ? equityChart.data.datasets[1]    // buy fills (green ▲)
         : equityChart.data.datasets[2];   // sell fills (red ▼)
-      // Plot at the entry/exit price on the equity axis. Equity chart's y
-      // is balance, so we re-use the latest equity value as the marker y.
       const eqDs = equityChart.data.datasets[0];
       const yVal = eqDs.data.length ? eqDs.data[eqDs.data.length - 1].y : null;
       if (yVal !== null) {
@@ -207,6 +323,56 @@
         equityDirty = true;
         scheduleUpdates();
       }
+
+      // 2) Insert a new row in the Orders table. Replay is chronological,
+      //    so inserting at tbody.firstChild keeps newest open_ts on top
+      //    (the "sort by time_open desc" requirement). Close info is
+      //    filled in later by the matching `close` event keyed on ticket.
+      const row = document.createElement('tr');
+      row.className = 'open';
+      row.dataset.ticket = tr.ticket;
+      row.dataset.openTs = tr.ts || '';
+      row.innerHTML = `
+        <td>${tr.strategy}</td>
+        <td>${tr.symbol}</td>
+        <td>${tr.side}</td>
+        <td>${Number(tr.volume).toFixed(2)}</td>
+        <td>${fmtPrice(tr.price)}</td>
+        <td class="close-price">—</td>
+        <td>${fmtTime(tr.ts)}</td>
+        <td class="close-ts">—</td>
+        <td class="pnl">—</td>
+      `;
+      // insertBefore(firstChild) handles the case where the empty-row
+      // placeholder is still present — the new row simply lands above it.
+      ordersBody.insertBefore(row, ordersBody.firstChild);
+      ordersByTicket.set(tr.ticket, row);
+
+      // Trim oldest rows to keep the DOM bounded on long live runs.
+      while (ordersByTicket.size > MAX_ORDER_ROWS) {
+        // walk from the bottom (oldest) and drop the first non-placeholder row
+        let oldest = ordersBody.lastElementChild;
+        while (oldest && oldest.id === 'orders-empty-row') {
+          oldest = oldest.previousElementSibling;
+        }
+        if (!oldest) break;
+        const t = Number(oldest.dataset.ticket);
+        ordersByTicket.delete(t);
+        oldest.remove();
+      }
+      refreshOrdersCount();
+    });
+
+    es.addEventListener('close', (e) => {
+      const c = JSON.parse(e.data);
+      const row = ordersByTicket.get(c.ticket);
+      if (!row) return;   // open event was trimmed or arrived out of order
+      // Update only — never reorder. Sort key is open_ts, which doesn't
+      // change at close. Reordering would break "latest open at top".
+      row.classList.remove('open');
+      row.querySelector('.close-price').textContent = fmtPrice(c.close_price);
+      row.querySelector('.close-ts').textContent = fmtTime(c.close_ts);
+      setPnlCell(row.querySelector('.pnl'), c.pnl);
     });
 
     es.addEventListener('ping', () => { /* heartbeat */ });
@@ -253,6 +419,8 @@
     candleChart.data.datasets[0].data.length = 0;
     equityChart.update('none'); candleChart.update('none');
     candleStatus.textContent = 'No bars yet — waiting for data…';
+    // Reset the Orders table so a re-run doesn't show stale rows.
+    resetOrdersTable();
     openStream();
     const resp = await fetch(
       `/backtest-live/${RUN_ID}/start?speed=${speed}`,

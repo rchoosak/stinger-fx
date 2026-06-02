@@ -18,6 +18,7 @@ from stinger_fx.backtest.slippage import SlippageModel, fixed_pips_model
 from stinger_fx.brokers.base import BaseBroker
 from stinger_fx.core.event_bus import AsyncEventBus
 from stinger_fx.core.events import (
+    BacktestTradeClosedEvent,
     OrderCancelledEvent,
     OrderFilledEvent,
     OrderSubmittedEvent,
@@ -95,6 +96,11 @@ class SimBroker(BaseBroker):
         self._last_bid: dict[str, float] = {}
         self._last_ask: dict[str, float] = {}
         self._trades: list[TradeRecord] = []
+        # Map ticket → strategy_id so BacktestTradeClosedEvent (used by
+        # the live-backtest Orders table) can name the strategy that
+        # opened the position. `Position` doesn't carry strategy_id —
+        # only `magic` (a derived hash) — so we record it at open time.
+        self._strategy_id_by_ticket: dict[int, str] = {}
         # Slippage callable — if not supplied, fall back to the legacy fixed-pips model.
         self._slippage_fn: SlippageModel = slippage_fn or fixed_pips_model(
             pips=slippage_pips, point=point
@@ -282,6 +288,7 @@ class SimBroker(BaseBroker):
             magic=req.magic,
         )
         self._positions[ticket] = pos
+        self._strategy_id_by_ticket[ticket] = req.strategy_id
 
         order = Order(
             ticket=ticket,
@@ -406,6 +413,7 @@ class SimBroker(BaseBroker):
             magic=pending.magic,
         )
         self._positions[ticket] = pos
+        self._strategy_id_by_ticket[ticket] = pending.strategy_id
         del self._pending[ticket]
 
         filled = pending.model_copy(update={
@@ -509,9 +517,34 @@ class SimBroker(BaseBroker):
         )
 
         if full_close:
+            # Pop strategy_id *before* clearing positions so we can stamp
+            # it on the trade-closed event below. Fall back to "" if the
+            # ticket was opened by an older path that bypassed our tracking
+            # (defensive — shouldn't happen in practice).
+            strategy_id = self._strategy_id_by_ticket.pop(ticket, "")
             self._positions.pop(ticket, None)
             await self.bus.publish(
                 PositionClosedEvent(position=pos, realized_pnl=pnl)
+            )
+            # Live-backtest UIs subscribe to this — PositionClosedEvent on its
+            # own doesn't carry close_price / close_ts, and pulling them from
+            # `broker._trades` from outside the broker is ugly. Mirrors the
+            # TradeRecord we just appended, plus strategy_id (recorded at
+            # open time) + symbol from the Position so the Orders table can
+            # render every column without joining other events.
+            await self.bus.publish(
+                BacktestTradeClosedEvent(
+                    ticket=pos.ticket,
+                    strategy_id=strategy_id,
+                    symbol=pos.symbol,
+                    side=pos.side.value,
+                    volume=close_qty,
+                    open_price=pos.open_price,
+                    close_price=close_price,
+                    open_ts=pos.open_time,
+                    close_ts=self._sim_time,
+                    pnl=pnl,
+                )
             )
         else:
             remaining = pos.model_copy(update={"volume": pos.volume - close_qty})

@@ -10,7 +10,7 @@ import asyncio
 import heapq
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from stinger_fx.backtest.base import BaseBacktester
@@ -296,20 +296,12 @@ class FileBacktester(BaseBacktester):
         # Unique symbols from feed_list — ticks aren't tf-keyed
         symbols = sorted({sub.symbol for sub in cfg.feed_list})
 
-        # Read each symbol's Arrow table on a worker thread so the loop
-        # stays responsive. `ParquetStore.read_ticks` materialises the
-        # full date-range table — for a 30-day XAUUSD window that's
-        # ~8M rows of pyarrow data, multiple seconds of pure-Python
-        # filtering. Doing it on the asyncio loop would freeze every
-        # SSE client and HTTP handler for the duration.
+        # Read tick data in UTC-day chunks so live-backtest pages receive
+        # the first ticks after loading day one, instead of waiting for the
+        # whole date range (a month of XAUUSD can be millions of ticks).
         from stinger_fx.data.parquet_store import ParquetStore as _PS
 
-        def _load_table(sym: str):
-            return _PS(self._parquet_root).read_ticks(sym, cfg.start, cfg.end)
-
-        per_symbol_tables = await asyncio.gather(*[
-            asyncio.to_thread(_load_table, sym) for sym in symbols
-        ])
+        store = _PS(self._parquet_root)
 
         def _gen(sym: str, table):
             for batch in table.to_batches():
@@ -324,69 +316,92 @@ class FileBacktester(BaseBacktester):
                         flags=row.get("flags") or 0,
                     )
 
-        merged = heapq.merge(
-            *(_gen(sym, tbl) for sym, tbl in zip(symbols, per_symbol_tables, strict=True)),
-            key=lambda t: t.time,
-        )
-
         last_mid: dict[str, float] = {}
         count = 0
         last_equity_minute: int | None = None
         last_tick: Tick | None = None
         # Playback throttle — no-op when cfg.speed == 0 (default).
         throttle = PlaybackThrottle(cfg.speed)
-        for tick in merged:
-            await throttle.wait_for(tick.time)
-            sim_clock.advance(tick.time)
-            broker.advance_clock(tick.time)
-            # Store both bid AND ask so spread/volatility slippage models have
-            # accurate data; long P&L marks at bid (consistent with bar mode).
-            broker.set_market_tick(tick.symbol, tick.bid, tick.ask)
-            last_mid[tick.symbol] = (tick.bid + tick.ask) / 2.0
 
-            # Tick-precise SL/TP — fires before strategy sees the event so
-            # the strategy can't try to act on a position that's about to close.
-            for pos in broker.check_sl_tp_tick(tick.symbol, tick.bid, tick.ask):
-                await broker.close_position(pos.ticket)
+        cursor = cfg.start.astimezone(UTC)
+        end = cfg.end.astimezone(UTC)
+        while cursor < end:
+            next_midnight = (
+                datetime(cursor.year, cursor.month, cursor.day, tzinfo=UTC)
+                + timedelta(days=1)
+            )
+            chunk_end = min(next_midnight, end)
 
-            # Phase 6.2.A — pending orders (BUY/SELL STOP & LIMIT). Triggered
-            # orders are promoted to positions and emit OrderFilledEvent —
-            # the strategy sees them via its on_order_filled hook.
-            await broker.check_pending(tick.symbol, tick.bid, tick.ask)
+            def _load_table(sym: str, start: datetime, stop: datetime):
+                return store.read_ticks(sym, start, stop)
 
-            await bus.publish(TickEvent(tick=tick))
-            # Drain — fewer than bar mode because per-tick strategy work is
-            # usually a no-op until the aggregator publishes a closed bar.
-            for _ in range(2):
-                await asyncio.sleep(0)
+            per_symbol_tables = await asyncio.gather(*[
+                asyncio.to_thread(_load_table, sym, cursor, chunk_end)
+                for sym in symbols
+            ])
 
-            # Sample equity once per minute boundary to keep the curve compact
-            tick_minute = int(tick.time.timestamp()) // 60
-            if last_equity_minute is None or tick_minute > last_equity_minute:
-                mtm = 0.0
-                for p in await broker.get_positions():
-                    ref = last_mid.get(p.symbol)
-                    if ref is None:
-                        continue
-                    mtm += (
-                        (ref - p.open_price)
-                        * p.side.sign
-                        * p.volume
-                        * broker.contract_size_for(p.symbol)
+            merged = heapq.merge(
+                *(
+                    _gen(sym, tbl)
+                    for sym, tbl in zip(symbols, per_symbol_tables, strict=True)
+                ),
+                key=lambda t: t.time,
+            )
+
+            for tick in merged:
+                await throttle.wait_for(tick.time)
+                sim_clock.advance(tick.time)
+                broker.advance_clock(tick.time)
+                # Store both bid AND ask so spread/volatility slippage models have
+                # accurate data; long P&L marks at bid (consistent with bar mode).
+                broker.set_market_tick(tick.symbol, tick.bid, tick.ask)
+                last_mid[tick.symbol] = (tick.bid + tick.ask) / 2.0
+
+                # Tick-precise SL/TP — fires before strategy sees the event so
+                # the strategy can't try to act on a position that's about to close.
+                for pos in broker.check_sl_tp_tick(tick.symbol, tick.bid, tick.ask):
+                    await broker.close_position(pos.ticket)
+
+                # Phase 6.2.A — pending orders (BUY/SELL STOP & LIMIT). Triggered
+                # orders are promoted to positions and emit OrderFilledEvent —
+                # the strategy sees them via its on_order_filled hook.
+                await broker.check_pending(tick.symbol, tick.bid, tick.ask)
+
+                await bus.publish(TickEvent(tick=tick))
+                # Drain — fewer than bar mode because per-tick strategy work is
+                # usually a no-op until the aggregator publishes a closed bar.
+                for _ in range(2):
+                    await asyncio.sleep(0)
+
+                # Sample equity once per minute boundary to keep the curve compact
+                tick_minute = int(tick.time.timestamp()) // 60
+                if last_equity_minute is None or tick_minute > last_equity_minute:
+                    mtm = 0.0
+                    for p in await broker.get_positions():
+                        ref = last_mid.get(p.symbol)
+                        if ref is None:
+                            continue
+                        mtm += (
+                            (ref - p.open_price)
+                            * p.side.sign
+                            * p.volume
+                            * broker.contract_size_for(p.symbol)
+                        )
+                    equity_value = broker.balance + mtm
+                    equity_curve.append((tick.time, equity_value))
+                    # Publish for live-backtest UIs (chart equity line). Rate is
+                    # 1/minute of sim time, so it doesn't flood the bus even at
+                    # max replay speed.
+                    await bus.publish(
+                        BacktestEquitySampleEvent(
+                            time=tick.time, balance=broker.balance, equity=equity_value,
+                        )
                     )
-                equity_value = broker.balance + mtm
-                equity_curve.append((tick.time, equity_value))
-                # Publish for live-backtest UIs (chart equity line). Rate is
-                # 1/minute of sim time, so it doesn't flood the bus even at
-                # max replay speed.
-                await bus.publish(
-                    BacktestEquitySampleEvent(
-                        time=tick.time, balance=broker.balance, equity=equity_value,
-                    )
-                )
-                last_equity_minute = tick_minute
-            last_tick = tick
-            count += 1
+                    last_equity_minute = tick_minute
+                last_tick = tick
+                count += 1
+
+            cursor = chunk_end
 
         # Ensure at least one equity point on a non-empty replay
         if not equity_curve and last_tick is not None:

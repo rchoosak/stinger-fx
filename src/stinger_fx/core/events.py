@@ -248,6 +248,33 @@ class BacktestEquitySampleEvent(Event):
     equity: float
 
 
+class BacktestTradeClosedEvent(Event):
+    """Fired by ``SimBroker`` right after a position fully closes and the
+    matching ``TradeRecord`` is appended to ``broker._trades``.
+
+    Live-backtest UIs subscribe to this to update the Orders table on the
+    fly — ``PositionClosedEvent`` alone doesn't carry ``close_price`` /
+    ``close_time``, and pulling them from ``broker._trades`` from outside
+    the broker is ugly. The payload mirrors ``TradeRecord`` plus
+    ``strategy_id`` + ``symbol`` so the table can show every column
+    without joining other events.
+
+    Time is the simulated broker time (not wall-clock). ``pnl`` is the
+    realised P&L of this close (broker currency, slippage applied).
+    """
+
+    ticket: int
+    strategy_id: str
+    symbol: str
+    side: str                  # "buy" | "sell"
+    volume: float
+    open_price: float
+    close_price: float
+    open_ts: datetime
+    close_ts: datetime
+    pnl: float
+
+
 class TickStreamUnsubscribedEvent(Event):
     """Broker stopped streaming ticks for a symbol.  Consumers that hold
     per-symbol state (e.g. ``MetricsCollector`` watchdog dict) should prune

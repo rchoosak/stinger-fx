@@ -58,6 +58,8 @@ runs:
     start: 2026-05-01T00:00:00Z
     end: 2026-05-02T00:00:00Z
     initial_balance: 10000.0
+    symbol_contract_sizes:
+      XAUUSD: 100.0
     slippage_model: spread
     slippage_pips: 0.0
     granularity: tick
@@ -74,6 +76,8 @@ runs:
     start: 2026-05-01T00:00:00Z
     end: 2026-05-30T00:00:00Z
     initial_balance: 10000.0
+    symbol_contract_sizes:
+      XAUUSD: 100.0
     # Use the broker's real bid/ask spread from Dukascopy ticks for
     # execution pricing instead of a fixed-pips approximation. The
     # `slippage_pips: 0` adds no extra on top — change if you want

@@ -25,6 +25,7 @@ from stinger_fx.config.models import BacktestRunConfig, StrategyEntry
 from stinger_fx.core import AsyncEventBus
 from stinger_fx.core.events import (
     BacktestEquitySampleEvent,
+    BacktestTradeClosedEvent,
     BarEvent,
     TickEvent,
 )
@@ -223,4 +224,119 @@ async def test_external_bus_is_not_closed_by_backtester(
     for _ in range(3):
         await asyncio.sleep(0)
     assert received == [1], "external bus must still be alive after backtester run"
+    await external.close()
+
+
+@pytest.mark.asyncio
+async def test_trade_closed_event_carries_full_payload() -> None:
+    """``SimBroker.close_position`` must publish ``BacktestTradeClosedEvent``
+    right after appending to ``broker._trades``, carrying every field the
+    live-backtest Orders table needs (ticket, strategy, symbol, side,
+    open/close price + time, volume, P&L) so the JS doesn't have to join
+    multiple events to render a row.
+
+    Drives SimBroker directly — avoids spinning a whole FileBacktester +
+    strategy + signal pipeline just to make one trade close.
+    """
+    from stinger_fx.backtest.replay_broker import SimBroker
+    from stinger_fx.domain import OrderRequest, OrderType, Side
+
+    external = AsyncEventBus()
+    closes: list[BacktestTradeClosedEvent] = []
+
+    async def on_close(e: BacktestTradeClosedEvent) -> None:
+        closes.append(e)
+
+    external.subscribe(BacktestTradeClosedEvent, on_close, name="probe.close")
+
+    broker = SimBroker(external, initial_balance=10_000.0, slippage_pips=0.0)
+    broker.advance_clock(datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC))
+    # Seed a market so place_order has a price to fill against.
+    broker.set_market_tick("EURUSD", bid=1.10000, ask=1.10002)
+
+    open_result = await broker.place_order(
+        OrderRequest(
+            strategy_id="probe_strat",
+            symbol="EURUSD",
+            side=Side.BUY,
+            type=OrderType.MARKET,
+            volume=0.1,
+            client_order_id="probe-001",
+        )
+    )
+    assert open_result.ok, open_result.message
+
+    # Advance the clock + price so the close has a distinguishable time/price.
+    broker.advance_clock(datetime(2024, 1, 1, 12, 5, 0, tzinfo=UTC))
+    broker.set_market_tick("EURUSD", bid=1.10100, ask=1.10102)
+    close_result = await broker.close_position(open_result.ticket)
+    assert close_result.ok, close_result.message
+
+    # Drain the bus.
+    import asyncio
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    assert len(closes) == 1, f"expected exactly one trade-closed event; got {len(closes)}"
+    evt = closes[0]
+    assert evt.ticket == open_result.ticket
+    assert evt.strategy_id == "probe_strat"
+    assert evt.symbol == "EURUSD"
+    assert evt.side == "buy"
+    assert evt.volume == pytest.approx(0.1)
+    # Fill price comes from the configured slippage model — for the default
+    # fixed-pips=0 path it's mid-ish. Pin only the band, not the exact tick.
+    assert 1.10000 <= evt.open_price <= 1.10002
+    assert 1.10100 <= evt.close_price <= 1.10102
+    assert evt.open_ts == datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+    assert evt.close_ts == datetime(2024, 1, 1, 12, 5, 0, tzinfo=UTC)
+    # Profit on a 0.1-lot EURUSD BUY at ~1.1 → ~1.101 ≈ +9.8 USD; we just
+    # need the sign, not the dollar.
+    assert evt.pnl > 0
+    await external.close()
+
+
+@pytest.mark.asyncio
+async def test_partial_close_does_not_emit_trade_closed_event() -> None:
+    """The Orders table only tracks fully-closed positions (TradeRecord is
+    only appended on full close in SimBroker). Partial close fires
+    ``PartialClosedEvent`` instead — verify we don't accidentally publish
+    ``BacktestTradeClosedEvent`` then too, otherwise the table would show
+    a partially-closed leg as a finished trade."""
+    from stinger_fx.backtest.replay_broker import SimBroker
+    from stinger_fx.domain import OrderRequest, OrderType, Side
+
+    external = AsyncEventBus()
+    closes: list[BacktestTradeClosedEvent] = []
+    external.subscribe(
+        BacktestTradeClosedEvent,
+        lambda e: closes.append(e),
+        name="probe.close",
+    )
+
+    broker = SimBroker(external, initial_balance=10_000.0, slippage_pips=0.0)
+    broker.advance_clock(datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC))
+    broker.set_market_tick("EURUSD", bid=1.10000, ask=1.10002)
+
+    result = await broker.place_order(
+        OrderRequest(
+            strategy_id="probe_strat",
+            symbol="EURUSD",
+            side=Side.BUY,
+            type=OrderType.MARKET,
+            volume=0.2,
+            client_order_id="probe-002",
+        )
+    )
+    # Close half — leaves 0.1 lots open → no BacktestTradeClosedEvent.
+    await broker.close_position(result.ticket, volume=0.1)
+
+    import asyncio
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    assert closes == [], (
+        "partial close must not fire BacktestTradeClosedEvent — the table "
+        "would otherwise show the partial leg as a completed trade"
+    )
     await external.close()
