@@ -236,6 +236,9 @@ class ParameterSweep:
             initial_balance=cfg.initial_balance,
             symbol_contract_sizes=cfg.symbol_contract_sizes,
             slippage_pips=cfg.slippage_pips,
+            slippage_model=cfg.slippage_model,
+            slippage_volatility_factor=cfg.slippage_volatility_factor,
+            granularity=cfg.granularity,
             data_source=cfg.data_source,
         )
         bt = FileBacktester(

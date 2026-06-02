@@ -91,6 +91,28 @@ runs:
     # speed: 0 (default) → max-speed replay.  Override at the CLI with
     # `--speed 1` for real-time, `--speed 60` for 1-min/sec dashboard pace.
 
+  # Pullback Reversal Scalper smoke — 1 day of XAU/USD May 2026 to verify
+  # the strategy fires entries + exits against real Dukascopy ticks.  Run
+  # via CLI (`stinger-fx backtest run --run-id xauusd_prs_may2026_smoke`)
+  # or watch live in the web UI at /backtest-live/xauusd_prs_may2026_smoke.
+  - id: xauusd_prs_may2026_smoke
+    mode: file
+    strategy_id: prs_scalper_xau
+    feeds:
+      - symbol: XAUUSD
+        timeframe: M1
+      - symbol: XAUUSD
+        timeframe: M5
+    start: 2026-05-26T00:00:00Z
+    end: 2026-05-30T00:00:00Z
+    initial_balance: 10000.0
+    symbol_contract_sizes:
+      XAUUSD: 100.0
+    slippage_model: spread
+    slippage_pips: 0.0
+    granularity: tick
+    data_source: ./data/parquet
+
 
 # Parameter sweeps. Trigger via `stinger-fx backtest sweep --sweep-id <id>`.
 # Each cell of the cartesian product of `parameter_grid` is backtested in turn
@@ -111,3 +133,34 @@ sweeps:
     parameter_grid:
       fast: [5, 8, 10, 12, 15]
       slow: [20, 25, 30, 35, 40]
+
+  # PRS scalper tuning sweep on XAU/USD — last week of May 2026 (6 trading
+  # days).  Cartesian over the three knobs that most influence P&L based
+  # on the smoke run:
+  #   • sl_atr_mult       — SL distance in ATR (wider stops survive noise)
+  #   • cooldown_bars_m1  — M1 bars to wait after exit (avoid re-entry on losers)
+  #   • m1_rsi_oversold   — BUY-side selectivity (overbought stays at 70)
+  # 3 × 3 × 3 = 27 cells.  Trigger with:
+  #   stinger-fx backtest sweep --sweep-id prs_xau_sl_cd_rsi
+  - id: prs_xau_sl_cd_rsi
+    strategy_id: prs_scalper_xau
+    feeds:
+      - symbol: XAUUSD
+        timeframe: M1
+      - symbol: XAUUSD
+        timeframe: M5
+    start: 2026-05-22T00:00:00Z
+    end: 2026-05-30T00:00:00Z
+    initial_balance: 10000.0
+    symbol_contract_sizes:
+      XAUUSD: 100.0
+    slippage_model: spread
+    slippage_pips: 0.0
+    granularity: tick
+    data_source: ./data/parquet
+    rank_by: net_pnl
+    top_n: 15
+    parameter_grid:
+      sl_atr_mult: [1.0, 1.5, 2.5]
+      cooldown_bars_m1: [2, 5, 10]
+      m1_rsi_oversold: [20.0, 25.0, 30.0]

@@ -38,3 +38,55 @@ strategies:
       min_rr: 0.8
       volume: 0.01
       max_trades_per_session: 1
+
+  # Pullback Reversal Scalper — M1 Stoch RSI + RSI entries with M5 trend
+  # filter.  Buys pullbacks inside an M5 uptrend (M5 RSI < 50) when M1
+  # goes deeply oversold and Stoch RSI K crosses up out of the OS zone;
+  # symmetric for sells in an M5 downtrend.  Exits fast on M1 Stoch RSI
+  # K crossing the opposite extreme.  All thresholds / TFs configurable.
+  # `enabled: false` keeps it out of live mode — backtest path loads by
+  # id and ignores the flag.
+  - id: prs_scalper_xau
+    class_path: stinger_fx.strategies.examples.pullback_reversal_scalper:PullbackReversalScalper
+    enabled: false
+    params:
+      symbol: XAUUSD
+      entry_timeframe: M1
+      structure_timeframe: M5
+      # M5 trend filter — OFF by default.  When false, every M5 gate
+      # below (EMA, RSI, HH/HL) is skipped and the strategy fires on
+      # M1 RSI + Stoch RSI extremes alone.  Flip to `true` for the
+      # original strict pullback-with-trend behavior.
+      use_m5_filter: false
+      ema_fast_period: 20
+      ema_slow_period: 50
+      m5_rsi_period: 14
+      m5_rsi_buy_max: 50.0      # BUY requires m5_rsi < this (uptrend pullback)
+      m5_rsi_sell_min: 50.0     # SELL requires m5_rsi > this (downtrend bounce)
+      swing_lookback: 5         # HH/HL: compare to bar `swing_lookback` ago
+      # M1 entry triggers
+      m1_rsi_period: 14
+      m1_rsi_oversold: 30.0
+      m1_rsi_overbought: 70.0
+      stoch_rsi_period: 14
+      stoch_rsi_k_smooth: 3
+      stoch_rsi_d_smooth: 3
+      stoch_rsi_oversold: 20.0
+      stoch_rsi_overbought: 80.0
+      # Exits
+      stoch_rsi_exit_long: 80.0
+      stoch_rsi_exit_short: 20.0
+      # Risk + sizing
+      volume: 0.01
+      atr_period: 14
+      sl_atr_mult: 1.0
+      tp_atr_mult: 0.0          # 0 = no fixed TP — rely on Stoch RSI exit
+      max_hold_bars_m1: 30      # safety time stop
+      cooldown_bars_m1: 2       # bars after close before next entry
+      # Trailing stop loss (optional, default OFF for backward compat).
+      # When enabled, attaches a TrailingStopManager on each entry that
+      # ratchets the SL behind price as the trade moves in our favour.
+      enable_trailing: false
+      trailing_distance_atr: 0.8  # SL stays this many ATR behind price
+      trailing_activate_atr: 0.5  # activate trail after this much profit (ATR)
+      trailing_point: 0.01        # XAU point — change to 0.0001 for FX
