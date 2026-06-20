@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 from typing import NamedTuple
 
 from stinger_fx.config.models import RiskConfig
+from stinger_fx.core.clock import Clock, LiveClock
 from stinger_fx.core.event_bus import AsyncEventBus, Subscription
 from stinger_fx.core.events import (
     AccountSnapshotEvent,
@@ -46,10 +47,24 @@ class RiskVerdict(NamedTuple):
 class RiskMonitor:
     """Owns the live risk state for the engine. Lifetime = engine."""
 
-    def __init__(self, bus: AsyncEventBus, cfg: RiskConfig) -> None:
+    def __init__(
+        self,
+        bus: AsyncEventBus,
+        cfg: RiskConfig,
+        *,
+        clock: Clock | None = None,
+    ) -> None:
         self._bus = bus
         self._cfg = cfg
         self._subs: list[Subscription] = []
+        # Injectable clock so the daily-loss window rolls on *simulated*
+        # time in backtests, not wall-clock. With the default LiveClock the
+        # behavior is unchanged for the live engine. Without this, a backtest
+        # that wired the monitor would roll the daily counter on the wall
+        # clock — i.e. never, since a multi-day replay finishes in seconds —
+        # so the daily-loss limit would accumulate the whole run instead of
+        # resetting each simulated UTC day.
+        self._clock: Clock = clock or LiveClock()
 
         # Open-position counter per strategy_id. Incremented on OrderFilled,
         # decremented on PositionClosed — *for the strategy that actually
@@ -194,9 +209,9 @@ class RiskMonitor:
         return max(0.0, (self._peak_equity - self._current_equity) / self._peak_equity * 100)
 
     def _maybe_roll_daily(self) -> None:
-        today = datetime.now(UTC).date()
-        if self._daily_anchor_date is None or today != self._daily_anchor_date.date():
-            self._daily_anchor_date = datetime.now(UTC)
+        now = self._clock.now()
+        if self._daily_anchor_date is None or now.date() != self._daily_anchor_date.date():
+            self._daily_anchor_date = now
             if self._current_balance is not None:
                 self._daily_opening_balance = self._current_balance
             self._daily_realized_pnl = 0.0
