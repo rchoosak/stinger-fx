@@ -94,3 +94,139 @@ strategies:
       trailing_distance_atr: 0.8  # SL stays this many ATR behind price
       trailing_activate_atr: 0.5  # activate trail after this much profit (ATR)
       trailing_point: 0.01        # XAU point — change to 0.0001 for FX
+
+  # Momentum Breakout Scalper — M1 Donchian breakout + M5 EMA trend
+  # filter, with two risk gates the PRS sweep showed were the missing
+  # structural levers: a session-avoid list (skips London-PM / NY-open
+  # spike windows) and a True-Range vol gate (skips spike candles).
+  # Exits via fixed `tp_atr_mult × ATR` TP + `sl_atr_mult × ATR` SL,
+  # with a time-stop safety net. `enabled: false` keeps it out of live
+  # mode — backtest path loads by id and ignores the flag.
+  - id: mbs_xauusd
+    class_path: stinger_fx.strategies.examples.momentum_breakout_scalper:MomentumBreakoutScalper
+    enabled: false
+    params:
+      symbol: XAUUSD
+      entry_timeframe: M1
+      structure_timeframe: M5
+      # Breakout entry — Donchian on M1 (prior N bars excluded current)
+      donchian_period: 20
+      # M5 trend filter — when True, BUY requires EMA-fast > EMA-slow.
+      require_m5_trend: true
+      ema_fast_period: 20
+      ema_slow_period: 50
+      # Session avoidance — skip these UTC hours where PRS worst losses
+      # clustered (13:00–15:00 London PM, 18:00 NY mid).
+      avoid_hours_utc: [13, 14, 15, 18]
+      # Volatility gate — skip when current TR > mult × SMA(TR, lookback)
+      vol_gate_lookback: 50
+      # Sweep `mbs_xau_donchian_vol` showed 1.5 is the marginal best
+      # by a wide margin: vol_mult 1.5/2.0/3.0 → mean PnL −44/−82/−138.
+      vol_gate_mult: 1.5
+      # Risk + sizing
+      volume: 0.01
+      atr_period: 14
+      sl_atr_mult: 1.0
+      tp_atr_mult: 1.5
+      max_hold_bars_m1: 30
+      cooldown_bars_m1: 5
+      # Trailing (optional, default OFF)
+      enable_trailing: false
+      trailing_distance_atr: 0.8
+      trailing_activate_atr: 0.5
+      trailing_point: 0.01
+
+  # Multi-Timeframe Confluence Scalper — fires only when M15, M5, AND
+  # M1 all agree.  M15 + M5 EMA-fast/slow define trend direction; M1
+  # RSI oversold/overbought picks the entry timing inside the bigger
+  # trend.  Selective by design — 3-8 trades/day on XAU, much lower
+  # spread cost per dollar of P&L than MBS/OFIS.  `enabled: false` —
+  # backtest path loads by id and ignores the flag.
+  - id: mtc_xauusd
+    class_path: stinger_fx.strategies.examples.multi_tf_confluence_scalper:MultiTFConfluenceScalper
+    enabled: false
+    params:
+      symbol: XAUUSD
+      entry_timeframe: M1
+      mid_timeframe: M5
+      high_timeframe: M15
+      # M5 trend filter
+      m5_ema_fast: 20
+      m5_ema_slow: 50
+      # M15 trend filter — longer lookbacks so it adds genuine
+      # bigger-picture information vs M5.
+      m15_ema_fast: 21
+      m15_ema_slow: 55
+      # M1 pullback trigger.  30/70 is the empirical sweet spot on XAU
+      # M1 (cross-up smoke, 4-day window):
+      #   35 → 35 trades, win 20%, -44.64  (floods on noise pullbacks)
+      #   30 → 12 trades, win 33%,  -2.68  (best balance) ←
+      #   25 →  2 trades, win  0%,  -4.36  (starved)
+      #   20 →  1 trade,  win  0%,  -2.68  (starved)
+      # Shallower drowns in fake dips; deeper starves (RSI(14) rarely
+      # reaches <25 here because in-trend pullbacks are shallow).
+      m1_rsi_period: 14
+      m1_rsi_oversold: 30.0
+      m1_rsi_overbought: 70.0
+      # Session + vol gates (reused from MBS winner)
+      avoid_hours_utc: [13, 14, 15, 18]
+      vol_gate_lookback: 50
+      vol_gate_mult: 1.5
+      # Risk — confirmed by sweep `mtc_xau_risk_exits` (18 cells, full
+      # week May 22-30): this exact combo is the #1 cell at +3.12 net /
+      # PF 1.14 / 20 trades.  Marginals match MBS round-2 exactly:
+      #   tp_atr_mult  1.0→2.0 monotonic (+7.9 net) — 2:1 RR dominates
+      #   sl_atr_mult  peaks at 1.0 (0.7 too tight, 1.5 too wide)
+      #   trailing     OFF beats ON (it clips winners before the 2:1 TP)
+      # NB the 4-day smoke shows -2.68 — that's small-sample variance;
+      # the full week is solidly positive.
+      volume: 0.01
+      atr_period: 14
+      sl_atr_mult: 1.0
+      tp_atr_mult: 2.0
+      max_hold_bars_m1: 30
+      cooldown_bars_m1: 5
+      enable_trailing: false
+      trailing_distance_atr: 0.8
+      trailing_activate_atr: 0.5
+      trailing_point: 0.01
+
+  # Order-Flow Imbalance Scalper — RETAIL APPROXIMATION of institutional
+  # HFT OFI.  Uses Dukascopy quote ticks (no aggressor flag) + the
+  # quote-mid shift rule to attribute signed volume to buyer/seller
+  # pressure.  Academic literature reports ~30-40% misclassification on
+  # this proxy vs ground truth, so realistic expectations are 45-55%
+  # win rate / RR 1-1.5:1 — not the 65-75% × 2:1 of true HFT.
+  #
+  # Non-OFI knobs (session/vol/risk) mirror the winning MBS round-2
+  # combo so an A/B test isolates the impact of the OFI signal itself.
+  - id: ofis_xauusd
+    class_path: stinger_fx.strategies.examples.order_flow_imbalance_scalper:OrderFlowImbalanceScalper
+    enabled: false
+    params:
+      symbol: XAUUSD
+      entry_timeframe: M1
+      structure_timeframe: M5
+      # OFI proxy — quote-mid shift rule
+      ofi_lookback_ticks: 200    # hard cap on the signed-volume deque
+      ofi_window_seconds: 60     # drop samples older than this on read
+      ofi_threshold: 200         # |signed-volume sum| must exceed this
+      # M5 trend filter
+      require_m5_trend: true
+      ema_fast_period: 20
+      ema_slow_period: 50
+      # Session + vol gates (reused from MBS winner)
+      avoid_hours_utc: [13, 14, 15, 18]
+      vol_gate_lookback: 50
+      vol_gate_mult: 1.5
+      # Risk + sizing — tp_atr_mult 2.0 from MBS round-2 winner
+      volume: 0.01
+      atr_period: 14
+      sl_atr_mult: 1.0
+      tp_atr_mult: 2.0
+      max_hold_bars_m1: 30
+      cooldown_bars_m1: 5
+      enable_trailing: false
+      trailing_distance_atr: 0.8
+      trailing_activate_atr: 0.5
+      trailing_point: 0.01

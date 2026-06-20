@@ -113,6 +113,119 @@ runs:
     granularity: tick
     data_source: ./data/parquet
 
+  # Momentum Breakout Scalper smoke — same window + execution model as
+  # the PRS smoke so the two strategies are directly comparable. Run:
+  #   stinger-fx backtest run --run-id xauusd_mbs_may2026_smoke
+  - id: xauusd_mbs_may2026_smoke
+    mode: file
+    strategy_id: mbs_xauusd
+    feeds:
+      - symbol: XAUUSD
+        timeframe: M1
+      - symbol: XAUUSD
+        timeframe: M5
+    start: 2026-05-26T00:00:00Z
+    end: 2026-05-30T00:00:00Z
+    initial_balance: 10000.0
+    symbol_contract_sizes:
+      XAUUSD: 100.0
+    slippage_model: spread
+    slippage_pips: 0.0
+    granularity: tick
+    data_source: ./data/parquet
+
+  # Multi-Timeframe Confluence Scalper smoke — same week + execution
+  # model as MBS/PRS smokes so all strategies are directly comparable.
+  # MTC subscribes to M1+M5+M15; M15 is synthesized by BarAggregator
+  # from the same tick stream that drives M1/M5. Run:
+  #   stinger-fx backtest run --run-id xauusd_mtc_may2026_smoke
+  - id: xauusd_mtc_may2026_smoke
+    mode: file
+    strategy_id: mtc_xauusd
+    feeds:
+      - symbol: XAUUSD
+        timeframe: M1
+      - symbol: XAUUSD
+        timeframe: M5
+      - symbol: XAUUSD
+        timeframe: M15
+    start: 2026-05-26T00:00:00Z
+    end: 2026-05-30T00:00:00Z
+    initial_balance: 10000.0
+    symbol_contract_sizes:
+      XAUUSD: 100.0
+    slippage_model: spread
+    slippage_pips: 0.0
+    granularity: tick
+    data_source: ./data/parquet
+
+  # OrderFlowImbalanceScalper smoke — same window + execution model as
+  # MBS/PRS smokes so all three strategies are directly comparable. Run:
+  #   stinger-fx backtest run --run-id xauusd_ofis_may2026_smoke
+  - id: xauusd_ofis_may2026_smoke
+    mode: file
+    strategy_id: ofis_xauusd
+    feeds:
+      - symbol: XAUUSD
+        timeframe: M1
+      - symbol: XAUUSD
+        timeframe: M5
+    start: 2026-05-26T00:00:00Z
+    end: 2026-05-30T00:00:00Z
+    initial_balance: 10000.0
+    symbol_contract_sizes:
+      XAUUSD: 100.0
+    slippage_model: spread
+    slippage_pips: 0.0
+    granularity: tick
+    data_source: ./data/parquet
+
+  # ===================================================================
+  # OUT-OF-SAMPLE validation — May 1-21, the window NOT used for any
+  # tuning (all MTC/MBS sweeps ran on May 22-30).  If the strategies
+  # stay positive here with their tuned defaults, the edge is real and
+  # not curve-fit to the optimisation window.  Run both and compare:
+  #   stinger-fx backtest run --run-id xauusd_mtc_oos_may1_21
+  #   stinger-fx backtest run --run-id xauusd_mbs_oos_may1_21
+  # ===================================================================
+  - id: xauusd_mtc_oos_may1_21
+    mode: file
+    strategy_id: mtc_xauusd
+    feeds:
+      - symbol: XAUUSD
+        timeframe: M1
+      - symbol: XAUUSD
+        timeframe: M5
+      - symbol: XAUUSD
+        timeframe: M15
+    start: 2026-05-01T00:00:00Z
+    end: 2026-05-21T00:00:00Z
+    initial_balance: 10000.0
+    symbol_contract_sizes:
+      XAUUSD: 100.0
+    slippage_model: spread
+    slippage_pips: 0.0
+    granularity: tick
+    data_source: ./data/parquet
+
+  - id: xauusd_mbs_oos_may1_21
+    mode: file
+    strategy_id: mbs_xauusd
+    feeds:
+      - symbol: XAUUSD
+        timeframe: M1
+      - symbol: XAUUSD
+        timeframe: M5
+    start: 2026-05-01T00:00:00Z
+    end: 2026-05-21T00:00:00Z
+    initial_balance: 10000.0
+    symbol_contract_sizes:
+      XAUUSD: 100.0
+    slippage_model: spread
+    slippage_pips: 0.0
+    granularity: tick
+    data_source: ./data/parquet
+
 
 # Parameter sweeps. Trigger via `stinger-fx backtest sweep --sweep-id <id>`.
 # Each cell of the cartesian product of `parameter_grid` is backtested in turn
@@ -164,3 +277,157 @@ sweeps:
       sl_atr_mult: [1.0, 1.5, 2.5]
       cooldown_bars_m1: [2, 5, 10]
       m1_rsi_oversold: [20.0, 25.0, 30.0]
+
+  # MomentumBreakoutScalper structural sweep — explore the three knobs
+  # that define the new strategy's character: how tight the breakout
+  # is (Donchian length), how aggressive the spike filter is, and which
+  # session windows to avoid. 3 × 3 × 3 = 27 cells. Same week as the
+  # PRS sweep so results are directly comparable. Trigger with:
+  #   stinger-fx backtest sweep --sweep-id mbs_xau_donchian_vol
+  - id: mbs_xau_donchian_vol
+    strategy_id: mbs_xauusd
+    feeds:
+      - symbol: XAUUSD
+        timeframe: M1
+      - symbol: XAUUSD
+        timeframe: M5
+    start: 2026-05-22T00:00:00Z
+    end: 2026-05-30T00:00:00Z
+    initial_balance: 10000.0
+    symbol_contract_sizes:
+      XAUUSD: 100.0
+    slippage_model: spread
+    slippage_pips: 0.0
+    granularity: tick
+    data_source: ./data/parquet
+    rank_by: net_pnl
+    top_n: 15
+    parameter_grid:
+      donchian_period: [10, 20, 40]
+      vol_gate_mult: [1.5, 2.0, 3.0]
+      avoid_hours_utc:
+        - []
+        - [15]
+        - [13, 14, 15, 18]
+
+  # MBS round-2 sweep — lock the winning structural combo from the
+  # first sweep (donchian=20, vol_mult=1.5, avoid=[13,14,15,18]) and
+  # sweep the risk/exit knobs to try and push from −1.54 to positive:
+  #   • sl_atr_mult     — how tight the protective SL is
+  #   • tp_atr_mult     — fixed take-profit distance
+  #   • enable_trailing — let winners ride momentum
+  # 3 × 3 × 2 = 18 cells. Same week as round-1 for direct comparison.
+  #   stinger-fx backtest sweep --sweep-id mbs_xau_risk_exits
+  - id: mbs_xau_risk_exits
+    strategy_id: mbs_xauusd
+    feeds:
+      - symbol: XAUUSD
+        timeframe: M1
+      - symbol: XAUUSD
+        timeframe: M5
+    start: 2026-05-22T00:00:00Z
+    end: 2026-05-30T00:00:00Z
+    initial_balance: 10000.0
+    symbol_contract_sizes:
+      XAUUSD: 100.0
+    slippage_model: spread
+    slippage_pips: 0.0
+    granularity: tick
+    data_source: ./data/parquet
+    rank_by: net_pnl
+    top_n: 18
+    parameter_grid:
+      sl_atr_mult: [0.7, 1.0, 1.5]
+      tp_atr_mult: [1.0, 1.5, 2.0]
+      enable_trailing: [false, true]
+
+  # MTC pullback-tightness sweep — explore how strict the M1 RSI gate
+  # should be and how the M5/M15 EMA periods balance.  3 × 3 × 3 = 27
+  # cells.  Trigger with:
+  #   stinger-fx backtest sweep --sweep-id mtc_xau_pullback
+  - id: mtc_xau_pullback
+    strategy_id: mtc_xauusd
+    feeds:
+      - symbol: XAUUSD
+        timeframe: M1
+      - symbol: XAUUSD
+        timeframe: M5
+      - symbol: XAUUSD
+        timeframe: M15
+    start: 2026-05-22T00:00:00Z
+    end: 2026-05-30T00:00:00Z
+    initial_balance: 10000.0
+    symbol_contract_sizes:
+      XAUUSD: 100.0
+    slippage_model: spread
+    slippage_pips: 0.0
+    granularity: tick
+    data_source: ./data/parquet
+    rank_by: net_pnl
+    top_n: 15
+    parameter_grid:
+      m1_rsi_oversold: [25.0, 30.0, 35.0]
+      m1_rsi_overbought: [65.0, 70.0, 75.0]
+      m5_ema_slow: [30, 50, 80]
+
+  # MTC risk/exit sweep — entry side is already tuned (cross-up + 3-TF +
+  # 30/70 RSI), so lock those and sweep only the exit knobs, exactly the
+  # lever that flipped MBS from −1.54 to +3.01 in its round-2 sweep:
+  #   • sl_atr_mult     — how tight the protective SL is
+  #   • tp_atr_mult     — fixed take-profit distance
+  #   • enable_trailing — let winners ride momentum
+  # 3 × 3 × 2 = 18 cells, full week (May 22–30) for a larger sample than
+  # the 4-day smoke. Trigger with:
+  #   stinger-fx backtest sweep --sweep-id mtc_xau_risk_exits
+  - id: mtc_xau_risk_exits
+    strategy_id: mtc_xauusd
+    feeds:
+      - symbol: XAUUSD
+        timeframe: M1
+      - symbol: XAUUSD
+        timeframe: M5
+      - symbol: XAUUSD
+        timeframe: M15
+    start: 2026-05-22T00:00:00Z
+    end: 2026-05-30T00:00:00Z
+    initial_balance: 10000.0
+    symbol_contract_sizes:
+      XAUUSD: 100.0
+    slippage_model: spread
+    slippage_pips: 0.0
+    granularity: tick
+    data_source: ./data/parquet
+    rank_by: net_pnl
+    top_n: 18
+    parameter_grid:
+      sl_atr_mult: [0.7, 1.0, 1.5]
+      tp_atr_mult: [1.0, 1.5, 2.0]
+      enable_trailing: [false, true]
+
+  # OFIS structural sweep — explore the three knobs that define the OFI
+  # signal: how many ticks to keep, how stale samples can be, and how
+  # strong the signed-volume sum must be to fire. 3 × 3 × 3 = 27 cells.
+  # Same week as the MBS sweeps for direct comparison. Trigger with:
+  #   stinger-fx backtest sweep --sweep-id ofis_xau_ofi_grid
+  - id: ofis_xau_ofi_grid
+    strategy_id: ofis_xauusd
+    feeds:
+      - symbol: XAUUSD
+        timeframe: M1
+      - symbol: XAUUSD
+        timeframe: M5
+    start: 2026-05-22T00:00:00Z
+    end: 2026-05-30T00:00:00Z
+    initial_balance: 10000.0
+    symbol_contract_sizes:
+      XAUUSD: 100.0
+    slippage_model: spread
+    slippage_pips: 0.0
+    granularity: tick
+    data_source: ./data/parquet
+    rank_by: net_pnl
+    top_n: 15
+    parameter_grid:
+      ofi_lookback_ticks: [100, 200, 500]
+      ofi_window_seconds: [30, 60, 120]
+      ofi_threshold: [50.0, 200.0, 1000.0]
