@@ -197,6 +197,34 @@ class PullbackReversalScalper(BaseStrategy):
         if bar.symbol != params.symbol or bar.timeframe != params.entry_timeframe:
             return
 
+        # 0) Update Stoch RSI cross state on EVERY entry-tf bar, BEFORE the
+        #    open-position / cooldown early-returns. The cross detector needs
+        #    `prev_k`/`prev_d` from the *immediately preceding* bar; if we
+        #    skipped this update while a trade was open (5–10 bars) or during
+        #    cooldown, the first entry check after the gate would compare the
+        #    current K/D against a stale sample from many bars ago — firing
+        #    phantom crosses (a real bug that caused mistimed entries).
+        m1_view = ctx.history_for(params.symbol, params.entry_timeframe)
+        if m1_view is None:
+            return
+        m1_bars = m1_view.bars()
+        m1_closes = [b.close for b in m1_bars]
+        if len(m1_closes) < params.m1_rsi_period + params.stoch_rsi_period:
+            return
+        m1_rsi_v = rsi(m1_closes, params.m1_rsi_period)
+        srsi = stoch_rsi(
+            m1_closes,
+            rsi_period=params.m1_rsi_period,
+            stoch_period=params.stoch_rsi_period,
+            k_smooth=params.stoch_rsi_k_smooth,
+            d_smooth=params.stoch_rsi_d_smooth,
+        )
+        if m1_rsi_v is None or srsi is None:
+            return
+        k, d = srsi.k, srsi.d
+        prev_k, prev_d = self._prev_k, self._prev_d
+        self._prev_k, self._prev_d = k, d   # always advance, every bar
+
         # 1) If a position is open, check for an exit on this bar and
         #    return — never stack a new entry on top.
         if self._open_ticket is not None:
@@ -208,6 +236,12 @@ class PullbackReversalScalper(BaseStrategy):
         if self._cooldown_left > 0:
             self._cooldown_left -= 1
             return
+
+        # Need a previous sample to detect a cross.
+        if prev_k is None or prev_d is None:
+            return
+        cross_up = prev_k < prev_d and k >= d
+        cross_down = prev_k > prev_d and k <= d
 
         # 3) Read M5 structure (optional — gated by `use_m5_filter`).
         #
@@ -252,35 +286,9 @@ class PullbackReversalScalper(BaseStrategy):
             m5_buy_ok = is_uptrend and m5_rsi < params.m5_rsi_buy_max
             m5_sell_ok = is_downtrend and m5_rsi > params.m5_rsi_sell_min
 
-        # 4) Compute M1 RSI + Stoch RSI for entry gating.
-        m1_view = ctx.history_for(params.symbol, params.entry_timeframe)
-        if m1_view is None:
-            return
-        m1_bars = m1_view.bars()
-        m1_closes = [b.close for b in m1_bars]
-        if len(m1_closes) < params.m1_rsi_period + params.stoch_rsi_period:
-            return
-        m1_rsi_v = rsi(m1_closes, params.m1_rsi_period)
-        srsi = stoch_rsi(
-            m1_closes,
-            rsi_period=params.m1_rsi_period,
-            stoch_period=params.stoch_rsi_period,
-            k_smooth=params.stoch_rsi_k_smooth,
-            d_smooth=params.stoch_rsi_d_smooth,
-        )
-        if m1_rsi_v is None or srsi is None:
-            return
-        k, d = srsi.k, srsi.d
-        prev_k, prev_d = self._prev_k, self._prev_d
-        # Update state regardless of whether we trade this bar — we need
-        # a fresh "prev" sample on every subsequent bar.
-        self._prev_k, self._prev_d = k, d
-        if prev_k is None or prev_d is None:
-            return
-        cross_up = prev_k < prev_d and k >= d
-        cross_down = prev_k > prev_d and k <= d
-
-        # 5) ATR for SL distance.
+        # 4) ATR for SL distance.  (M1 RSI / Stoch RSI / cross were already
+        #    computed in step 0 above so the cross detector stays correct
+        #    across open-position and cooldown bars.)
         atr_v = atr(list(m1_bars), params.atr_period)
         if atr_v is None or atr_v <= 0:
             return

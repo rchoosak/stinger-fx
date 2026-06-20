@@ -66,8 +66,12 @@ strategies:
       swing_lookback: 5         # HH/HL: compare to bar `swing_lookback` ago
       # M1 entry triggers
       m1_rsi_period: 14
-      m1_rsi_oversold: 30.0
-      m1_rsi_overbought: 70.0
+      # 20/80 (deep extremes) gave a positive edge on the May-1 XAU smoke
+      # (+10.96, PF 2.22) vs 30/70 which overtraded weak setups (-25, PF
+      # 0.72). Loosening to "fire more often" trades quality for quantity —
+      # the extra entries were mostly counter-trend SELLs that hit SL fast.
+      m1_rsi_oversold: 20.0
+      m1_rsi_overbought: 80.0
       stoch_rsi_period: 14
       stoch_rsi_k_smooth: 3
       stoch_rsi_d_smooth: 3
