@@ -19,11 +19,12 @@ from stinger_fx.backtest.replay_broker import SimBroker
 from stinger_fx.backtest.reports import BacktestReport
 from stinger_fx.backtest.slippage import build_slippage_model
 from stinger_fx.brokers.bar_aggregator import BarAggregator
-from stinger_fx.config.models import BacktestRunConfig, StrategyEntry
+from stinger_fx.config.models import BacktestRunConfig, RiskConfig, StrategyEntry
 from stinger_fx.core import AsyncEventBus, SimClock
 from stinger_fx.core.errors import BacktestError
 from stinger_fx.core.event_bus import Subscription as BusSubscription
 from stinger_fx.core.events import (
+    AccountSnapshotEvent,
     BacktestEquitySampleEvent,
     BarEvent,
     SignalEvent,
@@ -32,6 +33,7 @@ from stinger_fx.core.events import (
 from stinger_fx.data import BacktestRepo, SqliteStore, iter_bars
 from stinger_fx.domain import Tick
 from stinger_fx.execution import OrderRouter
+from stinger_fx.risk import RiskMonitor
 from stinger_fx.strategies import (
     StrategyRunner,
     derive_magic,
@@ -53,6 +55,7 @@ class FileBacktester(BaseBacktester):
         sqlite_store: SqliteStore | None = None,
         report_dir: Path | None = None,
         bus: AsyncEventBus | None = None,
+        risk_config: RiskConfig | None = None,
     ) -> None:
         self._strategy_entry = strategy
         self._parquet_root = parquet_root
@@ -64,6 +67,12 @@ class FileBacktester(BaseBacktester):
         # subscribe SSE listeners to the running replay. CLI standalone path
         # leaves it None and gets the legacy private-bus behavior.
         self._external_bus = bus
+        # Optional risk config — when supplied the backtest wires a
+        # RiskMonitor (driven by the sim clock) into the OrderRouter so the
+        # replay enforces the SAME pre-trade risk gates a live engine would
+        # (max positions, daily-loss, kill-switch). None = no risk layer
+        # (legacy behavior, used by tests that exercise raw strategy edge).
+        self._risk_config = risk_config
 
     async def run(self, cfg: BacktestRunConfig) -> BacktestReport:
         if cfg.strategy_id != self._strategy_entry.id:
@@ -103,7 +112,18 @@ class FileBacktester(BaseBacktester):
         strategy_id = self._strategy_entry.id
         magic = derive_magic(strategy_id)
 
-        router = OrderRouter(bus, broker, strategy_magic={strategy_id: magic})
+        # Optional risk layer — same RiskMonitor the live engine uses, but
+        # driven by the sim clock so its daily-loss window rolls on simulated
+        # UTC days. Wired into the OrderRouter so rejected signals never
+        # become orders, exactly as in live.
+        risk: RiskMonitor | None = None
+        if self._risk_config is not None:
+            risk = RiskMonitor(bus, self._risk_config, clock=sim_clock)
+            await risk.start()
+
+        router = OrderRouter(
+            bus, broker, strategy_magic={strategy_id: magic}, risk=risk,
+        )
         await router.attach()
 
         async def signal_sink(sig):
@@ -144,6 +164,8 @@ class FileBacktester(BaseBacktester):
 
         await runner.stop()
         await router.detach()
+        if risk is not None:
+            await risk.stop()
         # Only close the bus we created. When the caller supplied an external
         # bus (live-backtest mode), it owns the lifecycle — closing it here
         # would tear down the web UI's other subscribers.
@@ -260,6 +282,13 @@ class FileBacktester(BaseBacktester):
                 BacktestEquitySampleEvent(
                     time=bar.time, balance=broker.balance, equity=equity_value,
                 )
+            )
+            # Feed the RiskMonitor (when wired) so its peak-equity /
+            # kill-switch / daily-loss tracking sees the same equity curve a
+            # live engine would. Without this the monitor's snapshot-driven
+            # rules never fire in a backtest.
+            await bus.publish(
+                AccountSnapshotEvent(snapshot=await broker.get_account_snapshot())
             )
             count += 1
         return count
@@ -395,6 +424,12 @@ class FileBacktester(BaseBacktester):
                     await bus.publish(
                         BacktestEquitySampleEvent(
                             time=tick.time, balance=broker.balance, equity=equity_value,
+                        )
+                    )
+                    # Feed the RiskMonitor (when wired) — see bar-mode note.
+                    await bus.publish(
+                        AccountSnapshotEvent(
+                            snapshot=await broker.get_account_snapshot()
                         )
                     )
                     last_equity_minute = tick_minute

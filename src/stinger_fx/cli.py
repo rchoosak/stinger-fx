@@ -273,6 +273,10 @@ def backtest_run(
             parquet_root=run.data_source,
             sqlite_store=sqlite,
             report_dir=cfg.app.data_dir / "backtests",
+            # Enforce the same pre-trade risk gates a live engine would —
+            # backtest results now reflect daily-loss / kill-switch /
+            # max-position rejections instead of raw strategy edge.
+            risk_config=cfg.app.risk,
         )
     elif run.mode == "mt5_tester":
         from stinger_fx.backtest.mt5_backtester import MT5StrategyTester
