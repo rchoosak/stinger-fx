@@ -51,6 +51,14 @@ class HistoryView:
 
     The runner appends to this buffer as BarEvent/TickEvent arrive for the
     strategy's subscriptions.
+
+    Capacity note: indicators (RSI/ATR/Stoch via Wilder smoothing) are
+    recomputed from the bars in this buffer each call. ``capacity`` must
+    comfortably exceed the largest indicator lookback any strategy uses,
+    or the rolling window would truncate the warmup and bias the seed.
+    The default 2000 covers everything in this codebase (max strategy
+    warmup ≈ 176 bars) with a wide margin; only raise it if a strategy
+    declares a lookback approaching it.
     """
 
     def __init__(self, symbol: str, timeframe: Timeframe, capacity: int = 2000) -> None:

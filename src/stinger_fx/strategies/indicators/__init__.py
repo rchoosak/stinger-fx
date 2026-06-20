@@ -28,7 +28,7 @@ from stinger_fx.strategies.indicators.moving_average import ema, sma
 from stinger_fx.strategies.indicators.obv import obv
 from stinger_fx.strategies.indicators.pivot_points import PivotLevels, pivot_points
 from stinger_fx.strategies.indicators.psar import PSARResult, psar
-from stinger_fx.strategies.indicators.rsi import rsi
+from stinger_fx.strategies.indicators.rsi import rsi, rsi_series
 from stinger_fx.strategies.indicators.stoch_rsi import StochRSIResult, stoch_rsi
 from stinger_fx.strategies.indicators.stochastic import StochasticResult, stochastic
 from stinger_fx.strategies.indicators.vwap import vwap_rolling, vwap_session
@@ -66,6 +66,7 @@ __all__ = [
     "pivot_points",
     "psar",
     "rsi",
+    "rsi_series",
     "sma",
     "stoch_rsi",
     "stochastic",
