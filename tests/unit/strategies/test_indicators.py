@@ -2,11 +2,32 @@ from __future__ import annotations
 
 import pytest
 
-from stinger_fx.strategies.indicators import ema, rsi, sma
+from stinger_fx.strategies.indicators import ema, rsi, rsi_series, sma
 
 
 def test_sma_returns_none_when_not_enough_data() -> None:
     assert sma([1.0, 2.0, 3.0], 5) is None
+
+
+def test_rsi_series_matches_pointwise_rsi() -> None:
+    """rsi_series is the O(n) backbone of stoch_rsi — it must produce the
+    exact same value at every index that calling rsi(values[:end]) would,
+    otherwise the optimisation silently changes Stoch RSI output."""
+    closes = [100.0 + (i % 7) - (i % 3) * 0.5 + i * 0.1 for i in range(60)]
+    series = rsi_series(closes, 14)
+    # Length: one value per index from `period` (14) to the last.
+    assert len(series) == len(closes) - 14
+    # Last element == plain rsi over the full series.
+    assert series[-1] == pytest.approx(rsi(closes, 14))
+    # Each tail element matches rsi over the truncated prefix.
+    for offset in range(1, 6):
+        end = len(closes) - offset + 1
+        assert series[-offset] == pytest.approx(rsi(closes[:end], 14))
+
+
+def test_rsi_series_empty_when_insufficient_data() -> None:
+    assert rsi_series([1.0, 2.0, 3.0], 14) == []
+    assert rsi_series([], 14) == []
 
 
 def test_sma_simple() -> None:

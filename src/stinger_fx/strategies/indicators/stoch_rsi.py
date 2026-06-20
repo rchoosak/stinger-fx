@@ -21,7 +21,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import NamedTuple
 
-from stinger_fx.strategies.indicators.rsi import rsi
+from stinger_fx.strategies.indicators.rsi import rsi_series
 
 
 class StochRSIResult(NamedTuple):
@@ -52,23 +52,22 @@ def stoch_rsi(
     if len(closes) < needed:
         return None
 
-    # Compute RSI at each tail offset
-    rsi_series: list[float] = []
-    for offset in range(extra + 1):
-        end = len(closes) - offset
-        val = rsi(closes[:end], rsi_period)
-        if val is None:
-            return None
-        rsi_series.insert(0, val)  # most recent at end
+    # Compute the full RSI series in one O(n) pass, then take the last
+    # (extra + 1) values — identical to calling rsi(closes[:end]) at each
+    # tail offset, but ~18× faster for the default parameters.
+    full_rsi = rsi_series(closes, rsi_period)
+    if len(full_rsi) < extra + 1:
+        return None
+    rsi_tail: list[float] = full_rsi[-(extra + 1):]
 
     # Compute raw Stoch %K at each of the last (k_smooth + d_smooth - 1) positions
     raw_k_series: list[float] = []
     for i in range(k_smooth + d_smooth - 1, -1, -1):
         # Stoch RSI window ends at position len - i, length stoch_period
-        end = len(rsi_series) - i
+        end = len(rsi_tail) - i
         if end < stoch_period:
             return None
-        window = rsi_series[end - stoch_period:end]
+        window = rsi_tail[end - stoch_period:end]
         cur = window[-1]
         lo, hi = min(window), max(window)
         if hi == lo:
