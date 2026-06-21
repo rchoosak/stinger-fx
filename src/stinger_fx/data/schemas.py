@@ -115,6 +115,23 @@ class TradeRow(SQLModel, table=True):
     swap: float = 0.0
 
 
+class RiskStateRow(SQLModel, table=True):
+    """Persisted RiskMonitor derived-state — exactly one row (id=1).
+
+    Restored on engine startup so a tripped kill switch and the true
+    drawdown peak survive a restart. Open positions and daily realized
+    P&L are NOT stored here — they're rehydrated from the broker and the
+    `trades` table respectively (single source of truth, no dual-write).
+    """
+
+    __tablename__ = "risk_state"
+
+    id: int | None = Field(default=1, primary_key=True)
+    peak_equity: float | None = None
+    kill_switch_tripped: bool = False
+    updated_at: datetime
+
+
 class BacktestRunRow(SQLModel, table=True):
     __tablename__ = "backtest_runs"
 

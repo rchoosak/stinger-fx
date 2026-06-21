@@ -23,8 +23,8 @@ with action="rejected" so the operator can see why in the trade journal.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
-from typing import NamedTuple
+from datetime import datetime
+from typing import TYPE_CHECKING, NamedTuple
 
 from stinger_fx.config.models import RiskConfig
 from stinger_fx.core.clock import Clock, LiveClock
@@ -35,6 +35,9 @@ from stinger_fx.core.events import (
     PositionClosedEvent,
 )
 from stinger_fx.domain import Signal
+
+if TYPE_CHECKING:
+    from stinger_fx.data.repositories import RiskStateRepo
 
 logger = logging.getLogger("stinger.risk")
 
@@ -53,10 +56,19 @@ class RiskMonitor:
         cfg: RiskConfig,
         *,
         clock: Clock | None = None,
+        state_repo: RiskStateRepo | None = None,
     ) -> None:
         self._bus = bus
         self._cfg = cfg
         self._subs: list[Subscription] = []
+        # Persists peak_equity + kill_switch_tripped so they survive an
+        # engine restart (see rehydrate()). None in backtests / unit tests —
+        # persistence is a live-engine concern only.
+        self._state_repo = state_repo
+        # Set by rehydrate(): the next AccountSnapshot reconstructs the day's
+        # opening balance from (current balance − rehydrated realized P&L)
+        # rather than treating the restart-time balance as the day's open.
+        self._needs_opening_balance = False
         # Injectable clock so the daily-loss window rolls on *simulated*
         # time in backtests, not wall-clock. With the default LiveClock the
         # behavior is unchanged for the live engine. Without this, a backtest
@@ -129,6 +141,77 @@ class RiskMonitor:
         """Operator-issued reset after a kill-switch trip."""
         self._kill_switch_tripped = False
         logger.warning("risk_kill_switch_reset")
+        self._persist_state()
+
+    async def rehydrate(
+        self,
+        *,
+        open_positions: list[tuple[str | None, str, int]],
+        daily_realized_pnl: float,
+        daily_pnl_by_symbol: dict[str, float],
+    ) -> None:
+        """Rebuild in-memory risk state after an engine restart.
+
+        `open_positions` is ``(strategy_id | None, symbol, ticket)`` for every
+        position currently open at the broker — the broker is the source of
+        truth for what's actually live. ``strategy_id`` is None for positions
+        whose magic doesn't map to a known strategy (manual trades, other EAs):
+        those count toward per-symbol caps but not per-strategy ones, matching
+        how `_on_closed` handles an unknown ticket.
+
+        Daily realized P&L comes from the persisted trade log; peak equity and
+        a tripped kill switch come from the persisted state row. Call once at
+        startup after brokers connect — empty inputs leave a fresh start at
+        defaults.
+        """
+        self._open_positions.clear()
+        self._open_positions_by_symbol.clear()
+        self._ticket_to_strategy.clear()
+        for sid, symbol, ticket in open_positions:
+            self._open_positions_by_symbol[symbol] = (
+                self._open_positions_by_symbol.get(symbol, 0) + 1
+            )
+            if sid is not None:
+                self._open_positions[sid] = self._open_positions.get(sid, 0) + 1
+                self._ticket_to_strategy[ticket] = sid
+
+        self._daily_realized_pnl = daily_realized_pnl
+        self._daily_pnl_by_symbol = dict(daily_pnl_by_symbol)
+        self._daily_anchor_date = self._clock.now()
+        self._needs_opening_balance = True
+
+        if self._state_repo is not None:
+            try:
+                st = self._state_repo.load()
+            except Exception:
+                logger.exception("risk_state_load_failed")
+                st = None
+            if st is not None:
+                self._peak_equity = st.peak_equity
+                self._kill_switch_tripped = st.kill_switch_tripped
+
+        logger.info(
+            "risk_rehydrated open_positions=%d strategies=%d daily_pnl=%.2f "
+            "peak_equity=%s kill_switch_tripped=%s",
+            len(open_positions),
+            len(self._open_positions),
+            self._daily_realized_pnl,
+            self._peak_equity,
+            self._kill_switch_tripped,
+        )
+
+    def _persist_state(self) -> None:
+        """Save peak equity + kill-switch flag. No-op without a state repo;
+        a DB hiccup must never break trading, so failures are logged only."""
+        if self._state_repo is None:
+            return
+        try:
+            self._state_repo.save(
+                peak_equity=self._peak_equity,
+                kill_switch_tripped=self._kill_switch_tripped,
+            )
+        except Exception:
+            logger.exception("risk_state_persist_failed")
 
     # --- Public API --------------------------------------------------------
 
@@ -263,19 +346,29 @@ class RiskMonitor:
         snap = evt.snapshot
         self._current_equity = snap.equity
         self._current_balance = snap.balance
+        peak_changed = False
         if self._peak_equity is None or snap.equity > self._peak_equity:
             self._peak_equity = snap.equity
+            peak_changed = True
         if self._daily_anchor_date is None:
             self._daily_anchor_date = snap.time
             self._daily_opening_balance = snap.balance
+        elif self._needs_opening_balance:
+            # First snapshot after a mid-day rehydrate: the current balance
+            # already includes today's realized P&L, so back it out to recover
+            # the day's opening balance for the loss-% gate.
+            self._daily_opening_balance = snap.balance - self._daily_realized_pnl
+            self._needs_opening_balance = False
         # Kill-switch check
         cfg = self._cfg
+        tripped_now = False
         if (
             cfg.kill_switch_drawdown_pct > 0
             and not self._kill_switch_tripped
             and self._drawdown_pct() >= cfg.kill_switch_drawdown_pct
         ):
             self._kill_switch_tripped = True
+            tripped_now = True
             logger.error(
                 "risk_kill_switch_tripped drawdown_pct=%.2f limit_pct=%s "
                 "peak_equity=%s current_equity=%s",
@@ -284,3 +377,7 @@ class RiskMonitor:
                 self._peak_equity,
                 self._current_equity,
             )
+        # Persist only when something durable changed — peak ratchets up
+        # rarely and a trip happens once, so write volume stays low.
+        if peak_changed or tripped_now:
+            self._persist_state()

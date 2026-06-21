@@ -1,7 +1,12 @@
 """SignalEvent → broker OrderRequest.
 
 A signal carries the strategy's intent; the router applies risk checks and
-converts to an OrderRequest with a deterministic client_order_id.
+converts it to an OrderRequest tagged with a fresh per-signal
+``client_order_id`` (a uuid4). That id is the idempotency key the OrderQueue
+persists and dedupes on, so a crash-replay of the same persisted request never
+double-submits. It is unique per signal, not derived from signal content —
+two distinct signals (even identical ones) get distinct ids and distinct
+orders, which is the intended behavior.
 """
 
 from __future__ import annotations
@@ -90,6 +95,9 @@ class OrderRouter:
         return self._pool.primary()
 
     async def handle_signal(self, signal: Signal) -> None:
+        # Fresh idempotency key per signal — the OrderQueue persists and
+        # dedupes on it so a crash-replay of this exact request can't
+        # double-submit (see module docstring).
         client_order_id = str(uuid.uuid4())
         magic = self.strategy_magic.get(signal.strategy_id, 0)
         volume = signal.suggested_volume or 0.01

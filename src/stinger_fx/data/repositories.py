@@ -18,6 +18,7 @@ from stinger_fx.data.schemas import (
     OrderModificationRow,
     OrderRow,
     ReconciliationRow,
+    RiskStateRow,
     SignalRow,
     SweepResultRow,
     SweepRow,
@@ -150,6 +151,54 @@ class TradeRepo:
             s.refresh(row)
             assert row.id is not None
             return row.id
+
+    def realized_since(self, since: datetime) -> tuple[float, dict[str, float]]:
+        """Total and per-symbol realized P&L for trades closed at/after `since`.
+
+        Used to rehydrate the RiskMonitor's daily-loss counter after a restart:
+        passing today's UTC midnight reconstructs the day's realized P&L from
+        the persisted trade log rather than starting the counter at zero.
+        """
+        with self._store.session() as s:
+            rows = list(
+                s.exec(select(TradeRow).where(TradeRow.close_ts >= since))
+            )
+        total = 0.0
+        by_symbol: dict[str, float] = {}
+        for r in rows:
+            total += r.pnl
+            by_symbol[r.symbol] = by_symbol.get(r.symbol, 0.0) + r.pnl
+        return total, by_symbol
+
+
+class RiskStateRepo:
+    """Load/save the single persisted RiskMonitor state row (id=1)."""
+
+    def __init__(self, store: SqliteStore) -> None:
+        self._store = store
+
+    def load(self) -> RiskStateRow | None:
+        with self._store.session() as s:
+            return s.get(RiskStateRow, 1)
+
+    def save(self, *, peak_equity: float | None, kill_switch_tripped: bool) -> None:
+        """Upsert the single state row — never grows beyond one row."""
+        now = datetime.now(UTC)
+        with self._store.session() as s:
+            row = s.get(RiskStateRow, 1)
+            if row is None:
+                row = RiskStateRow(
+                    id=1,
+                    peak_equity=peak_equity,
+                    kill_switch_tripped=kill_switch_tripped,
+                    updated_at=now,
+                )
+            else:
+                row.peak_equity = peak_equity
+                row.kill_switch_tripped = kill_switch_tripped
+                row.updated_at = now
+            s.add(row)
+            s.commit()
 
 
 class BacktestRepo:
