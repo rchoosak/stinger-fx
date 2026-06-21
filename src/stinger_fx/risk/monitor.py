@@ -138,9 +138,21 @@ class RiskMonitor:
         )
 
     def reset_kill_switch(self) -> None:
-        """Operator-issued reset after a kill-switch trip."""
+        """Operator-issued reset after a kill-switch trip.
+
+        Rebases the drawdown peak to the current equity so the reset actually
+        lets trading resume. Without this, the next AccountSnapshot would
+        re-measure drawdown against the old (pre-trip) peak and immediately
+        re-trip while still inside the drawdown the operator just acknowledged
+        — making reset a no-op exactly when it's needed. If no snapshot has
+        arrived yet (`_current_equity is None`) the peak is left untouched.
+        """
         self._kill_switch_tripped = False
-        logger.warning("risk_kill_switch_reset")
+        if self._current_equity is not None:
+            self._peak_equity = self._current_equity
+        logger.warning(
+            "risk_kill_switch_reset peak_rebased_to=%s", self._current_equity
+        )
         self._persist_state()
 
     async def rehydrate(

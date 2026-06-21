@@ -220,6 +220,37 @@ async def test_peak_and_trip_are_persisted_for_next_restart() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reset_rebases_peak_so_it_does_not_immediately_retrip() -> None:
+    """A reset during an active drawdown must let trading resume — the peak
+    rebases to current equity so the next snapshot measures 0% drawdown
+    instead of re-tripping against the stale pre-trip peak."""
+    store = in_memory_store()
+    repo = RiskStateRepo(store)
+    bus = AsyncEventBus()
+    rm = RiskMonitor(bus, RiskConfig(kill_switch_drawdown_pct=20.0), state_repo=repo)
+    await rm.start()
+    # Peak 12_000, drop to 9_000 → 25% drawdown → trip.
+    await rm._on_snapshot(_snapshot(balance=10_000, equity=12_000))
+    await rm._on_snapshot(_snapshot(balance=10_000, equity=9_000))
+    assert rm.snapshot()["kill_switch_tripped"] is True
+
+    rm.reset_kill_switch()
+    assert rm.snapshot()["peak_equity"] == 9_000.0  # rebased to current equity
+    # A fresh snapshot at the same equity must NOT re-trip.
+    await rm._on_snapshot(_snapshot(balance=10_000, equity=9_000))
+    assert rm.snapshot()["kill_switch_tripped"] is False
+    assert rm.check_signal(_signal()).allowed is True
+    # Reset is persisted as un-tripped (not clobbered by an immediate re-trip).
+    assert repo.load().kill_switch_tripped is False  # type: ignore[union-attr]
+
+    # But a genuine further drawdown from the new baseline still trips.
+    await rm._on_snapshot(_snapshot(balance=10_000, equity=7_000))  # -22% of 9_000
+    assert rm.snapshot()["kill_switch_tripped"] is True
+    await rm.stop()
+    await bus.close()
+
+
+@pytest.mark.asyncio
 async def test_rehydrate_without_state_repo_is_safe() -> None:
     """Backtest / unit path passes no repo — rehydrate must still work."""
     bus = AsyncEventBus()
