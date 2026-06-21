@@ -9,7 +9,7 @@ This keeps the strategy code path identical between live and backtest.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pyarrow as pa
 
@@ -40,6 +40,25 @@ from stinger_fx.domain import (
 )
 
 logger = logging.getLogger("stinger.backtest.sim_broker")
+
+
+def _rollover_count(open_time: datetime, close_time: datetime, hour: int) -> int:
+    """Number of swap rollovers in the half-open interval (open_time, close_time].
+
+    A rollover happens once per day at ``hour:00`` UTC. A position pays/receives
+    swap once for each rollover it is held across — e.g. opened 10:00 Mon and
+    closed 02:00 Wed (rollover hour 21) crossed the Mon and Tue 21:00 rollovers
+    → 2 nights. Closed-form, no per-day loop.
+    """
+    if close_time <= open_time:
+        return 0
+    # First rollover strictly after open_time.
+    first = open_time.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if first <= open_time:
+        first += timedelta(days=1)
+    if first > close_time:
+        return 0
+    return (close_time - first).days + 1
 
 
 def _pending_triggered(order: Order, bid: float, ask: float) -> bool:
@@ -76,6 +95,10 @@ class SimBroker(BaseBroker):
         contract_size: float = 100_000.0,
         symbol_contract_sizes: dict[str, float] | None = None,
         point: float = 0.0001,
+        commission_per_lot: float = 0.0,
+        swap_long_per_lot: float = 0.0,
+        swap_short_per_lot: float = 0.0,
+        swap_rollover_hour_utc: int = 21,
     ) -> None:
         super().__init__(bus)
         self.balance = initial_balance
@@ -83,6 +106,12 @@ class SimBroker(BaseBroker):
         self._default_contract_size = contract_size
         self._symbol_contract_sizes = dict(symbol_contract_sizes or {})
         self._point = point
+        # Trading costs — all default to 0 → no behavioural change. Commission
+        # is charged per lot per side (open and close); swap per lot per night.
+        self._commission_per_lot = commission_per_lot
+        self._swap_long_per_lot = swap_long_per_lot
+        self._swap_short_per_lot = swap_short_per_lot
+        self._swap_rollover_hour_utc = swap_rollover_hour_utc
         self._next_ticket = 1
         self._positions: dict[int, Position] = {}
         # Phase 6.2.A — pending orders (BUY/SELL STOP & LIMIT) waiting on a
@@ -133,6 +162,14 @@ class SimBroker(BaseBroker):
     def contract_size_for(self, symbol: str) -> float:
         """Return the simulated contract size for ``symbol``."""
         return self._symbol_contract_sizes.get(symbol, self._default_contract_size)
+
+    def _charge_open_commission(self, volume: float) -> None:
+        """Debit the open-side commission the moment a position is created.
+
+        The matching close side is charged in ``close_position``; together they
+        make the round-turn. No-op when ``commission_per_lot`` is 0.
+        """
+        self.balance -= self._commission_per_lot * volume
 
     # --- BaseBroker -------------------------------------------------------
 
@@ -289,6 +326,7 @@ class SimBroker(BaseBroker):
         )
         self._positions[ticket] = pos
         self._strategy_id_by_ticket[ticket] = req.strategy_id
+        self._charge_open_commission(req.volume)
 
         order = Order(
             ticket=ticket,
@@ -414,6 +452,7 @@ class SimBroker(BaseBroker):
         )
         self._positions[ticket] = pos
         self._strategy_id_by_ticket[ticket] = pending.strategy_id
+        self._charge_open_commission(pending.volume)
         del self._pending[ticket]
 
         filled = pending.model_copy(update={
@@ -496,14 +535,31 @@ class SimBroker(BaseBroker):
         bid = self._last_bid.get(pos.symbol, mid)
         ask = self._last_ask.get(pos.symbol, mid)
         close_price = self._slippage_fn(close_side, bid=bid, ask=ask)
-        # P&L on the closed chunk only.
-        pnl = (
+        # Gross (price-only) P&L on the closed chunk.
+        gross = (
             (close_price - pos.open_price)
             * pos.side.sign
             * close_qty
             * self.contract_size_for(pos.symbol)
         )
-        self.balance += pnl
+        # Costs. The open-side commission was charged when the position opened;
+        # debit the close side now. `fees` reports the full round-turn for this
+        # chunk (both sides). Swap accrues per night held, signed by side.
+        commission_close = self._commission_per_lot * close_qty
+        fees = 2.0 * commission_close
+        swap_rate = (
+            self._swap_long_per_lot if pos.side is Side.BUY else self._swap_short_per_lot
+        )
+        swap = (
+            _rollover_count(pos.open_time, self._sim_time, self._swap_rollover_hour_utc)
+            * swap_rate
+            * close_qty
+        )
+        # `pnl` is the realised P&L *net* of costs — so every downstream consumer
+        # (TradeRecord, PositionClosedEvent → RiskMonitor daily P&L, the Orders
+        # table) sees the same net figure, and initial + Σ(net pnl) == final.
+        pnl = gross - fees + swap
+        self.balance += gross - commission_close + swap
         self._trades.append(
             TradeRecord(
                 open_ts=pos.open_time,
@@ -513,6 +569,8 @@ class SimBroker(BaseBroker):
                 close_price=close_price,
                 volume=close_qty,
                 pnl=pnl,
+                fees=fees,
+                swap=swap,
             )
         )
 
