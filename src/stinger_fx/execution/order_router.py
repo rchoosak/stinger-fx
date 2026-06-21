@@ -186,7 +186,10 @@ class OrderRouter:
             # strategy.on_order_filled, metrics, trade journal) only needs to
             # know the fill *happened*. Pre-fix, PARTIALLY_FILLED fell through
             # all three branches and disappeared silently in live mode.
-            await self.bus.publish(OrderFilledEvent(order=result.order))
+            broker = self._broker_for(req.strategy_id)
+            await self.bus.publish(
+                OrderFilledEvent(order=result.order, account_id=broker.account_id)
+            )
         elif result.ok and result.status == OrderStatus.SUBMITTED:
             # Pending order placed (Phase 6.2.B) — the broker already emitted
             # OrderSubmittedEvent. Strategy will see OrderFilledEvent later

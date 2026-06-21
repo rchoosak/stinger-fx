@@ -352,7 +352,7 @@ class StingerApp:
                 if self._router is not None
                 else {}
             )
-            open_positions: list[tuple[str | None, str, int]] = []
+            open_positions: list[tuple[str | None, str, int, str]] = []
             for account_id, broker in self._pool.items():
                 try:
                     positions = await broker.get_positions()
@@ -363,7 +363,7 @@ class StingerApp:
                     continue
                 for pos in positions:
                     open_positions.append(
-                        (magic_to_sid.get(pos.magic), pos.symbol, pos.ticket)
+                        (magic_to_sid.get(pos.magic), pos.symbol, pos.ticket, account_id)
                     )
 
             now = datetime.now(UTC)

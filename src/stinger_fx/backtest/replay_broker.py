@@ -461,7 +461,9 @@ class SimBroker(BaseBroker):
             "fill_price": fill_price,
             "filled_at": self._sim_time,
         })
-        await self.bus.publish(OrderFilledEvent(order=filled))
+        await self.bus.publish(
+            OrderFilledEvent(order=filled, account_id=self.account_id)
+        )
         return filled
 
     async def modify_order(
@@ -583,7 +585,10 @@ class SimBroker(BaseBroker):
             self._positions.pop(ticket, None)
             await self.bus.publish(
                 PositionClosedEvent(
-                    position=pos, realized_pnl=pnl, close_price=close_price
+                    position=pos,
+                    realized_pnl=pnl,
+                    account_id=self.account_id,
+                    close_price=close_price,
                 )
             )
             # Live-backtest UIs subscribe to this — PositionClosedEvent on its
@@ -614,6 +619,8 @@ class SimBroker(BaseBroker):
                     position=remaining,
                     closed_volume=close_qty,
                     realized_pnl=pnl,
+                    account_id=self.account_id,
+                    close_price=close_price,
                 )
             )
         # Match MT5Broker.close_position contract (PR #59) so OrderResult.status

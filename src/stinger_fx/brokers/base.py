@@ -35,6 +35,9 @@ class BaseBroker(ABC):
 
     def __init__(self, bus: AsyncEventBus) -> None:
         self.bus = bus
+        # BrokerPool replaces this with the configured account id. Keeping a
+        # default preserves standalone brokers used by backtests and tests.
+        self.account_id = "default"
 
     # --- Lifecycle ----------------------------------------------------------
 

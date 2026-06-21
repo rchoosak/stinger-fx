@@ -107,6 +107,32 @@ async def test_rehydrated_ticket_maps_back_to_strategy_on_close() -> None:
 
 
 @pytest.mark.asyncio
+async def test_same_ticket_on_two_accounts_does_not_collide() -> None:
+    bus = AsyncEventBus()
+    rm = RiskMonitor(bus, RiskConfig(max_open_positions_per_strategy=2))
+    await rm.start()
+    await rm.rehydrate(
+        open_positions=[
+            ("s1", "XAUUSD", 101, "account-a"),
+            ("s2", "EURUSD", 101, "account-b"),
+        ],
+        daily_realized_pnl=0.0,
+        daily_pnl_by_symbol={},
+    )
+
+    await rm._on_closed(
+        _closed(101).model_copy(update={"account_id": "account-a"})
+    )
+    assert rm.snapshot()["open_positions"] == {"s1": 0, "s2": 1}
+    await rm._on_closed(
+        _closed(101, symbol="EURUSD").model_copy(update={"account_id": "account-b"})
+    )
+    assert rm.snapshot()["open_positions"] == {"s1": 0, "s2": 0}
+    await rm.stop()
+    await bus.close()
+
+
+@pytest.mark.asyncio
 async def test_rehydrate_with_unknown_magic_does_not_crash() -> None:
     bus = AsyncEventBus()
     rm = RiskMonitor(bus, RiskConfig())

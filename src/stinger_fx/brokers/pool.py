@@ -30,6 +30,7 @@ class BrokerPool:
     def add(self, account_id: str, broker: BaseBroker) -> None:
         if account_id in self._brokers:
             raise ConfigError(f"broker pool already has account_id={account_id!r}")
+        broker.account_id = account_id
         self._brokers[account_id] = broker
 
     def get(self, account_id: str) -> BaseBroker:

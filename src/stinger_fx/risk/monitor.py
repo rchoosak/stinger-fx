@@ -23,6 +23,7 @@ with action="rejected" so the operator can see why in the trade journal.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -32,6 +33,7 @@ from stinger_fx.core.event_bus import AsyncEventBus, Subscription
 from stinger_fx.core.events import (
     AccountSnapshotEvent,
     OrderFilledEvent,
+    PartialClosedEvent,
     PositionClosedEvent,
 )
 from stinger_fx.domain import Signal
@@ -83,12 +85,12 @@ class RiskMonitor:
         # owns the closed position*, looked up via _ticket_to_strategy.
         self._open_positions: dict[str, int] = {}
 
-        # Ticket → strategy_id, populated on OrderFilledEvent so that
+        # (account_id, ticket) → strategy_id, populated on OrderFilledEvent so that
         # PositionClosedEvent (which doesn't carry strategy_id) can be
         # attributed back to the right per-strategy bucket. Without this
-        # the decrement guesses "first non-zero bucket" and can blow the
-        # cap on a strategy that didn't actually close anything.
-        self._ticket_to_strategy: dict[int, str] = {}
+        # account scoping, identical broker tickets can collide in a
+        # multi-account process.
+        self._ticket_to_strategy: dict[tuple[str, int], str] = {}
 
         # Per-symbol open-position counter (for per_symbol.max_open_positions).
         self._open_positions_by_symbol: dict[str, int] = {}
@@ -115,6 +117,11 @@ class RiskMonitor:
         )
         self._subs.append(
             self._bus.subscribe(PositionClosedEvent, self._on_closed, name="risk.close")
+        )
+        self._subs.append(
+            self._bus.subscribe(
+                PartialClosedEvent, self._on_partial_closed, name="risk.partial_close"
+            )
         )
         self._subs.append(
             self._bus.subscribe(AccountSnapshotEvent, self._on_snapshot, name="risk.snapshot")
@@ -158,13 +165,16 @@ class RiskMonitor:
     async def rehydrate(
         self,
         *,
-        open_positions: list[tuple[str | None, str, int]],
+        open_positions: Sequence[
+            tuple[str | None, str, int] | tuple[str | None, str, int, str]
+        ],
         daily_realized_pnl: float,
         daily_pnl_by_symbol: dict[str, float],
     ) -> None:
         """Rebuild in-memory risk state after an engine restart.
 
-        `open_positions` is ``(strategy_id | None, symbol, ticket)`` for every
+        `open_positions` is
+        ``(strategy_id | None, symbol, ticket, account_id)`` for every
         position currently open at the broker — the broker is the source of
         truth for what's actually live. ``strategy_id`` is None for positions
         whose magic doesn't map to a known strategy (manual trades, other EAs):
@@ -179,13 +189,18 @@ class RiskMonitor:
         self._open_positions.clear()
         self._open_positions_by_symbol.clear()
         self._ticket_to_strategy.clear()
-        for sid, symbol, ticket in open_positions:
+        for item in open_positions:
+            if len(item) == 3:
+                sid, symbol, ticket = item
+                account_id = "default"
+            else:
+                sid, symbol, ticket, account_id = item
             self._open_positions_by_symbol[symbol] = (
                 self._open_positions_by_symbol.get(symbol, 0) + 1
             )
             if sid is not None:
                 self._open_positions[sid] = self._open_positions.get(sid, 0) + 1
-                self._ticket_to_strategy[ticket] = sid
+                self._ticket_to_strategy[(account_id, ticket)] = sid
 
         self._daily_realized_pnl = daily_realized_pnl
         self._daily_pnl_by_symbol = dict(daily_pnl_by_symbol)
@@ -323,7 +338,7 @@ class RiskMonitor:
         # PositionClosedEvent can decrement the right per-strategy bucket
         # (PositionClosedEvent carries only `magic`, not strategy_id).
         if evt.order.ticket:
-            self._ticket_to_strategy[evt.order.ticket] = sid
+            self._ticket_to_strategy[(evt.account_id, evt.order.ticket)] = sid
 
     async def _on_closed(self, evt: PositionClosedEvent) -> None:
         # Per-strategy decrement: look up the ticket recorded at fill-time
@@ -332,7 +347,7 @@ class RiskMonitor:
         # non-zero bucket" which silently moved counts between strategies
         # in any multi-strategy run.
         ticket = evt.position.ticket
-        sid = self._ticket_to_strategy.pop(ticket, None)
+        sid = self._ticket_to_strategy.pop((evt.account_id, ticket), None)
         if sid is not None:
             if self._open_positions.get(sid, 0) > 0:
                 self._open_positions[sid] -= 1
@@ -353,6 +368,15 @@ class RiskMonitor:
         self._maybe_roll_daily()
         self._daily_realized_pnl += evt.realized_pnl
         self._daily_pnl_by_symbol[sym] = self._daily_pnl_by_symbol.get(sym, 0.0) + evt.realized_pnl
+
+    async def _on_partial_closed(self, evt: PartialClosedEvent) -> None:
+        """Count realized P&L without decrementing open-position buckets."""
+        self._maybe_roll_daily()
+        sym = evt.position.symbol
+        self._daily_realized_pnl += evt.realized_pnl
+        self._daily_pnl_by_symbol[sym] = (
+            self._daily_pnl_by_symbol.get(sym, 0.0) + evt.realized_pnl
+        )
 
     async def _on_snapshot(self, evt: AccountSnapshotEvent) -> None:
         snap = evt.snapshot

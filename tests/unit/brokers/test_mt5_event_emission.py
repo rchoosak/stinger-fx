@@ -62,11 +62,11 @@ TRADE_RETCODE_INVALID_VOLUME = 10014
 class _FakeResult:
     def __init__(
         self, *, retcode: int = TRADE_RETCODE_DONE,
-        price: float = 0.0, volume: float = 0.0,
+        price: float = 0.0, volume: float = 0.0, deal: int = 0,
     ) -> None:
         self.retcode = retcode
         self.order = 999
-        self.deal = 0
+        self.deal = deal
         self.price = price
         self.volume = volume
         self.comment = "ok"
@@ -134,6 +134,7 @@ class _FakeMT5:
         send_price: float = 1.1100,
         send_volume: float = 0.0,  # 0 means "broker echoes request volume"
         contract_size: float = 100_000.0,
+        deal: object | None = None,
     ) -> None:
         self._positions = positions or []
         self._pending = pending_orders or []
@@ -141,6 +142,7 @@ class _FakeMT5:
         self._send_price = send_price
         self._send_volume = send_volume
         self._contract_size = contract_size
+        self._deal = deal
         self.send_requests: list[dict] = []
         self.connected = True
 
@@ -184,7 +186,13 @@ class _FakeMT5:
             retcode=TRADE_RETCODE_DONE,
             price=self._send_price,
             volume=echo_volume,
+            deal=777 if self._deal is not None else 0,
         )
+
+    def history_deals_get(self, *, ticket: int):
+        if ticket == 777 and self._deal is not None:
+            return (self._deal,)
+        return ()
 
 
 def _install(monkeypatch, fake) -> None:
@@ -317,6 +325,43 @@ async def test_close_short_position_pnl_uses_correct_sign(monkeypatch) -> None:
         assert len(closed) == 1
         # (1.1050 - 1.1100) * -1 (SELL) * 0.1 * 100_000 = 50.0
         assert closed[0].realized_pnl == pytest.approx(50.0)
+    finally:
+        await broker.disconnect()
+        await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_close_uses_net_account_currency_pnl_from_deal(monkeypatch) -> None:
+    deal = types.SimpleNamespace(
+        profit=50.0,
+        commission=-3.0,
+        swap=-2.0,
+        fee=-1.0,
+    )
+    fake = _FakeMT5(
+        positions=[
+            _FakePosition(
+                ticket=100,
+                side=Side.BUY,
+                volume=0.1,
+                open_price=1.1000,
+                magic=42,
+            )
+        ],
+        send_price=1.1050,
+        deal=deal,
+    )
+    _install(monkeypatch, fake)
+    bus = AsyncEventBus()
+    broker = _make_broker(bus)
+    closed: list[PositionClosedEvent] = []
+    bus.subscribe(PositionClosedEvent, collect_into(closed))
+
+    try:
+        await broker.connect()
+        await broker.close_position(100)
+        await _drain(bus)
+        assert closed[0].realized_pnl == pytest.approx(44.0)
     finally:
         await broker.disconnect()
         await bus.close()
