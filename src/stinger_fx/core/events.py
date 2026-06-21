@@ -260,7 +260,8 @@ class BacktestTradeClosedEvent(Event):
     without joining other events.
 
     Time is the simulated broker time (not wall-clock). ``pnl`` is the
-    realised P&L of this close (broker currency, slippage applied).
+    realised P&L of this close (broker currency) **net of slippage,
+    commission, and swap**.
     """
 
     ticket: int

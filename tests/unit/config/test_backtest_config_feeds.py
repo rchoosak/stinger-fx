@@ -32,6 +32,49 @@ def _common_sweep_kwargs() -> dict:
     }
 
 
+# --- trading-cost fields ------------------------------------------------------
+
+
+def test_cost_fields_default_to_zero() -> None:
+    cfg = BacktestRunConfig(symbol="EURUSD", timeframe=Timeframe.M15, **_common_run_kwargs())
+    assert cfg.commission_per_lot == 0.0
+    assert cfg.swap_long_per_lot == 0.0
+    assert cfg.swap_short_per_lot == 0.0
+    assert cfg.swap_rollover_hour_utc == 21
+
+
+def test_negative_commission_rejected() -> None:
+    with pytest.raises(ValidationError):
+        BacktestRunConfig(
+            symbol="EURUSD",
+            timeframe=Timeframe.M15,
+            commission_per_lot=-1.0,
+            **_common_run_kwargs(),
+        )
+
+
+def test_rollover_hour_must_be_in_range() -> None:
+    with pytest.raises(ValidationError):
+        BacktestRunConfig(
+            symbol="EURUSD",
+            timeframe=Timeframe.M15,
+            swap_rollover_hour_utc=24,
+            **_common_run_kwargs(),
+        )
+
+
+def test_swap_rates_accept_negative() -> None:
+    cfg = BacktestRunConfig(
+        symbol="EURUSD",
+        timeframe=Timeframe.M15,
+        swap_long_per_lot=-7.5,
+        swap_short_per_lot=2.0,
+        **_common_run_kwargs(),
+    )
+    assert cfg.swap_long_per_lot == -7.5
+    assert cfg.swap_short_per_lot == 2.0
+
+
 # --- BacktestRunConfig --------------------------------------------------------
 
 

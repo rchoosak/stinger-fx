@@ -110,6 +110,13 @@ runs:
       XAUUSD: 100.0
     slippage_model: spread
     slippage_pips: 0.0
+    # Trading costs — set these to your broker's actual numbers. Defaults of 0
+    # reproduce the old cost-free result; the examples below are illustrative
+    # (XAU ~ a few USD/lot/side commission, longs usually pay swap overnight).
+    commission_per_lot: 0.0      # USD per lot per side (round-turn = 2x)
+    swap_long_per_lot: 0.0       # USD per lot per night held (often negative)
+    swap_short_per_lot: 0.0
+    swap_rollover_hour_utc: 21
     granularity: tick
     data_source: ./data/parquet
 

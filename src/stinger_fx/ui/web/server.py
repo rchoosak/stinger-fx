@@ -1194,6 +1194,9 @@ def _build_portfolio_summary(data_dir: Path, run_ids: list[str]) -> dict | None:
                     close_price=float(t.get("close_price", 0.0)),
                     volume=float(t.get("volume", 0.0)),
                     pnl=float(t.get("pnl", 0.0)),
+                    # Older sidecars predate cost tracking → default 0.0.
+                    fees=float(t.get("fees", 0.0)),
+                    swap=float(t.get("swap", 0.0)),
                 ))
             except (ValueError, KeyError, AttributeError):
                 continue

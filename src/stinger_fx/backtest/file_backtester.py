@@ -94,6 +94,10 @@ class FileBacktester(BaseBacktester):
             slippage_pips=cfg.slippage_pips,
             slippage_fn=slippage_fn,
             symbol_contract_sizes=cfg.symbol_contract_sizes,
+            commission_per_lot=cfg.commission_per_lot,
+            swap_long_per_lot=cfg.swap_long_per_lot,
+            swap_short_per_lot=cfg.swap_short_per_lot,
+            swap_rollover_hour_utc=cfg.swap_rollover_hour_utc,
         )
 
         strategy_cls = load_strategy_class(self._strategy_entry.class_path)

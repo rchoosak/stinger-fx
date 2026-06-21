@@ -320,6 +320,17 @@ class BacktestRunConfig(BaseModel):
     slippage_pips: float = Field(0.0, ge=0)
     slippage_model: Literal["fixed", "spread", "volatility"] = "fixed"
     slippage_volatility_factor: float = Field(0.25, gt=0)
+    # Trading costs (account currency). All default to 0 → existing runs are
+    # unchanged. `volume` is in lots, so cost = rate × volume.
+    #   commission_per_lot — charged per lot *per side* (open AND close), so a
+    #     round-turn costs 2×. Set to your broker's per-lot-per-side commission.
+    #   swap_{long,short}_per_lot — per lot *per night held*, signed (negative =
+    #     you pay, positive = you receive). Long and short usually differ.
+    #   swap_rollover_hour_utc — the UTC hour a night is counted (the rollover).
+    commission_per_lot: float = Field(0.0, ge=0)
+    swap_long_per_lot: float = 0.0
+    swap_short_per_lot: float = 0.0
+    swap_rollover_hour_utc: int = Field(21, ge=0, le=23)
     granularity: Literal["bar", "tick"] = "bar"
     # Playback throttle for the backtest replay loop.
     #   0   → max speed (default, current behavior — replay as fast as possible)

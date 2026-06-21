@@ -19,7 +19,9 @@ class TradeRecord:
     open_price: float
     close_price: float
     volume: float
-    pnl: float
+    pnl: float  # net of slippage, commission, and swap
+    fees: float = 0.0  # round-turn commission attributed to this close
+    swap: float = 0.0  # signed swap accrued while held
 
 
 @dataclass
@@ -46,6 +48,16 @@ class BacktestReport:
     @property
     def gross_loss(self) -> float:
         return sum(t.pnl for t in self.trades if t.pnl < 0)
+
+    @property
+    def total_commission(self) -> float:
+        """Round-turn commission paid across all closed trades."""
+        return sum(t.fees for t in self.trades)
+
+    @property
+    def total_swap(self) -> float:
+        """Net swap across all closed trades (signed — negative = paid)."""
+        return sum(t.swap for t in self.trades)
 
     @property
     def win_rate(self) -> float:
@@ -112,6 +124,8 @@ class BacktestReport:
             "expectancy": round(self.expectancy, 2),
             "max_drawdown": round(self.max_drawdown, 2),
             "sharpe": round(self.sharpe, 4),
+            "total_commission": round(self.total_commission, 2),
+            "total_swap": round(self.total_swap, 2),
             "initial_balance": self.initial_balance,
             "final_balance": round(self.final_balance, 2),
         }
@@ -141,6 +155,8 @@ class BacktestReport:
                 "close_price": t.close_price,
                 "volume": t.volume,
                 "pnl": round(t.pnl, 2),
+                "fees": round(t.fees, 2),
+                "swap": round(t.swap, 2),
             }
             for t in self.trades
         ]
