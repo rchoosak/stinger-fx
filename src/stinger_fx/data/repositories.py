@@ -170,20 +170,22 @@ class TradeRepo:
             by_symbol[r.symbol] = by_symbol.get(r.symbol, 0.0) + r.pnl
         return total, by_symbol
 
-    def recent_pnls_for(self, strategy_id: str, limit: int) -> list[float]:
-        """The most recent `limit` closed-trade pnls for a strategy, newest
-        first. Used by the DriftMonitor to compute recent live win-rate /
-        expectancy."""
+    def recent_trades_for(
+        self, strategy_id: str, limit: int
+    ) -> list[tuple[float, float]]:
+        """``(pnl, volume)`` for the most recent `limit` closed trades of a
+        strategy, newest first. The DriftMonitor uses pnl for win-rate and
+        pnl/volume for size-invariant per-lot expectancy."""
         with self._store.session() as s:
             rows = list(
                 s.exec(
                     select(TradeRow)
                     .where(TradeRow.strategy_id == strategy_id)
-                    .order_by(TradeRow.close_ts.desc())  # type: ignore[attr-defined]
+                    .order_by(col(TradeRow.close_ts).desc())
                     .limit(limit)
                 )
             )
-        return [r.pnl for r in rows]
+        return [(r.pnl, r.volume) for r in rows]
 
 
 class RiskStateRepo:

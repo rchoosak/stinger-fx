@@ -18,10 +18,16 @@ from stinger_fx.observability.drift_monitor import DriftMonitor
 BASE = datetime(2024, 1, 1, tzinfo=UTC)
 
 
-def _seed_baseline(store, *, win_rate: float, expectancy: float, sid: str = "s1") -> None:
+def _seed_baseline(
+    store, *, win_rate: float, expectancy_per_lot: float, sid: str = "s1"
+) -> None:
     repo = BacktestRepo(store)
     rid = repo.start_run("bt", sid, {})
-    repo.finish_run(rid, {"win_rate": win_rate, "expectancy": expectancy}, "bt.json")
+    repo.finish_run(
+        rid,
+        {"win_rate": win_rate, "expectancy_per_lot": expectancy_per_lot},
+        "bt.json",
+    )
 
 
 class _TradeSeeder:
@@ -65,7 +71,7 @@ async def _yield() -> None:
 @pytest.mark.asyncio
 async def test_degraded_win_rate_emits_drift() -> None:
     store = in_memory_store()
-    _seed_baseline(store, win_rate=0.5, expectancy=10.0)
+    _seed_baseline(store, win_rate=0.5, expectancy_per_lot=0.0)  # isolate win-rate
     seeder = _TradeSeeder(store)
     for _ in range(5):  # all losers → live win-rate 0.0 < 0.5*0.7
         seeder.add(sid="s1", pnl=-1.0)
@@ -82,9 +88,10 @@ async def test_degraded_win_rate_emits_drift() -> None:
 @pytest.mark.asyncio
 async def test_degraded_expectancy_emits_drift() -> None:
     store = in_memory_store()
-    _seed_baseline(store, win_rate=0.5, expectancy=10.0)
+    _seed_baseline(store, win_rate=0.5, expectancy_per_lot=10.0)
     seeder = _TradeSeeder(store)
-    # win-rate healthy (0.6) but expectancy tiny (~0.2 < 10*0.5)
+    # win-rate healthy (0.6) but per-lot expectancy negative:
+    # pnls/0.1 = [10,10,10,-15,-15] → mean -2 < floor 10*0.5
     for pnl in [1.0, 1.0, 1.0, -1.5, -1.5]:
         seeder.add(sid="s1", pnl=pnl)
     bus = AsyncEventBus()
@@ -99,9 +106,9 @@ async def test_degraded_expectancy_emits_drift() -> None:
 @pytest.mark.asyncio
 async def test_healthy_no_event() -> None:
     store = in_memory_store()
-    _seed_baseline(store, win_rate=0.5, expectancy=10.0)
+    _seed_baseline(store, win_rate=0.5, expectancy_per_lot=10.0)
     seeder = _TradeSeeder(store)
-    for _ in range(5):  # all winners, exp 12 ≥ floor
+    for _ in range(5):  # all winners, per-lot exp 120 ≥ floor
         seeder.add(sid="s1", pnl=12.0)
     bus = AsyncEventBus()
     dm, events = _monitor(store, bus)
@@ -114,7 +121,7 @@ async def test_healthy_no_event() -> None:
 @pytest.mark.asyncio
 async def test_below_min_trades_no_event() -> None:
     store = in_memory_store()
-    _seed_baseline(store, win_rate=0.5, expectancy=10.0)
+    _seed_baseline(store, win_rate=0.5, expectancy_per_lot=10.0)
     seeder = _TradeSeeder(store)
     for _ in range(4):  # < min_trades (5)
         seeder.add(sid="s1", pnl=-1.0)
@@ -143,7 +150,7 @@ async def test_no_baseline_no_event() -> None:
 @pytest.mark.asyncio
 async def test_hysteresis_one_alert_then_rearm_on_recovery() -> None:
     store = in_memory_store()
-    _seed_baseline(store, win_rate=0.5, expectancy=10.0)
+    _seed_baseline(store, win_rate=0.5, expectancy_per_lot=0.0)  # isolate win-rate
     seeder = _TradeSeeder(store)
     bus = AsyncEventBus()
     dm, events = _monitor(store, bus)

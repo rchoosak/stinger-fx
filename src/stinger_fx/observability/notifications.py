@@ -111,8 +111,8 @@ def _format_config_reload_failed(evt: ConfigReloadFailedEvent) -> str | None:
 def _format_strategy_drift(evt: StrategyDriftEvent) -> str | None:
     return (
         f"📉 DRIFT · strategy={evt.strategy_id} · n={evt.sample_size} · "
-        f"live wr={evt.live_win_rate:.2f}/exp={evt.live_expectancy:.2f} "
-        f"vs backtest wr={evt.baseline_win_rate:.2f}/exp={evt.baseline_expectancy:.2f} "
+        f"live wr={evt.live_win_rate:.2f}/exp_lot={evt.live_expectancy_per_lot:.2f} "
+        f"vs backtest wr={evt.baseline_win_rate:.2f}/exp_lot={evt.baseline_expectancy_per_lot:.2f} "
         f"· {evt.reason}"
     )
 

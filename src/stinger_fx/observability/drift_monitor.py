@@ -41,10 +41,10 @@ class DriftMonitor:
         self._strategy_for_magic = strategy_for_magic
         self._cfg = cfg
         self._sub: Subscription | None = None
-        # strategy_id → (baseline_win_rate, baseline_expectancy). Only
-        # successful loads are cached; a missing baseline is re-queried so a
-        # backtest run mid-session is picked up.
-        self._baseline_cache: dict[str, tuple[float, float]] = {}
+        # strategy_id → parsed backtest metrics dict. Only successful loads are
+        # cached; a missing baseline is re-queried so a backtest run mid-session
+        # is picked up.
+        self._baseline_cache: dict[str, dict] = {}
         # strategy_id → currently-alerted (hysteresis re-arm flag).
         self._alerted: dict[str, bool] = {}
 
@@ -59,35 +59,36 @@ class DriftMonitor:
             await self._sub.unsubscribe()
             self._sub = None
 
-    def _baseline(self, strategy_id: str) -> tuple[float, float] | None:
+    def _baseline(self, strategy_id: str) -> dict | None:
         cached = self._baseline_cache.get(strategy_id)
         if cached is not None:
             return cached
         metrics = self._backtests.latest_metrics_for(strategy_id)
         if metrics is None:
             return None
-        base = (
-            float(metrics.get("win_rate", 0.0)),
-            float(metrics.get("expectancy", 0.0)),
-        )
-        self._baseline_cache[strategy_id] = base
-        return base
+        self._baseline_cache[strategy_id] = metrics
+        return metrics
 
     async def _on_closed(self, evt: PositionClosedEvent) -> None:
         try:
             sid = self._strategy_for_magic(evt.position.magic)
             if sid is None:
                 return
-            pnls = self._trades.recent_pnls_for(sid, self._cfg.window)
-            if len(pnls) < self._cfg.min_trades:
+            trades = self._trades.recent_trades_for(sid, self._cfg.window)
+            n = len(trades)
+            if n < self._cfg.min_trades:
                 return
             base = self._baseline(sid)
             if base is None:
                 return
-            base_wr, base_exp = base
+            base_wr = float(base.get("win_rate", 0.0))
+            # Per-lot so the comparison is size-invariant (live position size
+            # often differs from the backtest baseline, e.g. risk-based sizing).
+            base_exp = base.get("expectancy_per_lot")
 
-            live_wr = sum(1 for p in pnls if p > 0) / len(pnls)
-            live_exp = sum(pnls) / len(pnls)
+            live_wr = sum(1 for pnl, _ in trades if pnl > 0) / n
+            per_lot = [pnl / vol for pnl, vol in trades if vol > 0]
+            live_exp = sum(per_lot) / len(per_lot) if per_lot else 0.0
 
             reasons: list[str] = []
             if base_wr > 0 and live_wr < base_wr * self._cfg.min_win_rate_ratio:
@@ -95,26 +96,34 @@ class DriftMonitor:
                     f"win-rate {live_wr:.2f} < floor "
                     f"{base_wr * self._cfg.min_win_rate_ratio:.2f} (baseline {base_wr:.2f})"
                 )
-            if base_exp > 0 and live_exp < base_exp * self._cfg.min_expectancy_ratio:
+            # expectancy_per_lot is absent from baselines produced before this
+            # metric existed — skip the expectancy check rather than guess.
+            if (
+                base_exp is not None
+                and float(base_exp) > 0
+                and per_lot
+                and live_exp < float(base_exp) * self._cfg.min_expectancy_ratio
+            ):
                 reasons.append(
-                    f"expectancy {live_exp:.2f} < floor "
-                    f"{base_exp * self._cfg.min_expectancy_ratio:.2f} (baseline {base_exp:.2f})"
+                    f"expectancy/lot {live_exp:.2f} < floor "
+                    f"{float(base_exp) * self._cfg.min_expectancy_ratio:.2f} "
+                    f"(baseline {float(base_exp):.2f})"
                 )
             degraded = bool(reasons)
 
             if degraded and not self._alerted.get(sid, False):
                 reason = "; ".join(reasons)
-                logger.warning(
-                    "strategy_drift strategy=%s n=%d %s", sid, len(pnls), reason
-                )
+                logger.warning("strategy_drift strategy=%s n=%d %s", sid, n, reason)
                 await self._bus.publish(
                     StrategyDriftEvent(
                         strategy_id=sid,
-                        sample_size=len(pnls),
+                        sample_size=n,
                         live_win_rate=live_wr,
-                        live_expectancy=live_exp,
+                        live_expectancy_per_lot=live_exp,
                         baseline_win_rate=base_wr,
-                        baseline_expectancy=base_exp,
+                        baseline_expectancy_per_lot=(
+                            float(base_exp) if base_exp is not None else 0.0
+                        ),
                         reason=reason,
                     )
                 )

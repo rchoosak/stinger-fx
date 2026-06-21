@@ -317,9 +317,9 @@ class StrategyDriftEvent(Event):
     strategy_id: str
     sample_size: int
     live_win_rate: float
-    live_expectancy: float
+    live_expectancy_per_lot: float
     baseline_win_rate: float
-    baseline_expectancy: float
+    baseline_expectancy_per_lot: float
     reason: str
 
 

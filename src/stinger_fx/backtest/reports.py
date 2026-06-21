@@ -80,6 +80,15 @@ class BacktestReport:
         return sum(t.pnl for t in self.trades) / len(self.trades)
 
     @property
+    def expectancy_per_lot(self) -> float:
+        """Mean pnl per 1.0 lot — size-invariant, so it can be compared across
+        runs/live regardless of position size (used by the drift monitor)."""
+        sized = [t.pnl / t.volume for t in self.trades if t.volume > 0]
+        if not sized:
+            return 0.0
+        return sum(sized) / len(sized)
+
+    @property
     def max_drawdown(self) -> float:
         """Peak-to-trough drawdown on the equity curve (in account currency)."""
         peak = self.initial_balance
@@ -122,6 +131,7 @@ class BacktestReport:
             "win_rate": round(self.win_rate, 4),
             "profit_factor": round(self.profit_factor, 4) if self.profit_factor != float("inf") else None,
             "expectancy": round(self.expectancy, 2),
+            "expectancy_per_lot": round(self.expectancy_per_lot, 2),
             "max_drawdown": round(self.max_drawdown, 2),
             "sharpe": round(self.sharpe, 4),
             "total_commission": round(self.total_commission, 2),

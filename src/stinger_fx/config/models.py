@@ -151,7 +151,8 @@ class DriftMonitorConfig(BaseModel):
     """Alert when live win-rate < baseline win-rate x this."""
 
     min_expectancy_ratio: float = Field(0.5, gt=0, le=1)
-    """Alert when live expectancy < baseline expectancy x this."""
+    """Alert when live per-lot expectancy < baseline per-lot expectancy x this
+    (per-lot so it's comparable regardless of position size)."""
 
 
 class RiskConfig(BaseModel):

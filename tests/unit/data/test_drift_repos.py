@@ -1,4 +1,4 @@
-"""TradeRepo.recent_pnls_for + BacktestRepo.latest_metrics_for — the drift
+"""TradeRepo.recent_trades_for + BacktestRepo.latest_metrics_for — the drift
 monitor's live + baseline data sources."""
 
 from __future__ import annotations
@@ -25,17 +25,18 @@ def _add(repo: TradeRepo, *, sid: str, pnl: float, i: int) -> None:
     )
 
 
-def test_recent_pnls_for_returns_newest_first_for_strategy() -> None:
+def test_recent_trades_for_returns_newest_first_for_strategy() -> None:
     store = in_memory_store()
     repo = TradeRepo(store)
     for i, pnl in enumerate([1.0, 2.0, 3.0, 4.0]):
         _add(repo, sid="s1", pnl=pnl, i=i)
     _add(repo, sid="s2", pnl=99.0, i=100)  # different strategy — ignored
 
-    assert repo.recent_pnls_for("s1", limit=2) == [4.0, 3.0]  # newest first
-    assert repo.recent_pnls_for("s1", limit=10) == [4.0, 3.0, 2.0, 1.0]
-    assert repo.recent_pnls_for("s2", limit=10) == [99.0]
-    assert repo.recent_pnls_for("nobody", limit=10) == []
+    # newest first; each is (pnl, volume) — _add uses volume 0.1
+    assert repo.recent_trades_for("s1", limit=2) == [(4.0, 0.1), (3.0, 0.1)]
+    assert [p for p, _ in repo.recent_trades_for("s1", limit=10)] == [4.0, 3.0, 2.0, 1.0]
+    assert repo.recent_trades_for("s2", limit=10) == [(99.0, 0.1)]
+    assert repo.recent_trades_for("nobody", limit=10) == []
 
 
 def test_latest_metrics_for_returns_newest_finished_run() -> None:
