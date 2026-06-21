@@ -3,6 +3,55 @@
 All notable changes to Stinger-Fx are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] — 2026-06-21
+
+Production-safety hardening, backtest cost/size fidelity, and trading-quality
+features. Everything is **opt-in / off by default**, so existing 1.0.0 configs
+run unchanged. New SQLite tables (`risk_state`) are created automatically.
+
+### Risk & crash recovery
+- **RiskMonitor rehydration** — on restart the engine rebuilds open-position
+  counts (from the broker), today's realized P&L (from the trade log), and
+  restores peak equity + a tripped kill switch from a persisted `risk_state`
+  row. A restart no longer silently resets the daily-loss cap or un-trips the
+  kill switch.
+- **Kill-switch reset** now rebases the drawdown peak to current equity, so a
+  reset during an active drawdown actually lets trading resume instead of
+  re-tripping on the next snapshot.
+- **Live trade persistence** — fully- and partially-closed positions are written
+  to the `trades` table, which feeds daily-loss recovery and the drift monitor.
+- **Hardened realized P&L** — per-account ticket attribution, partial-close P&L
+  counted toward the daily limit, and net P&L taken from MT5 deal history
+  (commission/swap included), queried by the close order's ticket.
+- OrderRouter idempotency contract documented and locked with a test.
+
+### Position sizing
+- **Risk-based position sizing** — size each order so it risks a configured % of
+  account equity at its stop (`risk.position_sizing`), rounded down to the
+  symbol's lot step. Lives in the shared order router, so live and backtests
+  size identically.
+
+### Pre-trade trading filter
+- **Engine-level filter** (`risk.trading_filter`) — blocks orders on wide spread,
+  outside a UTC session window (wraps midnight), within ± minutes of the daily
+  rollover, or inside a news-blackout window. Applied in the shared router so
+  backtests model the same guard; news windows must be timezone-aware.
+
+### Backtest fidelity
+- **Commission + swap** charged in the SimBroker fill — per-side commission and
+  per-night swap flow through net P&L, the equity curve, the trade log, and the
+  live Orders table (`total_commission` / `total_swap` in the metrics).
+- SimBroker reports the live **spread** from the last quote so the spread filter
+  is meaningful in backtests.
+
+### Observability
+- **Live-vs-backtest drift monitor** (`risk.drift_monitor`) — alerts (log +
+  notification sink, event `strategy_drift`) when a strategy's recent live
+  win-rate or **per-lot** expectancy falls below its backtest baseline, with
+  hysteresis to avoid spam.
+
+[1.1.0]: https://github.com/rchoosak/stinger-fx/releases/tag/v1.1.0
+
 ## [1.0.0] — 2026-06-20
 
 First stable release. A multi-strategy Forex/metals trading platform for
