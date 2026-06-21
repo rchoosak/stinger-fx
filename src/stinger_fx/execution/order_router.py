@@ -36,8 +36,10 @@ from stinger_fx.domain import (
     OrderResult,
     OrderStatus,
     Signal,
+    SymbolInfo,
 )
 from stinger_fx.execution.position_sizing import size_by_risk
+from stinger_fx.execution.trading_filter import evaluate_trading_filter
 from stinger_fx.risk import RiskMonitor
 
 logger = logging.getLogger("stinger.engine.router")
@@ -95,28 +97,70 @@ class OrderRouter:
         # backtests and unmapped one-off signals working.
         return self._pool.primary()
 
-    async def _resolve_volume(self, signal: Signal, broker: BaseBroker) -> float:
+    async def _maybe_symbol_info(
+        self, signal: Signal, broker: BaseBroker
+    ) -> SymbolInfo | None:
+        """Fetch symbol info once when risk-based sizing or the spread filter
+        needs it; otherwise skip the broker round-trip. None on error."""
+        if self.risk is None:
+            return None
+        ps = self.risk.position_sizing()
+        tf = self.risk.trading_filter()
+        needs_sizing = (
+            ps.enabled
+            and signal.suggested_sl is not None
+            and signal.entry_ref_price is not None
+        )
+        needs_spread = tf.enabled and tf.max_spread_points > 0
+        if not (needs_sizing or needs_spread):
+            return None
+        try:
+            return await broker.get_symbol_info(signal.symbol)
+        except Exception:
+            logger.exception(
+                "symbol_info_failed strategy=%s symbol=%s",
+                signal.strategy_id, signal.symbol,
+            )
+            return None
+
+    async def _publish_rejected(self, signal: Signal, reason: str) -> None:
+        """Record a pre-trade rejection in the trade journal (risk or filter)."""
+        logger.info(
+            "signal_rejected strategy=%s symbol=%s reason=%s",
+            signal.strategy_id, signal.symbol, reason,
+        )
+        await self.bus.publish(
+            DecisionEvent(
+                decision=Decision(
+                    signal=signal,
+                    time=signal.time,
+                    action="rejected",
+                    reason=reason,
+                    risk_check_passed=False,
+                    client_order_id=None,
+                )
+            )
+        )
+
+    def _resolve_volume(self, signal: Signal, info: SymbolInfo | None) -> float:
         """Risk-based size when sizing is enabled and the inputs are present;
         otherwise the strategy's fixed volume. Falls back on any missing input
-        or broker error so a sizing problem never blocks an order."""
+        so a sizing problem never blocks an order. `info` is the pre-fetched
+        SymbolInfo (shared with the trading filter)."""
         fixed = signal.suggested_volume or 0.01
         if self.risk is None:
             return fixed
         ps = self.risk.position_sizing()
         if not ps.enabled:
             return fixed
-        if signal.suggested_sl is None or signal.entry_ref_price is None:
+        if (
+            signal.suggested_sl is None
+            or signal.entry_ref_price is None
+            or info is None
+        ):
             return fixed
         equity = self.risk.current_equity()
         if equity is None:
-            return fixed
-        try:
-            info = await broker.get_symbol_info(signal.symbol)
-        except Exception:
-            logger.exception(
-                "position_sizing_symbol_info_failed strategy=%s symbol=%s",
-                signal.strategy_id, signal.symbol,
-            )
             return fixed
         sized = size_by_risk(
             equity=equity,
@@ -148,31 +192,31 @@ class OrderRouter:
         client_order_id = str(uuid.uuid4())
         magic = self.strategy_magic.get(signal.strategy_id, 0)
         broker = self._broker_for(signal.strategy_id)
-        volume = await self._resolve_volume(signal, broker)
+        # One symbol-info fetch, shared by the spread filter and sizing.
+        info = await self._maybe_symbol_info(signal, broker)
+
+        # Engine-level pre-trade filter — spread / session / rollover / news.
+        # Uses signal.time so it works on sim time in backtests too.
+        if self.risk is not None:
+            tf = self.risk.trading_filter()
+            if tf.enabled:
+                reason = evaluate_trading_filter(
+                    tf,
+                    now=signal.time,
+                    spread_points=info.spread if info is not None else None,
+                )
+                if reason is not None:
+                    await self._publish_rejected(signal, f"trading_filter: {reason}")
+                    return
+
+        volume = self._resolve_volume(signal, info)
 
         # Pre-trade risk check. Rejection short-circuits the order path and
         # is recorded in a DecisionEvent so the trade journal shows why.
         if self.risk is not None:
             verdict = self.risk.check_signal(signal)
             if not verdict.allowed:
-                logger.info(
-                    "signal_rejected_by_risk strategy=%s symbol=%s reason=%s",
-                    signal.strategy_id,
-                    signal.symbol,
-                    verdict.reason,
-                )
-                await self.bus.publish(
-                    DecisionEvent(
-                        decision=Decision(
-                            signal=signal,
-                            time=signal.time,
-                            action="rejected",
-                            reason=verdict.reason,
-                            risk_check_passed=False,
-                            client_order_id=None,
-                        )
-                    )
-                )
+                await self._publish_rejected(signal, verdict.reason)
                 return
 
         req = OrderRequest(

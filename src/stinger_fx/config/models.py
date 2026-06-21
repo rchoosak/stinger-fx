@@ -86,6 +86,54 @@ class PositionSizingConfig(BaseModel):
     """Equity fraction risked per trade at its stop, e.g. 1.0 = 1%."""
 
 
+class NewsBlackout(BaseModel):
+    """A UTC window during which no new orders may be placed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    start: datetime
+    end: datetime
+
+    @model_validator(mode="after")
+    def _check_order(self) -> NewsBlackout:
+        if self.end <= self.start:
+            raise ValueError("news blackout end must be after start")
+        return self
+
+
+class TradingFilterConfig(BaseModel):
+    """Account-level pre-trade guard against bad-fill conditions every strategy
+    faces. All checks are independently toggleable; all off by default."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    max_spread_points: int = Field(0, ge=0)
+    """Block when the broker spread exceeds this (points). 0 = no spread cap."""
+
+    session_start_hour_utc: int | None = Field(default=None, ge=0, le=23)
+    session_end_hour_utc: int | None = Field(default=None, ge=1, le=24)
+    """Trade only within [start, end) UTC hours. Both None = no session gate.
+    A start > end wraps past midnight (e.g. 22→6)."""
+
+    block_rollover: bool = False
+    rollover_hour_utc: int = Field(21, ge=0, le=23)
+    rollover_block_minutes: int = Field(5, ge=0)
+    """Block within ± this many minutes of `rollover_hour:00` UTC."""
+
+    news_blackouts: list[NewsBlackout] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _session_pair(self) -> TradingFilterConfig:
+        a, b = self.session_start_hour_utc, self.session_end_hour_utc
+        if (a is None) != (b is None):
+            raise ValueError(
+                "session_start_hour_utc and session_end_hour_utc must be set "
+                "together (or both omitted)"
+            )
+        return self
+
+
 class RiskConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -98,6 +146,9 @@ class RiskConfig(BaseModel):
 
     position_sizing: PositionSizingConfig = Field(default_factory=PositionSizingConfig)
     """Account-level risk-based sizing; off by default → fixed lots."""
+
+    trading_filter: TradingFilterConfig = Field(default_factory=TradingFilterConfig)
+    """Account-level pre-trade spread/session/rollover/news guard; off by default."""
 
 
 class MetricsConfig(BaseModel):

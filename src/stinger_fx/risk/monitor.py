@@ -27,7 +27,11 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, NamedTuple
 
-from stinger_fx.config.models import PositionSizingConfig, RiskConfig
+from stinger_fx.config.models import (
+    PositionSizingConfig,
+    RiskConfig,
+    TradingFilterConfig,
+)
 from stinger_fx.core.clock import Clock, LiveClock
 from stinger_fx.core.event_bus import AsyncEventBus, Subscription
 from stinger_fx.core.events import (
@@ -302,6 +306,10 @@ class RiskMonitor:
     def position_sizing(self) -> PositionSizingConfig:
         """Account-level sizing config (stays current across update_config)."""
         return self._cfg.position_sizing
+
+    def trading_filter(self) -> TradingFilterConfig:
+        """Account-level pre-trade filter config (current across update_config)."""
+        return self._cfg.trading_filter
 
     def snapshot(self) -> dict[str, object]:
         """Debug / UI accessor."""

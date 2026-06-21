@@ -229,3 +229,20 @@ async def test_zero_costs_match_gross() -> None:
         assert broker.balance == pytest.approx(10_000 + gross)
     finally:
         await bus.close()
+
+
+# --- spread reported from the last quote (Tier-3 #5 trading filter) --------
+
+
+@pytest.mark.asyncio
+async def test_get_symbol_info_spread_reflects_last_quote() -> None:
+    bus = AsyncEventBus()
+    broker = SimBroker(bus, initial_balance=10_000, point=0.001)
+    try:
+        # No tick seen yet → spread 0.
+        assert (await broker.get_symbol_info("XAUUSD")).spread == 0
+        # bid/ask 0.020 apart at point 0.001 → 20 points.
+        broker.set_market_tick("XAUUSD", bid=2000.000, ask=2000.020)
+        assert (await broker.get_symbol_info("XAUUSD")).spread == 20
+    finally:
+        await bus.close()
