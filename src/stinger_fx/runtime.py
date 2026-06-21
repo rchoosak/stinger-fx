@@ -31,7 +31,7 @@ from stinger_fx.core.events import (
     SignalEvent,
     TickEvent,
 )
-from stinger_fx.data import SqliteStore
+from stinger_fx.data import RiskStateRepo, SqliteStore, TradeRepo
 from stinger_fx.domain import Tick
 from stinger_fx.domain.timeframes import Timeframe
 from stinger_fx.execution import OrderRouter
@@ -144,7 +144,9 @@ class StingerApp:
         magic_by_id: dict[str, int] = {}
 
         # Risk monitor — starts before strategies so it sees their first events.
-        self._risk = RiskMonitor(self.bus, app_cfg.risk)
+        self._risk = RiskMonitor(
+            self.bus, app_cfg.risk, state_repo=RiskStateRepo(self.sqlite)
+        )
         await self._risk.start()
 
         # Build strategies
@@ -242,6 +244,9 @@ class StingerApp:
         )
         await self.engine.start()
         await self._replay_pending_order_queue()
+        # Brokers are connected and any pending orders replayed — now restore
+        # the RiskMonitor's state so the safety limits survive a restart.
+        await self._rehydrate_risk_state()
         # Now that every broker is connected (via engine.start), subscribe
         # each one to the (symbol, timeframe) pairs its strategies declared.
         await self._wire_broker_subscriptions_multi()
@@ -309,6 +314,54 @@ class StingerApp:
         if replayed:
             logger.warning("order_queue_replayed count=%d", replayed)
         return replayed
+
+    async def _rehydrate_risk_state(self) -> None:
+        """Rebuild RiskMonitor state from the broker + trade log after a restart.
+
+        Open positions come from the broker (source of truth for what's live);
+        today's realized P&L from the persisted trade log; peak equity + a
+        tripped kill switch from the persisted state row (loaded inside
+        ``RiskMonitor.rehydrate``). A failure here must NOT abort startup — we
+        log and continue with blank state, which is the pre-rehydrate behavior.
+        """
+        if self._risk is None or self.sqlite is None or len(self._pool) == 0:
+            return
+        try:
+            # Invert strategy → magic so each open position's magic tag maps
+            # back to the strategy that owns it. The router holds the
+            # authoritative map (kept current across hot-reloads).
+            magic_to_sid: dict[int, str] = (
+                {magic: sid for sid, magic in self._router.strategy_magic.items()}
+                if self._router is not None
+                else {}
+            )
+            open_positions: list[tuple[str | None, str, int]] = []
+            for account_id, broker in self._pool.items():
+                try:
+                    positions = await broker.get_positions()
+                except Exception:
+                    logger.exception(
+                        "rehydrate get_positions failed account_id=%s", account_id
+                    )
+                    continue
+                for pos in positions:
+                    open_positions.append(
+                        (magic_to_sid.get(pos.magic), pos.symbol, pos.ticket)
+                    )
+
+            now = datetime.now(UTC)
+            midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            total, by_symbol = TradeRepo(self.sqlite).realized_since(midnight)
+
+            await self._risk.rehydrate(
+                open_positions=open_positions,
+                daily_realized_pnl=total,
+                daily_pnl_by_symbol=by_symbol,
+            )
+        except Exception:
+            logger.exception(
+                "risk_state_rehydrate_failed — continuing with blank state"
+            )
 
     async def _publish_account_snapshot(self) -> None:
         """Scheduler job: pull account state from every broker, fan out on bus.

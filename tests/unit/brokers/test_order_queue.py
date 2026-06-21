@@ -152,6 +152,7 @@ async def test_duplicate_client_order_id_is_refused() -> None:
 
         r2 = await queue.submit(_req("dup-1"), broker)
         assert r2.ok is False
+        assert r2.status == OrderStatus.REJECTED
         assert "duplicate" in r2.message.lower()
         # No second broker call
         assert len(broker.calls) == 1
