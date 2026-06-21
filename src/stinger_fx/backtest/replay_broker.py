@@ -219,6 +219,16 @@ class SimBroker(BaseBroker):
         )
 
     async def get_symbol_info(self, symbol: str) -> SymbolInfo:
+        # Report the current spread (points) from the last quote so the
+        # engine-level spread filter is meaningful in backtests. 0 until a
+        # tick has been seen, or in bar mode where bid == ask.
+        bid = self._last_bid.get(symbol)
+        ask = self._last_ask.get(symbol)
+        spread = (
+            max(0, round((ask - bid) / self._point))
+            if bid is not None and ask is not None
+            else 0
+        )
         return SymbolInfo(
             symbol=symbol,
             digits=5,
@@ -227,6 +237,7 @@ class SimBroker(BaseBroker):
             volume_min=0.01,
             volume_max=100.0,
             volume_step=0.01,
+            spread=spread,
             currency_base="EUR",
             currency_profit="USD",
             currency_margin="USD",
