@@ -76,6 +76,7 @@ class OrderSubmittedEvent(Event):
 
 class OrderFilledEvent(Event):
     order: Order
+    account_id: str = "default"
 
 
 class OrderRejectedEvent(Event):
@@ -98,6 +99,7 @@ class PositionUpdatedEvent(Event):
 class PositionClosedEvent(Event):
     position: Position
     realized_pnl: float
+    account_id: str = "default"
     # Broker fill price of the close. Optional for backward compatibility;
     # the TradePersister records it on the trade row when present.
     close_price: float | None = None
@@ -158,6 +160,8 @@ class PartialClosedEvent(Event):
     position: Position
     closed_volume: float = Field(gt=0)
     realized_pnl: float
+    account_id: str = "default"
+    close_price: float | None = None
     reason: str = ""
 
 

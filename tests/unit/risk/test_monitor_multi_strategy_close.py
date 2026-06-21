@@ -223,10 +223,13 @@ async def test_ticket_map_drains_on_close() -> None:
     try:
         await rm._on_filled(_filled("s1", ticket=100))
         await rm._on_filled(_filled("s2", ticket=200))
-        assert rm._ticket_to_strategy == {100: "s1", 200: "s2"}
+        assert rm._ticket_to_strategy == {
+            ("default", 100): "s1",
+            ("default", 200): "s2",
+        }
 
         await rm._on_closed(_closed(ticket=100))
-        assert rm._ticket_to_strategy == {200: "s2"}, (
+        assert rm._ticket_to_strategy == {("default", 200): "s2"}, (
             f"ticket 100 should have been popped — got {rm._ticket_to_strategy}"
         )
 

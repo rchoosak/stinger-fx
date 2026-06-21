@@ -11,7 +11,7 @@ from sqlmodel import select
 
 from stinger_fx.backtest.replay_broker import SimBroker
 from stinger_fx.core import AsyncEventBus
-from stinger_fx.core.events import PositionClosedEvent
+from stinger_fx.core.events import PartialClosedEvent, PositionClosedEvent
 from stinger_fx.data import TradePersister, TradeRepo, in_memory_store
 from stinger_fx.data.schemas import TradeRow
 from stinger_fx.domain import OrderRequest, OrderType, Position, Side
@@ -152,9 +152,7 @@ async def test_end_to_end_simbroker_close_persists_with_close_price() -> None:
 
 
 @pytest.mark.asyncio
-async def test_partial_close_does_not_persist() -> None:
-    """Partial closes emit PartialClosedEvent, not PositionClosedEvent — the
-    persister (and RiskMonitor's daily counter) only track full closes."""
+async def test_partial_close_persists_realized_chunk() -> None:
     bus = AsyncEventBus()
     store = in_memory_store()
     broker = SimBroker(bus, initial_balance=10_000, symbol_contract_sizes={"XAUUSD": 100.0})
@@ -177,7 +175,29 @@ async def test_partial_close_does_not_persist() -> None:
         await broker.close_position(result.ticket or 0, volume=0.1)  # partial
         for _ in range(3):
             await asyncio.sleep(0)
-        assert _rows(store) == []  # no full close yet
+        rows = _rows(store)
+        assert len(rows) == 1
+        assert rows[0].volume == pytest.approx(0.1)
+        assert rows[0].close_price == pytest.approx(2010.0)
+        assert rows[0].pnl == pytest.approx((2010.0 - 2000.0) * 0.1 * 100.0)
     finally:
         await p.stop()
         await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_partial_event_fallback_fields() -> None:
+    store = in_memory_store()
+    p = TradePersister(AsyncEventBus(), store, strategy_for_magic=lambda m: "s1")
+    pos = _closed().position.model_copy(update={"volume": 0.15})
+    await p._on_partial_closed(
+        PartialClosedEvent(
+            position=pos,
+            closed_volume=0.05,
+            realized_pnl=-12.0,
+        )
+    )
+    row = _rows(store)[0]
+    assert row.volume == pytest.approx(0.05)
+    assert row.pnl == pytest.approx(-12.0)
+    assert row.close_price == pytest.approx(pos.open_price)

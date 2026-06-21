@@ -9,7 +9,7 @@ import pytest
 
 from stinger_fx.config.models import RiskConfig, SymbolRiskConfig
 from stinger_fx.core import AsyncEventBus
-from stinger_fx.core.events import OrderFilledEvent, PositionClosedEvent
+from stinger_fx.core.events import OrderFilledEvent, PartialClosedEvent, PositionClosedEvent
 from stinger_fx.domain import Order, OrderStatus, OrderType, Position, Side, Signal, SignalStrength
 from stinger_fx.risk.monitor import RiskMonitor
 
@@ -148,6 +148,47 @@ async def test_per_symbol_daily_loss_blocks_signal() -> None:
 
         # GBPUSD is unaffected
         assert monitor.check_signal(_make_signal("GBPUSD")).allowed
+    finally:
+        await monitor.stop()
+        await bus.close()
+
+
+@pytest.mark.asyncio
+async def test_partial_close_loss_counts_without_releasing_position_cap() -> None:
+    bus = AsyncEventBus()
+    cfg = RiskConfig(
+        max_open_positions_per_strategy=1,
+        per_symbol={
+            "EURUSD": SymbolRiskConfig(
+                max_open_positions=1,
+                max_daily_loss_usd=50.0,
+            )
+        },
+    )
+    monitor = RiskMonitor(bus, cfg)
+    await monitor.start()
+
+    try:
+        await bus.publish(_make_filled("EURUSD"))
+        await _drain(bus)
+        pos = _make_closed("EURUSD", pnl=0.0).position.model_copy(
+            update={"volume": 0.05}
+        )
+        await bus.publish(
+            PartialClosedEvent(
+                position=pos,
+                closed_volume=0.05,
+                realized_pnl=-60.0,
+            )
+        )
+        await _drain(bus)
+
+        snap = monitor.snapshot()
+        assert snap["daily_realized_pnl"] == pytest.approx(-60.0)
+        assert snap["daily_pnl_by_symbol"] == {"EURUSD": pytest.approx(-60.0)}
+        assert snap["open_positions"] == {"strat": 1}
+        assert snap["open_positions_by_symbol"] == {"EURUSD": 1}
+        assert not monitor.check_signal(_make_signal("EURUSD")).allowed
     finally:
         await monitor.stop()
         await bus.close()

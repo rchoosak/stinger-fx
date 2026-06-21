@@ -1123,10 +1123,13 @@ class MT5Broker(BaseBroker):
         fill_price = float(getattr(result, "price", None) or price)
         filled_chunk = float(getattr(result, "volume", None) or close_volume)
         contract_size = await self._lookup_contract_size(raw_pos.symbol)
-        realized_pnl = self._realized_pnl(
+        estimated_pnl = self._realized_pnl(
             side=pos_side, open_price=pos_open_price,
             close_price=fill_price, volume=filled_chunk,
             contract_size=contract_size,
+        )
+        realized_pnl = await self._net_realized_pnl_from_deal(
+            mt5, result=result, fallback=estimated_pnl
         )
 
         full_close = filled_chunk >= pos_volume - 1e-9
@@ -1152,6 +1155,7 @@ class MT5Broker(BaseBroker):
                 PositionClosedEvent(
                     position=event_position,
                     realized_pnl=realized_pnl,
+                    account_id=self.account_id,
                     close_price=fill_price,
                 )
             )
@@ -1161,6 +1165,8 @@ class MT5Broker(BaseBroker):
                     position=event_position,
                     closed_volume=filled_chunk,
                     realized_pnl=realized_pnl,
+                    account_id=self.account_id,
+                    close_price=fill_price,
                 )
             )
 
@@ -1248,6 +1254,47 @@ class MT5Broker(BaseBroker):
         Matches SimBroker's convention: BUY → (close − open), SELL → (open − close).
         """
         return (close_price - open_price) * side.sign * volume * contract_size
+
+    async def _net_realized_pnl_from_deal(
+        self,
+        mt5: Any,
+        *,
+        result: Any,
+        fallback: float,
+    ) -> float:
+        """Return account-currency net P&L from the executed MT5 deal.
+
+        MT5 deal history is authoritative because its ``profit`` is already
+        converted to account currency and commission/swap/fee capture costs
+        that cannot be reconstructed from price movement. Some test doubles,
+        old terminals, or transient history delays do not expose the deal yet;
+        in those cases retain the previous price-derived estimate.
+        """
+        deal_ticket = int(getattr(result, "deal", 0) or 0)
+        history_deals_get = getattr(mt5, "history_deals_get", None)
+        if deal_ticket <= 0 or history_deals_get is None:
+            return fallback
+        try:
+            deals = await self._sdk(history_deals_get, ticket=deal_ticket)
+        except Exception:
+            logger.exception(
+                "mt5 close deal lookup failed deal=%s; using estimated pnl",
+                deal_ticket,
+            )
+            return fallback
+        if not deals:
+            logger.warning(
+                "mt5 close deal not yet in history deal=%s; using estimated pnl",
+                deal_ticket,
+            )
+            return fallback
+        return sum(
+            float(getattr(deal, "profit", 0.0) or 0.0)
+            + float(getattr(deal, "commission", 0.0) or 0.0)
+            + float(getattr(deal, "swap", 0.0) or 0.0)
+            + float(getattr(deal, "fee", 0.0) or 0.0)
+            for deal in deals
+        )
 
     # --- State queries ------------------------------------------------------
 

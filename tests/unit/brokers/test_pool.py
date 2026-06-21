@@ -45,6 +45,8 @@ def test_pool_get_by_account_id() -> None:
     pool = BrokerPool([("primary", a), ("secondary", b)])
     assert cast(_FakeBroker, pool.get("primary")).tag == "a"
     assert cast(_FakeBroker, pool.get("secondary")).tag == "b"
+    assert a.account_id == "primary"
+    assert b.account_id == "secondary"
     assert pool.has("primary")
     assert not pool.has("nope")
 
