@@ -37,6 +37,7 @@ from stinger_fx.domain import (
     OrderStatus,
     Signal,
 )
+from stinger_fx.execution.position_sizing import size_by_risk
 from stinger_fx.risk import RiskMonitor
 
 logger = logging.getLogger("stinger.engine.router")
@@ -94,14 +95,60 @@ class OrderRouter:
         # backtests and unmapped one-off signals working.
         return self._pool.primary()
 
+    async def _resolve_volume(self, signal: Signal, broker: BaseBroker) -> float:
+        """Risk-based size when sizing is enabled and the inputs are present;
+        otherwise the strategy's fixed volume. Falls back on any missing input
+        or broker error so a sizing problem never blocks an order."""
+        fixed = signal.suggested_volume or 0.01
+        if self.risk is None:
+            return fixed
+        ps = self.risk.position_sizing()
+        if not ps.enabled:
+            return fixed
+        if signal.suggested_sl is None or signal.entry_ref_price is None:
+            return fixed
+        equity = self.risk.current_equity()
+        if equity is None:
+            return fixed
+        try:
+            info = await broker.get_symbol_info(signal.symbol)
+        except Exception:
+            logger.exception(
+                "position_sizing_symbol_info_failed strategy=%s symbol=%s",
+                signal.strategy_id, signal.symbol,
+            )
+            return fixed
+        sized = size_by_risk(
+            equity=equity,
+            risk_pct=ps.risk_per_trade_pct,
+            entry=signal.entry_ref_price,
+            sl=signal.suggested_sl,
+            contract_size=info.contract_size,
+            volume_min=info.volume_min,
+            volume_max=info.volume_max,
+            volume_step=info.volume_step,
+        )
+        if sized <= 0:
+            logger.info(
+                "position_sizing_fallback strategy=%s symbol=%s — unsizable, "
+                "using fixed volume=%.4f",
+                signal.strategy_id, signal.symbol, fixed,
+            )
+            return fixed
+        logger.info(
+            "position_sized strategy=%s symbol=%s volume=%.4f risk_pct=%.2f equity=%.2f",
+            signal.strategy_id, signal.symbol, sized, ps.risk_per_trade_pct, equity,
+        )
+        return sized
+
     async def handle_signal(self, signal: Signal) -> None:
         # Fresh idempotency key per signal — the OrderQueue persists and
         # dedupes on it so a crash-replay of this exact request can't
         # double-submit (see module docstring).
         client_order_id = str(uuid.uuid4())
         magic = self.strategy_magic.get(signal.strategy_id, 0)
-        volume = signal.suggested_volume or 0.01
         broker = self._broker_for(signal.strategy_id)
+        volume = await self._resolve_volume(signal, broker)
 
         # Pre-trade risk check. Rejection short-circuits the order path and
         # is recorded in a DecisionEvent so the trade journal shows why.

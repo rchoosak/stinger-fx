@@ -74,6 +74,18 @@ class SymbolRiskConfig(BaseModel):
     """Maximum realized loss in USD for this symbol per UTC day. 0 = unlimited."""
 
 
+class PositionSizingConfig(BaseModel):
+    """Risk-based position sizing (account-level, applies to every strategy)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    """When off (default), orders use the strategy's fixed `volume`."""
+
+    risk_per_trade_pct: float = Field(1.0, gt=0, le=100)
+    """Equity fraction risked per trade at its stop, e.g. 1.0 = 1%."""
+
+
 class RiskConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -83,6 +95,9 @@ class RiskConfig(BaseModel):
 
     per_symbol: dict[str, SymbolRiskConfig] = Field(default_factory=dict)
     """Per-symbol overrides.  Keys are symbol names (e.g. ``"EURUSD"``)."""
+
+    position_sizing: PositionSizingConfig = Field(default_factory=PositionSizingConfig)
+    """Account-level risk-based sizing; off by default → fixed lots."""
 
 
 class MetricsConfig(BaseModel):
