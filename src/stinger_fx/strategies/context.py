@@ -86,6 +86,16 @@ class HistoryView:
     def last_tick(self) -> Tick | None:
         return self._last_tick
 
+    def last_price(self) -> float | None:
+        """Latest reference price for this feed — the last tick's mid, else the
+        last closed bar's close, else None. Used to stamp a signal's entry
+        reference for risk-based sizing."""
+        if self._last_tick is not None:
+            return (self._last_tick.bid + self._last_tick.ask) / 2.0
+        if self._bars:
+            return self._bars[-1].close
+        return None
+
 
 class PositionView:
     """View into the engine's position cache, filtered by magic number."""
@@ -188,6 +198,7 @@ class StrategyContext:
                 suggested_volume=volume,
                 suggested_sl=sl,
                 suggested_tp=tp,
+                entry_ref_price=self.history.last_price(),
                 comment=comment,
             )
         )
@@ -210,6 +221,7 @@ class StrategyContext:
                 suggested_volume=volume,
                 suggested_sl=sl,
                 suggested_tp=tp,
+                entry_ref_price=self.history.last_price(),
                 comment=comment,
             )
         )
@@ -246,6 +258,7 @@ class StrategyContext:
                 suggested_tp=tp,
                 order_type=OrderType.STOP,
                 suggested_price=price,
+                entry_ref_price=price,
                 comment=comment,
             )
         )
@@ -275,6 +288,7 @@ class StrategyContext:
                 suggested_tp=tp,
                 order_type=OrderType.STOP,
                 suggested_price=price,
+                entry_ref_price=price,
                 comment=comment,
             )
         )
@@ -306,6 +320,7 @@ class StrategyContext:
                 suggested_tp=tp,
                 order_type=OrderType.LIMIT,
                 suggested_price=price,
+                entry_ref_price=price,
                 comment=comment,
             )
         )
@@ -336,6 +351,7 @@ class StrategyContext:
                 suggested_tp=tp,
                 order_type=OrderType.LIMIT,
                 suggested_price=price,
+                entry_ref_price=price,
                 comment=comment,
             )
         )

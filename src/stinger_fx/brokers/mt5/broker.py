@@ -1270,22 +1270,26 @@ class MT5Broker(BaseBroker):
         old terminals, or transient history delays do not expose the deal yet;
         in those cases retain the previous price-derived estimate.
         """
+        # `history_deals_get(ticket=N)` filters by the ORDER ticket (DEAL_ORDER)
+        # — NOT the deal ticket — so query by result.order, the close order.
+        # result.deal just confirms a deal actually executed.
         deal_ticket = int(getattr(result, "deal", 0) or 0)
+        order_ticket = int(getattr(result, "order", 0) or 0)
         history_deals_get = getattr(mt5, "history_deals_get", None)
-        if deal_ticket <= 0 or history_deals_get is None:
+        if deal_ticket <= 0 or order_ticket <= 0 or history_deals_get is None:
             return fallback
         try:
-            deals = await self._sdk(history_deals_get, ticket=deal_ticket)
+            deals = await self._sdk(history_deals_get, ticket=order_ticket)
         except Exception:
             logger.exception(
-                "mt5 close deal lookup failed deal=%s; using estimated pnl",
-                deal_ticket,
+                "mt5 close deal lookup failed order=%s; using estimated pnl",
+                order_ticket,
             )
             return fallback
         if not deals:
             logger.warning(
-                "mt5 close deal not yet in history deal=%s; using estimated pnl",
-                deal_ticket,
+                "mt5 close deals not yet in history order=%s; using estimated pnl",
+                order_ticket,
             )
             return fallback
         return sum(

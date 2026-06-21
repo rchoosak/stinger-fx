@@ -27,7 +27,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, NamedTuple
 
-from stinger_fx.config.models import RiskConfig
+from stinger_fx.config.models import PositionSizingConfig, RiskConfig
 from stinger_fx.core.clock import Clock, LiveClock
 from stinger_fx.core.event_bus import AsyncEventBus, Subscription
 from stinger_fx.core.events import (
@@ -293,6 +293,15 @@ class RiskMonitor:
                     )
 
         return RiskVerdict(True)
+
+    def current_equity(self) -> float | None:
+        """Latest equity from AccountSnapshotEvent, or None before the first
+        snapshot. Used by the OrderRouter for risk-based position sizing."""
+        return self._current_equity
+
+    def position_sizing(self) -> PositionSizingConfig:
+        """Account-level sizing config (stays current across update_config)."""
+        return self._cfg.position_sizing
 
     def snapshot(self) -> dict[str, object]:
         """Debug / UI accessor."""

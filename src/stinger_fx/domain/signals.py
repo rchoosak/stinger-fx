@@ -45,6 +45,11 @@ class Signal(BaseModel):
     order_type: OrderType = OrderType.MARKET
     suggested_price: float | None = None
     suggested_stop_price: float | None = None
+    # Reference entry price used ONLY for risk-based position sizing
+    # (stop distance = |entry_ref_price − suggested_sl|). Stamped by
+    # `ctx.buy/sell`; never becomes the OrderRequest price, so market orders
+    # stay price-less.
+    entry_ref_price: float | None = None
     comment: str = ""
     extra: dict[str, Any] = Field(default_factory=dict)
 

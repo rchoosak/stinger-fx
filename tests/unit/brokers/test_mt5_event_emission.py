@@ -190,7 +190,9 @@ class _FakeMT5:
         )
 
     def history_deals_get(self, *, ticket: int):
-        if ticket == 777 and self._deal is not None:
+        # Real MT5 filters by the ORDER ticket (DEAL_ORDER), not the deal
+        # ticket — _FakeResult.order is 999, result.deal is 777.
+        if ticket == 999 and self._deal is not None:
             return (self._deal,)
         return ()
 
