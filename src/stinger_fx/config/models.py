@@ -94,6 +94,17 @@ class NewsBlackout(BaseModel):
     start: datetime
     end: datetime
 
+    @field_validator("start", "end")
+    @classmethod
+    def _require_tz(cls, v: datetime) -> datetime:
+        # Must be timezone-aware: the trading filter compares these against the
+        # UTC-aware signal time, and naive vs aware raises TypeError at runtime.
+        if v.tzinfo is None:
+            raise ValueError(
+                "news blackout start/end must include a timezone (e.g. ...T12:00:00Z)"
+            )
+        return v
+
     @model_validator(mode="after")
     def _check_order(self) -> NewsBlackout:
         if self.end <= self.start:
