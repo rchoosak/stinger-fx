@@ -84,6 +84,7 @@ class StingerApp:
         self._strategy_accounts: dict[str, str] = {}
         self._risk: RiskMonitor | None = None
         self._trade_persister: TradePersister | None = None
+        self._drift_monitor: object | None = None  # DriftMonitor when enabled
         self._notifications: object | None = None
         self._mode: str = "normal"
         self._web_host: str = "127.0.0.1"
@@ -182,16 +183,31 @@ class StingerApp:
         # it back via TradeRepo.realized_since on the next restart. Registered
         # as a lifecycle component; the magic→strategy resolver reads the
         # router's live map so it stays correct across hot-reloads.
+        def strategy_for_magic(m: int) -> str | None:
+            if self._router is None:
+                return None
+            return {
+                magic: sid for sid, magic in self._router.strategy_magic.items()
+            }.get(m)
+
         self._trade_persister = TradePersister(
-            self.bus,
-            self.sqlite,
-            strategy_for_magic=lambda m: (
-                {magic: sid for sid, magic in self._router.strategy_magic.items()}.get(m)
-                if self._router is not None
-                else None
-            ),
+            self.bus, self.sqlite, strategy_for_magic=strategy_for_magic
         )
         self.engine.register(self._trade_persister)
+
+        # Live-vs-backtest drift monitor — compares each strategy's recent live
+        # win-rate / expectancy against its backtest baseline and alerts on
+        # degradation. Live-only + opt-in.
+        if app_cfg.risk.drift_monitor.enabled:
+            from stinger_fx.observability.drift_monitor import DriftMonitor
+
+            self._drift_monitor = DriftMonitor(
+                self.bus,
+                self.sqlite,
+                strategy_for_magic=strategy_for_magic,
+                cfg=app_cfg.risk.drift_monitor,
+            )
+            self.engine.register(self._drift_monitor)
 
         # Broker subscriptions are deferred until run_until_signal(), because
         # the brokers aren't connected until engine.start() runs through the

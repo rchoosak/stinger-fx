@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-from sqlmodel import select
+from sqlmodel import col, select
 
 from stinger_fx.data.schemas import (
     BacktestRunRow,
@@ -170,6 +170,21 @@ class TradeRepo:
             by_symbol[r.symbol] = by_symbol.get(r.symbol, 0.0) + r.pnl
         return total, by_symbol
 
+    def recent_pnls_for(self, strategy_id: str, limit: int) -> list[float]:
+        """The most recent `limit` closed-trade pnls for a strategy, newest
+        first. Used by the DriftMonitor to compute recent live win-rate /
+        expectancy."""
+        with self._store.session() as s:
+            rows = list(
+                s.exec(
+                    select(TradeRow)
+                    .where(TradeRow.strategy_id == strategy_id)
+                    .order_by(TradeRow.close_ts.desc())  # type: ignore[attr-defined]
+                    .limit(limit)
+                )
+            )
+        return [r.pnl for r in rows]
+
 
 class RiskStateRepo:
     """Load/save the single persisted RiskMonitor state row (id=1)."""
@@ -238,6 +253,25 @@ class BacktestRepo:
                 .limit(limit)
             )
             return list(s.exec(stmt))
+
+    def latest_metrics_for(self, strategy_id: str) -> dict | None:
+        """Parsed metrics of the most recent *finished* backtest run for a
+        strategy — the DriftMonitor's baseline. None when no finished run."""
+        with self._store.session() as s:
+            row = s.exec(
+                select(BacktestRunRow)
+                .where(BacktestRunRow.strategy_id == strategy_id)
+                .where(col(BacktestRunRow.finished_at).is_not(None))
+                .order_by(col(BacktestRunRow.started_at).desc())
+                .limit(1)
+            ).first()
+        if row is None or not row.metrics_json:
+            return None
+        try:
+            parsed = json.loads(row.metrics_json)
+        except (ValueError, TypeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
 
 class ConfigAuditRepo:

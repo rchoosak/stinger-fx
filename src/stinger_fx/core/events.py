@@ -309,6 +309,20 @@ class ReconciliationMismatchEvent(Event):
     details: str = ""
 
 
+class StrategyDriftEvent(Event):
+    """A strategy's recent *live* performance has fallen materially below its
+    backtest baseline. Emitted by the DriftMonitor; notification sinks can route
+    it to the operator. Alert-only — it does not stop the strategy."""
+
+    strategy_id: str
+    sample_size: int
+    live_win_rate: float
+    live_expectancy: float
+    baseline_win_rate: float
+    baseline_expectancy: float
+    reason: str
+
+
 class ConfigReloadedEvent(Event):
     changes: dict[str, Any] = Field(default_factory=dict)
 
