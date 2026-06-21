@@ -134,6 +134,27 @@ class TradingFilterConfig(BaseModel):
         return self
 
 
+class DriftMonitorConfig(BaseModel):
+    """Live-vs-backtest drift monitor — alert when a strategy's recent live
+    win-rate/expectancy falls materially below its backtest baseline."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    window: int = Field(50, ge=1)
+    """Most recent live trades per strategy used to compute live stats."""
+
+    min_trades: int = Field(20, ge=1)
+    """Need at least this many recent live trades before alerting."""
+
+    min_win_rate_ratio: float = Field(0.7, gt=0, le=1)
+    """Alert when live win-rate < baseline win-rate x this."""
+
+    min_expectancy_ratio: float = Field(0.5, gt=0, le=1)
+    """Alert when live per-lot expectancy < baseline per-lot expectancy x this
+    (per-lot so it's comparable regardless of position size)."""
+
+
 class RiskConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -149,6 +170,9 @@ class RiskConfig(BaseModel):
 
     trading_filter: TradingFilterConfig = Field(default_factory=TradingFilterConfig)
     """Account-level pre-trade spread/session/rollover/news guard; off by default."""
+
+    drift_monitor: DriftMonitorConfig = Field(default_factory=DriftMonitorConfig)
+    """Live-vs-backtest drift alerting; off by default."""
 
 
 class MetricsConfig(BaseModel):

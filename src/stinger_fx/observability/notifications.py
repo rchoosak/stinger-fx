@@ -33,6 +33,7 @@ from stinger_fx.core.events import (
     Event,
     OrderFilledEvent,
     OrderRejectedEvent,
+    StrategyDriftEvent,
     StrategyStateChangedEvent,
 )
 
@@ -107,12 +108,22 @@ def _format_config_reload_failed(evt: ConfigReloadFailedEvent) -> str | None:
     return f"⛔ CONFIG RELOAD FAILED · {evt.file} · {evt.error}"
 
 
+def _format_strategy_drift(evt: StrategyDriftEvent) -> str | None:
+    return (
+        f"📉 DRIFT · strategy={evt.strategy_id} · n={evt.sample_size} · "
+        f"live wr={evt.live_win_rate:.2f}/exp_lot={evt.live_expectancy_per_lot:.2f} "
+        f"vs backtest wr={evt.baseline_win_rate:.2f}/exp_lot={evt.baseline_expectancy_per_lot:.2f} "
+        f"· {evt.reason}"
+    )
+
+
 _EVENT_REGISTRY: dict[str, tuple[type[Event], Formatter]] = {
     "order_filled":            (OrderFilledEvent,           _format_order_filled),       # type: ignore[dict-item]
     "order_rejected":          (OrderRejectedEvent,         _format_order_rejected),     # type: ignore[dict-item]
     "signal_rejected_by_risk": (DecisionEvent,              _format_signal_rejected),    # type: ignore[dict-item]
     "kill_switch_tripped":     (DecisionEvent,              _format_kill_switch),        # type: ignore[dict-item]
     "strategy_state_changed":  (StrategyStateChangedEvent,  _format_strategy_state),     # type: ignore[dict-item]
+    "strategy_drift":          (StrategyDriftEvent,         _format_strategy_drift),     # type: ignore[dict-item]
     "config_reloaded":         (ConfigReloadedEvent,        _format_config_reloaded),    # type: ignore[dict-item]
     "config_reload_failed":    (ConfigReloadFailedEvent,    _format_config_reload_failed),  # type: ignore[dict-item]
 }

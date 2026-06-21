@@ -65,3 +65,24 @@ def test_max_drawdown_from_equity_curve() -> None:
         final_balance=10_100.0,
     )
     assert r.max_drawdown == pytest.approx(700.0)
+
+
+def _trade_vol(pnl: float, volume: float) -> TradeRecord:
+    t0 = datetime(2024, 1, 1, tzinfo=UTC)
+    return TradeRecord(
+        open_ts=t0, close_ts=t0 + timedelta(hours=1),
+        side="buy", open_price=1.10, close_price=1.11, volume=volume, pnl=pnl,
+    )
+
+
+def test_expectancy_per_lot_is_size_invariant() -> None:
+    # Same per-lot edge (pnl/volume = 100) at very different sizes.
+    small = _report([_trade_vol(10.0, 0.1), _trade_vol(10.0, 0.1)])
+    big = _report([_trade_vol(50.0, 0.5), _trade_vol(50.0, 0.5)])
+    # per-lot expectancy is identical — what the drift monitor compares on
+    assert small.expectancy_per_lot == pytest.approx(100.0)
+    assert big.expectancy_per_lot == pytest.approx(100.0)
+    # absolute expectancy scales with size (the metric that would mislead)
+    assert small.expectancy == pytest.approx(10.0)
+    assert big.expectancy == pytest.approx(50.0)
+    assert small.to_metrics_dict()["expectancy_per_lot"] == pytest.approx(100.0)
