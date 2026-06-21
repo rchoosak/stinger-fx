@@ -582,7 +582,9 @@ class SimBroker(BaseBroker):
             strategy_id = self._strategy_id_by_ticket.pop(ticket, "")
             self._positions.pop(ticket, None)
             await self.bus.publish(
-                PositionClosedEvent(position=pos, realized_pnl=pnl)
+                PositionClosedEvent(
+                    position=pos, realized_pnl=pnl, close_price=close_price
+                )
             )
             # Live-backtest UIs subscribe to this — PositionClosedEvent on its
             # own doesn't carry close_price / close_ts, and pulling them from

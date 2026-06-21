@@ -1149,7 +1149,11 @@ class MT5Broker(BaseBroker):
         )
         if full_close:
             await self.bus.publish(
-                PositionClosedEvent(position=event_position, realized_pnl=realized_pnl)
+                PositionClosedEvent(
+                    position=event_position,
+                    realized_pnl=realized_pnl,
+                    close_price=fill_price,
+                )
             )
         else:
             await self.bus.publish(

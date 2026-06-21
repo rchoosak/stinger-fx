@@ -31,7 +31,7 @@ from stinger_fx.core.events import (
     SignalEvent,
     TickEvent,
 )
-from stinger_fx.data import RiskStateRepo, SqliteStore, TradeRepo
+from stinger_fx.data import RiskStateRepo, SqliteStore, TradePersister, TradeRepo
 from stinger_fx.domain import Tick
 from stinger_fx.domain.timeframes import Timeframe
 from stinger_fx.execution import OrderRouter
@@ -83,6 +83,7 @@ class StingerApp:
         self._pool: BrokerPool = BrokerPool()
         self._strategy_accounts: dict[str, str] = {}
         self._risk: RiskMonitor | None = None
+        self._trade_persister: TradePersister | None = None
         self._notifications: object | None = None
         self._mode: str = "normal"
         self._web_host: str = "127.0.0.1"
@@ -175,6 +176,22 @@ class StingerApp:
             queue=self._order_queue,
         )
         await self._router.attach()
+
+        # Trade persistence — write a TradeRow on every full close so the
+        # `trades` table is populated. RiskMonitor's daily-loss recovery reads
+        # it back via TradeRepo.realized_since on the next restart. Registered
+        # as a lifecycle component; the magic→strategy resolver reads the
+        # router's live map so it stays correct across hot-reloads.
+        self._trade_persister = TradePersister(
+            self.bus,
+            self.sqlite,
+            strategy_for_magic=lambda m: (
+                {magic: sid for sid, magic in self._router.strategy_magic.items()}.get(m)
+                if self._router is not None
+                else None
+            ),
+        )
+        self.engine.register(self._trade_persister)
 
         # Broker subscriptions are deferred until run_until_signal(), because
         # the brokers aren't connected until engine.start() runs through the

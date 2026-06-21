@@ -98,6 +98,9 @@ class PositionUpdatedEvent(Event):
 class PositionClosedEvent(Event):
     position: Position
     realized_pnl: float
+    # Broker fill price of the close. Optional for backward compatibility;
+    # the TradePersister records it on the trade row when present.
+    close_price: float | None = None
 
 
 # --- Order management (Phase 4 — modify / partial close) ----------------------

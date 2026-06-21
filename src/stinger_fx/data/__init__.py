@@ -17,6 +17,7 @@ from stinger_fx.data.repositories import (
     TradeRepo,
 )
 from stinger_fx.data.sqlite_store import SqliteStore, in_memory_store
+from stinger_fx.data.trade_persister import TradePersister
 
 __all__ = [
     "BacktestRepo",
@@ -32,6 +33,7 @@ __all__ = [
     "SignalRepo",
     "SqliteStore",
     "SweepRepo",
+    "TradePersister",
     "TradeRepo",
     "in_memory_store",
     "iter_bars",
