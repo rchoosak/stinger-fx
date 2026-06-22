@@ -45,6 +45,9 @@ risk:
   max_open_positions_per_strategy: 5
   max_daily_loss_pct: 5.0
   kill_switch_drawdown_pct: 20.0
+  position_sizing:
+    enabled: true
+    risk_per_trade_pct: 1.0
 
 # Notification sinks — Telegram + Discord webhooks. Each channel chooses
 # which events to forward. Catalogue of `events` values:

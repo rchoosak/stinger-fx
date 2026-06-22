@@ -230,3 +230,55 @@ strategies:
       trailing_distance_atr: 0.8
       trailing_activate_atr: 0.5
       trailing_point: 0.01
+
+  # ----------------------------------------------------------------------- #
+  # D1H4 Trend — medium-to-long-term trend following for XAUUSD.            #
+  #                                                                         #
+  # Consumes H1 only and folds it (calendar-aware) into H4 + D1 internally: #
+  #   • D1 regime gate  — EMA stack + rising/falling slow EMA + ADX floor   #
+  #     (shorts demand a higher ADX than longs).                            #
+  #   • H4 breakout      — close beyond the Donchian channel of the PRIOR   #
+  #     `breakout_lookback` H4 bars (current bar excluded), EMAs aligned,   #
+  #     with True-Range and channel-distance false-breakout filters.        #
+  #   • Chandelier exit  — ratcheting `highest_high(N) − ATR×k` stop, plus  #
+  #     a D1 exit when price closes back through the D1 `exit` EMA.          #
+  #                                                                         #
+  # Market entry only; the strategy supplies a nominal `volume` + an ATR    #
+  # stop and the risk engine sizes the order (enable `risk.position_sizing` #
+  # in app.yaml for true risk-percent sizing). `enabled: false` keeps it    #
+  # out of live mode; the backtest path loads it by id.                     #
+  #                                                                         #
+  # Live cold-start: the D1 series warms from live H1 bars over time (~the  #
+  # `d1_slow_ema + d1_slope_lookback` D1 bars), holding fire until warm.    #
+  # `state_path` (optional) persists the ratcheting stop + position id so   #
+  # they survive a restart; omit it to keep state in-memory.                #
+  - id: d1h4_xauusd
+    class_path: stinger_fx.strategies.examples.d1h4_trend:D1H4TrendStrategy
+    enabled: false
+    params:
+      symbol: XAUUSD
+      daily_anchor_hour: 0          # UTC hour the D1/H4 buckets anchor on
+      session_break_hours: [21, 22] # XAU maintenance shifts with US DST
+      # D1 regime
+      d1_fast_ema: 30
+      d1_slow_ema: 150
+      d1_slope_lookback: 3          # slow EMA must be rising/falling vs N bars ago
+      d1_adx_length: 14
+      d1_long_adx_min: 15
+      d1_short_adx_min: 20          # shorts require a stronger trend
+      d1_exit_ema: 50               # regime exit when D1 close crosses this EMA
+      # H4 entry
+      h4_fast_ema: 10
+      h4_slow_ema: 30
+      breakout_lookback: 15         # Donchian window (prior bars, current excluded)
+      atr_length: 14
+      initial_stop_atr: 2.5         # initial stop = entry ∓ ATR × this
+      max_breakout_atr: 2.5         # reject if breakout-bar True Range exceeds this × ATR
+      max_channel_breakout_atr: 2.5 # reject if close pierced channel by > this × ATR
+      # Chandelier exit
+      chandelier_lookback: 22
+      chandelier_atr: 3.0
+      # Direction / sizing
+      allow_short: true
+      volume: 0.01                  # nominal; risk engine resizes from the stop
+      # state_path: ./data/state/d1h4_xauusd.json   # uncomment to persist live
