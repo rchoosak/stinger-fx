@@ -35,9 +35,11 @@ from stinger_fx.domain import (
     OrderRequest,
     OrderResult,
     OrderStatus,
+    Position,
     Signal,
     SymbolInfo,
 )
+from stinger_fx.execution.exposure import aggregate_open_risk, position_risk
 from stinger_fx.execution.position_sizing import size_by_risk
 from stinger_fx.execution.trading_filter import evaluate_trading_filter
 from stinger_fx.risk import RiskMonitor
@@ -84,6 +86,9 @@ class OrderRouter:
         # order is written to SQLite before submission and replayable on
         # restart; sim/file backtests leave this as None for zero DB latency.
         self.queue = queue
+        # Per-symbol contract size, cached for the aggregate open-risk cap.
+        # Contract size is effectively static per symbol, so one fetch each.
+        self._contract_size_cache: dict[str, float] = {}
 
     @property
     def pool(self) -> BrokerPool:
@@ -112,7 +117,12 @@ class OrderRouter:
             and signal.entry_ref_price is not None
         )
         needs_spread = tf.enabled and tf.max_spread_points > 0
-        if not (needs_sizing or needs_spread):
+        # The aggregate open-risk cap needs the new order's contract size to
+        # size its incremental risk (and the SL to bound it at all).
+        needs_exposure = (
+            self.risk.aggregate_risk_pct() > 0 and signal.suggested_sl is not None
+        )
+        if not (needs_sizing or needs_spread or needs_exposure):
             return None
         try:
             return await broker.get_symbol_info(signal.symbol)
@@ -185,6 +195,70 @@ class OrderRouter:
         )
         return sized
 
+    async def _contract_sizes(
+        self, positions: list[Position], broker: BaseBroker
+    ) -> dict[str, float]:
+        """Contract size per distinct open-position symbol, filling the cache
+        with one fetch per not-yet-seen symbol. Returns the whole cache —
+        extra entries are harmless to the aggregate-risk lookup."""
+        for sym in {p.symbol for p in positions}:
+            if sym in self._contract_size_cache:
+                continue
+            try:
+                si = await broker.get_symbol_info(sym)
+            except Exception:
+                logger.exception("contract_size_fetch_failed symbol=%s", sym)
+                continue
+            self._contract_size_cache[sym] = si.contract_size
+        return self._contract_size_cache
+
+    async def _check_aggregate_risk(
+        self,
+        signal: Signal,
+        volume: float,
+        info: SymbolInfo | None,
+        broker: BaseBroker,
+    ) -> str | None:
+        """Reject when placing this order would push total open risk past the
+        cap: Σ |entry-SL| x volume x contract over all open positions, plus this
+        order, must stay under equity x max_aggregate_risk_pct. Returns the
+        rejection reason, or None when allowed / unconfigured / unmeasurable.
+
+        A stopless order can't be bounded, so it isn't gated by the cap (it
+        also contributes nothing to the existing-risk sum — see
+        `exposure.position_risk`)."""
+        if self.risk is None:
+            return None
+        max_pct = self.risk.aggregate_risk_pct()
+        if max_pct <= 0:
+            return None
+        entry = signal.entry_ref_price or signal.suggested_price
+        if signal.suggested_sl is None or info is None or entry is None:
+            return None
+        equity = self.risk.current_equity()
+        if equity is None or equity <= 0:
+            return None
+        new_risk = position_risk(
+            entry, signal.suggested_sl, volume, info.contract_size
+        )
+        try:
+            positions = await broker.get_positions()
+        except Exception:
+            logger.exception(
+                "aggregate_risk_positions_failed strategy=%s", signal.strategy_id
+            )
+            return None
+        self._contract_size_cache[signal.symbol] = info.contract_size
+        contract_sizes = await self._contract_sizes(positions, broker)
+        existing_risk = aggregate_open_risk(positions, contract_sizes)
+        cap = equity * max_pct / 100.0
+        if existing_risk + new_risk > cap:
+            return (
+                f"max_aggregate_risk_pct={max_pct} "
+                f"(open ${existing_risk:.2f} + new ${new_risk:.2f} > cap ${cap:.2f})"
+            )
+        return None
+
     async def handle_signal(self, signal: Signal) -> None:
         # Fresh idempotency key per signal — the OrderQueue persists and
         # dedupes on it so a crash-replay of this exact request can't
@@ -217,6 +291,12 @@ class OrderRouter:
             verdict = self.risk.check_signal(signal)
             if not verdict.allowed:
                 await self._publish_rejected(signal, verdict.reason)
+                return
+            # Aggregate open-risk cap — needs the broker's open positions, so
+            # it lives here rather than in RiskMonitor (which tracks only counts).
+            reason = await self._check_aggregate_risk(signal, volume, info, broker)
+            if reason is not None:
+                await self._publish_rejected(signal, reason)
                 return
 
         req = OrderRequest(

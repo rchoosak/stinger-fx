@@ -113,6 +113,19 @@ class RiskMonitor:
         self._current_balance: float | None = None
         self._kill_switch_tripped: bool = False
 
+        # Latest margin headroom from the account snapshot (for margin_floor).
+        # None before the first snapshot — then the floor can't be evaluated
+        # and is skipped (fail-open: never block on missing data).
+        self._current_margin_level: float | None = None
+        self._current_free_margin: float | None = None
+
+        # Profit-lock — session-open equity + high-watermark drive a "lock in
+        # gains" trip. Baseline is per engine run (resets on restart); a tripped
+        # lock is persisted so it survives a restart like the kill switch.
+        self._pl_open_equity: float | None = None
+        self._pl_high_equity: float | None = None
+        self._profit_lock_tripped: bool = False
+
     # --- Lifecycle ---------------------------------------------------------
 
     async def start(self) -> None:
@@ -163,6 +176,19 @@ class RiskMonitor:
             self._peak_equity = self._current_equity
         logger.warning(
             "risk_kill_switch_reset peak_rebased_to=%s", self._current_equity
+        )
+        self._persist_state()
+
+    def reset_profit_lock(self) -> None:
+        """Operator-issued reset after a profit-lock trip. Rebases the
+        session-open + high-watermark to current equity so the lock re-arms
+        from here instead of immediately re-tripping."""
+        self._profit_lock_tripped = False
+        if self._current_equity is not None:
+            self._pl_open_equity = self._current_equity
+            self._pl_high_equity = self._current_equity
+        logger.warning(
+            "risk_profit_lock_reset rebased_to=%s", self._current_equity
         )
         self._persist_state()
 
@@ -220,6 +246,7 @@ class RiskMonitor:
             if st is not None:
                 self._peak_equity = st.peak_equity
                 self._kill_switch_tripped = st.kill_switch_tripped
+                self._profit_lock_tripped = st.profit_lock_tripped
 
         logger.info(
             "risk_rehydrated open_positions=%d strategies=%d daily_pnl=%.2f "
@@ -240,6 +267,7 @@ class RiskMonitor:
             self._state_repo.save(
                 peak_equity=self._peak_equity,
                 kill_switch_tripped=self._kill_switch_tripped,
+                profit_lock_tripped=self._profit_lock_tripped,
             )
         except Exception:
             logger.exception("risk_state_persist_failed")
@@ -250,6 +278,8 @@ class RiskMonitor:
         """Return whether a signal is allowed under current risk state."""
         if self._kill_switch_tripped:
             return RiskVerdict(False, "kill_switch_tripped")
+        if self._profit_lock_tripped:
+            return RiskVerdict(False, "profit_lock_tripped")
 
         # Roll the daily counter forward if needed
         self._maybe_roll_daily()
@@ -273,6 +303,32 @@ class RiskMonitor:
                 return RiskVerdict(
                     False,
                     f"max_daily_loss_pct={cfg.max_daily_loss_pct} hit (today loss {loss_pct:.2f}%)",
+                )
+
+        # Margin floor (account-wide) — block new orders when headroom is thin.
+        # Skipped before the first snapshot (None) and a margin level of 0 means
+        # no open margin, which is never a shortage — fail-open in both cases.
+        mf = cfg.margin_floor
+        if mf.enabled:
+            if (
+                mf.min_margin_level_pct > 0
+                and self._current_margin_level is not None
+                and 0 < self._current_margin_level < mf.min_margin_level_pct
+            ):
+                return RiskVerdict(
+                    False,
+                    f"margin_floor.min_margin_level_pct={mf.min_margin_level_pct} "
+                    f"(level {self._current_margin_level:.1f}%)",
+                )
+            if (
+                mf.min_free_margin > 0
+                and self._current_free_margin is not None
+                and self._current_free_margin < mf.min_free_margin
+            ):
+                return RiskVerdict(
+                    False,
+                    f"margin_floor.min_free_margin={mf.min_free_margin} "
+                    f"(free {self._current_free_margin:.2f})",
                 )
 
         # Per-symbol checks
@@ -311,12 +367,20 @@ class RiskMonitor:
         """Account-level pre-trade filter config (current across update_config)."""
         return self._cfg.trading_filter
 
+    def aggregate_risk_pct(self) -> float:
+        """Aggregate open-risk cap as a percent of equity (0 = off). Read by the
+        OrderRouter, which has the broker positions the cap needs."""
+        return self._cfg.max_aggregate_risk_pct
+
     def snapshot(self) -> dict[str, object]:
         """Debug / UI accessor."""
         return {
             "kill_switch_tripped": self._kill_switch_tripped,
+            "profit_lock_tripped": self._profit_lock_tripped,
             "current_equity": self._current_equity,
             "current_balance": self._current_balance,
+            "current_margin_level": self._current_margin_level,
+            "current_free_margin": self._current_free_margin,
             "peak_equity": self._peak_equity,
             "drawdown_pct": self._drawdown_pct(),
             "daily_opening_balance": self._daily_opening_balance,
@@ -399,6 +463,8 @@ class RiskMonitor:
         snap = evt.snapshot
         self._current_equity = snap.equity
         self._current_balance = snap.balance
+        self._current_margin_level = snap.margin_level
+        self._current_free_margin = snap.free_margin
         peak_changed = False
         if self._peak_equity is None or snap.equity > self._peak_equity:
             self._peak_equity = snap.equity
@@ -430,7 +496,35 @@ class RiskMonitor:
                 self._peak_equity,
                 self._current_equity,
             )
+        # Profit-lock check — lock in gains once up `activate_pct`, trip if the
+        # account gives back more than `giveback_pct` of the gain.
+        pl = cfg.profit_lock
+        pl_tripped_now = False
+        if pl.enabled:
+            if self._pl_open_equity is None:
+                self._pl_open_equity = snap.equity
+                self._pl_high_equity = snap.equity
+            elif self._pl_high_equity is None or snap.equity > self._pl_high_equity:
+                self._pl_high_equity = snap.equity
+            if (
+                not self._profit_lock_tripped
+                and self._pl_open_equity is not None
+                and self._pl_high_equity is not None
+            ):
+                arm_level = self._pl_open_equity * (1.0 + pl.activate_pct / 100.0)
+                if self._pl_high_equity >= arm_level:
+                    gain = self._pl_high_equity - self._pl_open_equity
+                    floor = self._pl_high_equity - gain * pl.giveback_pct / 100.0
+                    if snap.equity < floor:
+                        self._profit_lock_tripped = True
+                        pl_tripped_now = True
+                        logger.error(
+                            "risk_profit_lock_tripped equity=%.2f floor=%.2f "
+                            "open=%.2f high=%.2f",
+                            snap.equity, floor, self._pl_open_equity,
+                            self._pl_high_equity,
+                        )
         # Persist only when something durable changed — peak ratchets up
         # rarely and a trip happens once, so write volume stays low.
-        if peak_changed or tripped_now:
+        if peak_changed or tripped_now or pl_tripped_now:
             self._persist_state()
