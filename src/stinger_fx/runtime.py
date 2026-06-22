@@ -85,6 +85,7 @@ class StingerApp:
         self._risk: RiskMonitor | None = None
         self._trade_persister: TradePersister | None = None
         self._drift_monitor: object | None = None  # DriftMonitor when enabled
+        self._circuit_breaker: object | None = None  # StrategyCircuitBreaker when enabled
         self._notifications: object | None = None
         self._mode: str = "normal"
         self._web_host: str = "127.0.0.1"
@@ -208,6 +209,25 @@ class StingerApp:
                 cfg=app_cfg.risk.drift_monitor,
             )
             self.engine.register(self._drift_monitor)
+
+        # Strategy circuit breaker — auto-pause a strategy on drift / losing
+        # streak. Pauses via the runner (enforced by StrategyRunner._active()).
+        # Live-only + opt-in.
+        if app_cfg.risk.circuit_breaker.enabled:
+            from stinger_fx.observability.circuit_breaker import StrategyCircuitBreaker
+
+            async def pause_strategy(sid: str) -> None:
+                runner = self.runners.get(sid)
+                if runner is not None:
+                    await runner.pause()
+
+            self._circuit_breaker = StrategyCircuitBreaker(
+                self.bus,
+                strategy_for_magic=strategy_for_magic,
+                pause_strategy=pause_strategy,
+                cfg=app_cfg.risk.circuit_breaker,
+            )
+            self.engine.register(self._circuit_breaker)
 
         # Broker subscriptions are deferred until run_until_signal(), because
         # the brokers aren't connected until engine.start() runs through the
