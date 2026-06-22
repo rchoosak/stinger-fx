@@ -113,6 +113,12 @@ class RiskMonitor:
         self._current_balance: float | None = None
         self._kill_switch_tripped: bool = False
 
+        # Latest margin headroom from the account snapshot (for margin_floor).
+        # None before the first snapshot — then the floor can't be evaluated
+        # and is skipped (fail-open: never block on missing data).
+        self._current_margin_level: float | None = None
+        self._current_free_margin: float | None = None
+
         # Profit-lock — session-open equity + high-watermark drive a "lock in
         # gains" trip. Baseline is per engine run (resets on restart); a tripped
         # lock is persisted so it survives a restart like the kill switch.
@@ -299,6 +305,32 @@ class RiskMonitor:
                     f"max_daily_loss_pct={cfg.max_daily_loss_pct} hit (today loss {loss_pct:.2f}%)",
                 )
 
+        # Margin floor (account-wide) — block new orders when headroom is thin.
+        # Skipped before the first snapshot (None) and a margin level of 0 means
+        # no open margin, which is never a shortage — fail-open in both cases.
+        mf = cfg.margin_floor
+        if mf.enabled:
+            if (
+                mf.min_margin_level_pct > 0
+                and self._current_margin_level is not None
+                and 0 < self._current_margin_level < mf.min_margin_level_pct
+            ):
+                return RiskVerdict(
+                    False,
+                    f"margin_floor.min_margin_level_pct={mf.min_margin_level_pct} "
+                    f"(level {self._current_margin_level:.1f}%)",
+                )
+            if (
+                mf.min_free_margin > 0
+                and self._current_free_margin is not None
+                and self._current_free_margin < mf.min_free_margin
+            ):
+                return RiskVerdict(
+                    False,
+                    f"margin_floor.min_free_margin={mf.min_free_margin} "
+                    f"(free {self._current_free_margin:.2f})",
+                )
+
         # Per-symbol checks
         sym_cfg = cfg.per_symbol.get(signal.symbol)
         if sym_cfg is not None:
@@ -335,6 +367,11 @@ class RiskMonitor:
         """Account-level pre-trade filter config (current across update_config)."""
         return self._cfg.trading_filter
 
+    def aggregate_risk_pct(self) -> float:
+        """Aggregate open-risk cap as a percent of equity (0 = off). Read by the
+        OrderRouter, which has the broker positions the cap needs."""
+        return self._cfg.max_aggregate_risk_pct
+
     def snapshot(self) -> dict[str, object]:
         """Debug / UI accessor."""
         return {
@@ -342,6 +379,8 @@ class RiskMonitor:
             "profit_lock_tripped": self._profit_lock_tripped,
             "current_equity": self._current_equity,
             "current_balance": self._current_balance,
+            "current_margin_level": self._current_margin_level,
+            "current_free_margin": self._current_free_margin,
             "peak_equity": self._peak_equity,
             "drawdown_pct": self._drawdown_pct(),
             "daily_opening_balance": self._daily_opening_balance,
@@ -424,6 +463,8 @@ class RiskMonitor:
         snap = evt.snapshot
         self._current_equity = snap.equity
         self._current_balance = snap.balance
+        self._current_margin_level = snap.margin_level
+        self._current_free_margin = snap.free_margin
         peak_changed = False
         if self._peak_equity is None or snap.equity > self._peak_equity:
             self._peak_equity = snap.equity

@@ -209,6 +209,23 @@ class ProfitLockConfig(BaseModel):
     """Once armed, trip if equity gives back more than this % of the gain."""
 
 
+class MarginFloorConfig(BaseModel):
+    """Block new orders when the account's margin headroom runs thin — a
+    proactive guard for running several strategies on one account, where the
+    reactive equity gates don't see margin pressure building."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    min_margin_level_pct: float = Field(0.0, ge=0)
+    """Reject new orders when margin level (equity/margin x 100) is below this.
+    0 = off. Margin level of 0 (no open margin) is always allowed."""
+
+    min_free_margin: float = Field(0.0, ge=0)
+    """Reject new orders when free margin (account currency) is below this.
+    0 = off."""
+
+
 class RiskConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -236,6 +253,14 @@ class RiskConfig(BaseModel):
 
     profit_lock: ProfitLockConfig = Field(default_factory=ProfitLockConfig)
     """Lock in gains — stop trading after giving back too much profit; off by default."""
+
+    margin_floor: MarginFloorConfig = Field(default_factory=MarginFloorConfig)
+    """Block new orders when margin level / free margin runs thin; off by default."""
+
+    max_aggregate_risk_pct: float = Field(0.0, ge=0)
+    """Cap total open risk (sum of |entry-SL| x volume x contract over all open
+    positions) as a percent of equity. A new order is blocked if it would push
+    aggregate open risk past this. 0 = off."""
 
 
 class MetricsConfig(BaseModel):
