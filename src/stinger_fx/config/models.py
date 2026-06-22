@@ -180,6 +180,20 @@ class CircuitBreakerConfig(BaseModel):
     """Pause after this many consecutive losing closes. 0 = off."""
 
 
+class ReconciliationConfig(BaseModel):
+    """Broker-vs-engine reconciliation — verify fills landed at the broker and
+    audit broker positions at startup."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    verify_delay_seconds: float = Field(5.0, gt=0)
+    """Delay after a fill before checking the broker actually holds it."""
+
+    startup_audit: bool = True
+    """At startup, flag broker positions not owned by any configured strategy."""
+
+
 class RiskConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -201,6 +215,9 @@ class RiskConfig(BaseModel):
 
     circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig)
     """Auto-pause degrading strategies (drift / losing streak); off by default."""
+
+    reconciliation: ReconciliationConfig = Field(default_factory=ReconciliationConfig)
+    """Broker-vs-engine reconciliation + startup position audit; off by default."""
 
 
 class MetricsConfig(BaseModel):
