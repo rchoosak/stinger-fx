@@ -129,6 +129,7 @@ class RiskStateRow(SQLModel, table=True):
     id: int | None = Field(default=1, primary_key=True)
     peak_equity: float | None = None
     kill_switch_tripped: bool = False
+    profit_lock_tripped: bool = False
     updated_at: datetime
 
 

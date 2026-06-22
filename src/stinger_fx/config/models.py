@@ -194,6 +194,21 @@ class ReconciliationConfig(BaseModel):
     """At startup, flag broker positions not owned by any configured strategy."""
 
 
+class ProfitLockConfig(BaseModel):
+    """Lock in gains — once equity is up `activate_pct`, stop trading if it
+    gives back more than `giveback_pct` of the gain. Complements the
+    drawdown-from-peak kill switch."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    activate_pct: float = Field(5.0, gt=0)
+    """Arm once equity >= session-open x (1 + activate_pct/100)."""
+
+    giveback_pct: float = Field(50.0, gt=0, le=100)
+    """Once armed, trip if equity gives back more than this % of the gain."""
+
+
 class RiskConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -218,6 +233,9 @@ class RiskConfig(BaseModel):
 
     reconciliation: ReconciliationConfig = Field(default_factory=ReconciliationConfig)
     """Broker-vs-engine reconciliation + startup position audit; off by default."""
+
+    profit_lock: ProfitLockConfig = Field(default_factory=ProfitLockConfig)
+    """Lock in gains — stop trading after giving back too much profit; off by default."""
 
 
 class MetricsConfig(BaseModel):
