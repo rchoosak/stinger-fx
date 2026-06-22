@@ -166,6 +166,20 @@ class DriftMonitorConfig(BaseModel):
     (per-lot so it's comparable regardless of position size)."""
 
 
+class CircuitBreakerConfig(BaseModel):
+    """Auto-pause a degrading strategy — turns drift alerts and losing streaks
+    into an action (the strategy stops trading until an operator resumes it)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    pause_on_drift: bool = True
+    """Pause a strategy when the drift monitor flags it."""
+
+    max_consecutive_losses: int = Field(0, ge=0)
+    """Pause after this many consecutive losing closes. 0 = off."""
+
+
 class RiskConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -184,6 +198,9 @@ class RiskConfig(BaseModel):
 
     drift_monitor: DriftMonitorConfig = Field(default_factory=DriftMonitorConfig)
     """Live-vs-backtest drift alerting; off by default."""
+
+    circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig)
+    """Auto-pause degrading strategies (drift / losing streak); off by default."""
 
 
 class MetricsConfig(BaseModel):
