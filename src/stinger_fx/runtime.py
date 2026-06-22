@@ -28,6 +28,7 @@ from stinger_fx.core.events import (
     AccountSnapshotEvent,
     ConfigReloadedEvent,
     ConfigReloadFailedEvent,
+    ReconciliationMismatchEvent,
     SignalEvent,
     TickEvent,
 )
@@ -229,6 +230,24 @@ class StingerApp:
             )
             self.engine.register(self._circuit_breaker)
 
+        # Broker-vs-engine reconciliation — verify each fill landed at the
+        # broker. One Reconciler per account (it holds a single broker). The
+        # startup orphan audit runs separately in run_until_signal once brokers
+        # are connected. Opt-in.
+        if app_cfg.risk.reconciliation.enabled:
+            from stinger_fx.data import Reconciler
+
+            for account_id, broker in self._pool.items():
+                self.engine.register(
+                    Reconciler(
+                        self.bus,
+                        broker,
+                        self.sqlite,
+                        verify_delay_seconds=app_cfg.risk.reconciliation.verify_delay_seconds,
+                    )
+                )
+                logger.info("reconciler_registered account_id=%s", account_id)
+
         # Broker subscriptions are deferred until run_until_signal(), because
         # the brokers aren't connected until engine.start() runs through the
         # registered components — calling subscribe_bars() on a not-yet-
@@ -300,6 +319,8 @@ class StingerApp:
         # Brokers are connected and any pending orders replayed — now restore
         # the RiskMonitor's state so the safety limits survive a restart.
         await self._rehydrate_risk_state()
+        # Surface any broker positions not owned by a configured strategy.
+        await self._audit_orphan_positions()
         # Now that every broker is connected (via engine.start), subscribe
         # each one to the (symbol, timeframe) pairs its strategies declared.
         await self._wire_broker_subscriptions_multi()
@@ -415,6 +436,51 @@ class StingerApp:
             logger.exception(
                 "risk_state_rehydrate_failed — continuing with blank state"
             )
+
+    async def _audit_orphan_positions(self) -> None:
+        """Flag broker positions not owned by any configured strategy (manual
+        trades / foreign EAs) so the operator sees them before trading resumes.
+        One-shot at startup; best-effort — never aborts startup."""
+        assert self.full_cfg is not None
+        recon = self.full_cfg.app.risk.reconciliation
+        if not (recon.enabled and recon.startup_audit):
+            return
+        if self.bus is None or len(self._pool) == 0:
+            return
+        try:
+            known_magics = (
+                set(self._router.strategy_magic.values())
+                if self._router is not None
+                else set()
+            )
+            for account_id, broker in self._pool.items():
+                try:
+                    positions = await broker.get_positions()
+                except Exception:
+                    logger.exception(
+                        "orphan_audit get_positions failed account_id=%s", account_id
+                    )
+                    continue
+                for pos in positions:
+                    if pos.magic in known_magics:
+                        continue
+                    logger.warning(
+                        "orphan_position account_id=%s ticket=%s symbol=%s magic=%s",
+                        account_id, pos.ticket, pos.symbol, pos.magic,
+                    )
+                    await self.bus.publish(
+                        ReconciliationMismatchEvent(
+                            ticket=pos.ticket,
+                            strategy_id="",
+                            mismatch_type="orphan_position",
+                            details=(
+                                f"account={account_id} symbol={pos.symbol} "
+                                f"magic={pos.magic} — not owned by any configured strategy"
+                            ),
+                        )
+                    )
+        except Exception:
+            logger.exception("orphan_audit_failed")
 
     async def _publish_account_snapshot(self) -> None:
         """Scheduler job: pull account state from every broker, fan out on bus.

@@ -198,7 +198,13 @@ class RiskStateRepo:
         with self._store.session() as s:
             return s.get(RiskStateRow, 1)
 
-    def save(self, *, peak_equity: float | None, kill_switch_tripped: bool) -> None:
+    def save(
+        self,
+        *,
+        peak_equity: float | None,
+        kill_switch_tripped: bool,
+        profit_lock_tripped: bool = False,
+    ) -> None:
         """Upsert the single state row — never grows beyond one row."""
         now = datetime.now(UTC)
         with self._store.session() as s:
@@ -208,11 +214,13 @@ class RiskStateRepo:
                     id=1,
                     peak_equity=peak_equity,
                     kill_switch_tripped=kill_switch_tripped,
+                    profit_lock_tripped=profit_lock_tripped,
                     updated_at=now,
                 )
             else:
                 row.peak_equity = peak_equity
                 row.kill_switch_tripped = kill_switch_tripped
+                row.profit_lock_tripped = profit_lock_tripped
                 row.updated_at = now
             s.add(row)
             s.commit()

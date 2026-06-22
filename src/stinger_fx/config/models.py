@@ -180,6 +180,52 @@ class CircuitBreakerConfig(BaseModel):
     """Pause after this many consecutive losing closes. 0 = off."""
 
 
+class ReconciliationConfig(BaseModel):
+    """Broker-vs-engine reconciliation — verify fills landed at the broker and
+    audit broker positions at startup."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    verify_delay_seconds: float = Field(5.0, gt=0)
+    """Delay after a fill before checking the broker actually holds it."""
+
+    startup_audit: bool = True
+    """At startup, flag broker positions not owned by any configured strategy."""
+
+
+class ProfitLockConfig(BaseModel):
+    """Lock in gains — once equity is up `activate_pct`, stop trading if it
+    gives back more than `giveback_pct` of the gain. Complements the
+    drawdown-from-peak kill switch."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    activate_pct: float = Field(5.0, gt=0)
+    """Arm once equity >= session-open x (1 + activate_pct/100)."""
+
+    giveback_pct: float = Field(50.0, gt=0, le=100)
+    """Once armed, trip if equity gives back more than this % of the gain."""
+
+
+class MarginFloorConfig(BaseModel):
+    """Block new orders when the account's margin headroom runs thin — a
+    proactive guard for running several strategies on one account, where the
+    reactive equity gates don't see margin pressure building."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    min_margin_level_pct: float = Field(0.0, ge=0)
+    """Reject new orders when margin level (equity/margin x 100) is below this.
+    0 = off. Margin level of 0 (no open margin) is always allowed."""
+
+    min_free_margin: float = Field(0.0, ge=0)
+    """Reject new orders when free margin (account currency) is below this.
+    0 = off."""
+
+
 class RiskConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -201,6 +247,20 @@ class RiskConfig(BaseModel):
 
     circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig)
     """Auto-pause degrading strategies (drift / losing streak); off by default."""
+
+    reconciliation: ReconciliationConfig = Field(default_factory=ReconciliationConfig)
+    """Broker-vs-engine reconciliation + startup position audit; off by default."""
+
+    profit_lock: ProfitLockConfig = Field(default_factory=ProfitLockConfig)
+    """Lock in gains — stop trading after giving back too much profit; off by default."""
+
+    margin_floor: MarginFloorConfig = Field(default_factory=MarginFloorConfig)
+    """Block new orders when margin level / free margin runs thin; off by default."""
+
+    max_aggregate_risk_pct: float = Field(0.0, ge=0)
+    """Cap total open risk (sum of |entry-SL| x volume x contract over all open
+    positions) as a percent of equity. A new order is blocked if it would push
+    aggregate open risk past this. 0 = off."""
 
 
 class MetricsConfig(BaseModel):
