@@ -178,6 +178,32 @@ async def test_missing_position_records_mismatch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fill_on_other_account_is_ignored() -> None:
+    """Multi-account: a fill on another account must not make this account's
+    Reconciler verify (and false-flag) a ticket it never owned."""
+    bus = AsyncEventBus()
+    broker = _StubBroker(bus)
+    broker.account_id = "acct_b"
+    store = in_memory_store()
+    rec = Reconciler(bus, broker, store, verify_delay_seconds=0.01)
+    await rec.start()
+
+    try:
+        order = _make_order(ticket=7, volume=0.3)
+        broker.set_positions([])  # acct_b holds nothing for this ticket
+        # Fill happened on acct_a — acct_b's Reconciler should skip it.
+        await bus.publish(OrderFilledEvent(order=order, account_id="acct_a"))
+        await asyncio.sleep(0.05)
+        await _drain(bus)
+
+        rows = ReconciliationRepo(store).recent(10)
+        assert rows == [], f"cross-account fill must not be reconciled; got: {rows}"
+    finally:
+        await rec.stop()
+        await bus.close()
+
+
+@pytest.mark.asyncio
 async def test_volume_drift_records_mismatch() -> None:
     """Broker reports a different volume → record volume_drift."""
     bus = AsyncEventBus()
