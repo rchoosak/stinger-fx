@@ -91,6 +91,12 @@ class Reconciler:
     # --- Event handlers -----------------------------------------------------
 
     async def _on_filled(self, evt: OrderFilledEvent) -> None:
+        # A multi-account engine runs one Reconciler per broker, but every
+        # OrderFilledEvent fans out to all of them. Only verify fills on *our*
+        # account — otherwise we'd query this broker for a ticket that filled on
+        # a different account and false-flag it as `position_missing`.
+        if evt.account_id != self._broker.account_id:
+            return
         order = evt.order
         if order.ticket <= 0:
             return
@@ -108,6 +114,10 @@ class Reconciler:
         """Cancel a pending verify when the position closes before the
         delay elapses — closing too fast is a perfectly legal trajectory,
         not a reconciliation failure."""
+        # Scope to our account: another account's close (tickets can collide
+        # across brokers) must not cancel this Reconciler's pending verify.
+        if evt.account_id != self._broker.account_id:
+            return
         task = self._tasks.pop(evt.position.ticket, None)
         if task is not None and not task.done():
             task.cancel()
