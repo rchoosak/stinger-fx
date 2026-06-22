@@ -233,6 +233,23 @@ runs:
     granularity: tick
     data_source: ./data/parquet
 
+  # XAUUSD D1H4 Trend — a single H1 feed; the strategy folds H4/D1 itself
+  # (calendar-aware), so no extra feeds are declared. Needs a long warmup
+  # (≈ d1_slow_ema + slope in D1 bars), so use a multi-month-plus range.
+  #   stinger-fx backtest run --run-id d1h4_xauusd_2025_2026
+  - id: d1h4_xauusd_2025_2026
+    mode: file
+    strategy_id: d1h4_xauusd
+    symbol: XAUUSD
+    timeframe: H1
+    start: 2025-01-01T00:00:00Z
+    end: 2026-06-01T00:00:00Z
+    initial_balance: 100000.0
+    symbol_contract_sizes:
+      XAUUSD: 100.0
+    slippage_pips: 0.5
+    data_source: ./data/parquet
+
 
 # Parameter sweeps. Trigger via `stinger-fx backtest sweep --sweep-id <id>`.
 # Each cell of the cartesian product of `parameter_grid` is backtested in turn
