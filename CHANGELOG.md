@@ -3,6 +3,49 @@
 All notable changes to Stinger-Fx are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] — 2026-06-22
+
+Risk-management round 2 — turn detection into **action** and add **proactive**
+exposure protection for running several strategies on one account. Everything is
+**opt-in / off by default**, so existing 1.1.0 configs run unchanged.
+
+### Auto-pause (circuit breaker)
+- **Strategy circuit breaker** (#94) — auto-pause a degrading strategy via
+  `StrategyRunner.pause()` (enforced by `_active()`). Triggers on a drift-monitor
+  alert (`pause_on_drift`) or a consecutive-loss streak
+  (`max_consecutive_losses`). Idempotent; alert-only behaviour is unchanged.
+  Config: `risk.circuit_breaker`.
+
+### Reconciliation
+- **Reconciler wired into the live engine** (#95) — one per account; verifies
+  each fill landed at the broker after a grace period and emits a
+  `ReconciliationMismatchEvent` on a discrepancy. Previously implemented but
+  never instantiated. Config: `risk.reconciliation`.
+- **Startup orphan-position audit** — at startup, flag every broker position not
+  owned by a configured strategy (manual trades / foreign EAs) before trading
+  resumes.
+- **Multi-account fix** — the Reconciler now scopes fill/close handling to its
+  own broker's account, so a fill on one account no longer false-flags a
+  `position_missing` mismatch on every other account's Reconciler.
+
+### Profit-lock
+- **Profit-lock equity stop** (#96) — once equity rises `activate_pct` above the
+  session-open watermark, arm a trailing floor; if it gives back more than
+  `giveback_pct` of the gain, trip and reject all new signals until an operator
+  `reset_profit_lock()`. Snapshot-driven (live + backtest); the tripped flag is
+  persisted in `risk_state` and survives a restart. Config: `risk.profit_lock`.
+
+### Exposure caps
+- **Margin floor** (#97) — reject new orders when the account's margin level or
+  free margin falls below a configured floor. Snapshot-driven; fails open before
+  the first snapshot and when margin level is 0 (no open margin).
+  Config: `risk.margin_floor`.
+- **Aggregate open-risk cap** (#97) — block a new order when total open risk
+  (Σ `|entry − SL| × volume × contract` over all open positions, plus the new
+  order) would exceed `equity × max_aggregate_risk_pct`. Bounds the
+  simultaneous-stop loss across all strategies sharing one account.
+  Config: `risk.max_aggregate_risk_pct`.
+
 ## [1.1.0] — 2026-06-21
 
 Production-safety hardening, backtest cost/size fidelity, and trading-quality
