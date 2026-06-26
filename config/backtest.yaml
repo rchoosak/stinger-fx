@@ -250,6 +250,28 @@ runs:
     slippage_pips: 0.5
     data_source: ./data/parquet
 
+  # XAUUSD Bollinger Reversion Scalper — single M5 feed (the H1 trend is folded
+  # internally, lookahead-free). Reads pre-aggregated M5 bars from
+  # ./data/parquet/XAUUSD/M5 (aggregate from downloaded ticks first). Commission
+  # + swap are set to plausible XAUUSD values so the result is realistic; enable
+  # `risk.position_sizing` in app.yaml for the % sizing this was validated with.
+  #   stinger-fx backtest run --run-id bbr_xauusd_2025_2026
+  - id: bbr_xauusd_2025_2026
+    mode: file
+    strategy_id: bbr_xauusd
+    symbol: XAUUSD
+    timeframe: M5
+    start: 2025-01-01T00:00:00Z
+    end: 2026-06-01T00:00:00Z
+    initial_balance: 100000.0
+    symbol_contract_sizes:
+      XAUUSD: 100.0
+    slippage_pips: 0.5
+    commission_per_lot: 3.0          # per lot per side (round-turn = 2x)
+    swap_long_per_lot: -12.0         # per lot per night held
+    swap_short_per_lot: -7.0
+    data_source: ./data/parquet
+
 
 # Parameter sweeps. Trigger via `stinger-fx backtest sweep --sweep-id <id>`.
 # Each cell of the cartesian product of `parameter_grid` is backtested in turn

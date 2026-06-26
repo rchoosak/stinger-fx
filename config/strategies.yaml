@@ -282,3 +282,53 @@ strategies:
       allow_short: true
       volume: 0.01                  # nominal; risk engine resizes from the stop
       # state_path: ./data/state/d1h4_xauusd.json   # uncomment to persist live
+
+  # ----------------------------------------------------------------------- #
+  # Bollinger Reversion Scalper — fast intraday mean-reversion on XAUUSD M5. #
+  #                                                                         #
+  # Fades overstretched moves back to the Bollinger middle band, but only   #
+  # while ranging (ADX below max_adx) AND in the direction of the higher-TF #
+  # trend (the H1 trend is folded internally from M5 — lookahead-free, so   #
+  # live == backtest). Fast exits: TP at the mean, ATR stop, hard time-stop.#
+  #                                                                         #
+  # Params below are the train/test-validated set (max_adx=20,             #
+  # trend_ema_period=50): a robust plateau, profitable in- AND out-of-      #
+  # sample on 2025-26 XAUUSD with risk-1% sizing + costs (PF ~1.3 train /   #
+  # ~2.7 OOS, max DD <8%). NOTE: that window is gold's bull regime only —   #
+  # validate on a ranging/bear period + other instruments before trusting. #
+  #                                                                         #
+  # Market entry; nominal `volume` + ATR stop → the risk engine sizes it    #
+  # (enable risk.position_sizing in app.yaml). `enabled: false` keeps it    #
+  # out of live; the backtest path loads it by id.                          #
+  - id: bbr_xauusd
+    class_path: stinger_fx.strategies.examples.bollinger_reversion_scalper:BollingerReversionScalper
+    enabled: false
+    params:
+      symbol: XAUUSD
+      entry_timeframe: M5
+      # Bollinger band + RSI exhaustion
+      bb_period: 20
+      bb_std: 2.0
+      rsi_period: 14
+      rsi_oversold: 30
+      rsi_overbought: 70
+      # Stop / target
+      atr_period: 14
+      sl_atr_mult: 1.5
+      min_target_atr: 0.3          # skip if the mean target is < 0.3 x ATR away
+      # Range filter — don't fade a strong trend
+      adx_period: 14
+      max_adx: 20                  # tuned (train/test): plateau, not the train peak
+      # Higher-TF trend alignment (folded internally from M5; no extra feed)
+      trend_filter_timeframe: H1
+      trend_ema_period: 50         # tuned; result is insensitive across 30..100
+      # Fast exit + cadence guards
+      max_hold_bars: 12            # M5 x 12 = 1h hard time-stop
+      cooldown_bars: 2
+      max_trades_per_session: 10
+      session_start_hour_utc: 7
+      session_end_hour_utc: 20
+      # Direction / sizing
+      allow_long: true
+      allow_short: true
+      volume: 0.01                 # nominal; risk engine resizes from the stop
