@@ -3,6 +3,40 @@
 All notable changes to Stinger-Fx are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] — 2026-06-22
+
+Two new example strategies and the multi-timeframe infrastructure behind them.
+Everything is **opt-in / off by default** (`enabled: false`), so existing 1.2.0
+configs run unchanged.
+
+### Strategies
+- **D1H4 Trend** (#99) — a medium-to-long-term XAUUSD trend follower driven by
+  H1 input only. The strategy folds H1 into H4 and D1 **calendar-aware**
+  (configurable anchor hour, Sunday-fragment → Monday merge, missing-slot
+  rejection vs scheduled breaks, no early finalisation on short Fridays/DST —
+  lookahead-free, identical in live and backtest). Trades a D1 regime gate
+  (EMA stack + slope + ADX, asymmetric long/short thresholds), an H4 Donchian
+  breakout with gap/oversized/channel false-breakout filters, and a ratcheting
+  Chandelier exit plus a D1 EMA exit. Position identity + the trailing stop are
+  persisted and reconciled against the live book across restarts.
+- **Bollinger Reversion Scalper** (#100) — a fast intraday M5 mean-reversion
+  scalper: fade Bollinger-band stretches back to the mean, but only while
+  ranging (ADX ceiling) and **in the direction of the higher-TF trend**, which
+  is folded internally from the M5 stream (emit-on-next-bucket — lookahead-free
+  and identical live/backtest). Quick exits (TP at the mean, ATR stop, hard
+  time-stop) with risk-engine % sizing, per-session entry cap (billed on the
+  fill), cooldown, and a session-hours gate. Defaults (`max_adx=20`,
+  `trend_ema_period=50`) were tuned on a train/test split; that validation
+  window is gold's bull regime only, so re-validate before live use.
+
+### Supporting infrastructure
+- Calendar-aware H1→H4/D1 bar aggregation (`strategies/aggregation.py`) with a
+  pluggable `SessionCalendar` (configurable daily break / week open-close).
+- Pluggable durable strategy-state store (`strategies/state_store.py`) with
+  restart reconciliation.
+- Config examples: `d1h4_xauusd` / `bbr_xauusd` strategies and the
+  `d1h4_xauusd_2025_2026` / `bbr_xauusd_2025_2026` backtest runs.
+
 ## [1.2.0] — 2026-06-22
 
 Risk-management round 2 — turn detection into **action** and add **proactive**
