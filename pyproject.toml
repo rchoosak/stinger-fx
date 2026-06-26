@@ -1,6 +1,6 @@
 [project]
 name = "stinger-fx"
-version = "1.2.0"
+version = "1.3.0"
 description = "EA Bot Platform — multi-strategy Forex trading on MT5/MT4 with backtesting and hot-reloadable config"
 readme = "README.md"
 license = { file = "LICENSE" }
