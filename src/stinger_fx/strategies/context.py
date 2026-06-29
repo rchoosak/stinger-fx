@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar, cast
 
 import structlog
 
@@ -36,6 +36,11 @@ from stinger_fx.domain import (
     Tick,
     Timeframe,
 )
+from stinger_fx.strategies.indicators.incremental import (
+    IncrementalATR,
+    IncrementalRSI,
+    IncrementalStochRSI,
+)
 
 if TYPE_CHECKING:
     from stinger_fx.core.event_bus import AsyncEventBus
@@ -44,6 +49,7 @@ if TYPE_CHECKING:
 
 SignalSink = Callable[[Signal], Awaitable[None]]
 OrderSink = Callable[[OrderRequest], Awaitable[None]]
+_Inc = TypeVar("_Inc")
 
 
 class HistoryView:
@@ -76,6 +82,15 @@ class HistoryView:
     def append_bar(self, bar: Bar) -> None:
         if not bar.is_closed:
             return
+        # The streaming indicators carry Wilder state forward, so a closed bar
+        # must be fed exactly once, in order — a duplicate or out-of-order bar
+        # would corrupt them *permanently* (unlike the old stateless recompute,
+        # which self-healed once a dup scrolled out of the window). Bars for a
+        # feed are strictly time-increasing, so drop anything not newer than the
+        # last. (Today the aggregator already emits each close once; this is
+        # defence-in-depth against a re-emit / gap-fill overlap.)
+        if self._bars and bar.time <= self._bars[-1].time:
+            return
         self._bars.append(bar)
         for _inst, update in self._inc.values():
             update(bar)
@@ -83,9 +98,9 @@ class HistoryView:
     def _incremental(
         self,
         key: tuple[object, ...],
-        factory: Callable[[], object],
-        update: Callable[[object, Bar], object],
-    ) -> object:
+        factory: Callable[[], _Inc],
+        update: Callable[[_Inc, Bar], object],
+    ) -> _Inc:
         """Fetch (or lazily create) a streaming indicator for this feed. On first
         request it is back-filled over the bars already in the buffer — including
         the current one, which the runner appends *before* on_bar — so the value
@@ -94,36 +109,30 @@ class HistoryView:
         if entry is None:
             inst = factory()
 
-            def updater(b: Bar, _inst: object = inst) -> object:
+            def updater(b: Bar, _inst: _Inc = inst) -> object:
                 return update(_inst, b)
 
             for b in self._bars:
                 updater(b)
             self._inc[key] = (inst, updater)
             return inst
-        return entry[0]
+        return cast("_Inc", entry[0])
 
     def rsi(self, period: int = 14) -> float | None:
         """Streaming Wilder RSI for this feed (≈ ``rsi(self.closes(), period)``)."""
-        from stinger_fx.strategies.indicators.incremental import IncrementalRSI
-
-        inst = self._incremental(
+        return self._incremental(
             ("rsi", period),
             lambda: IncrementalRSI(period),
-            lambda i, b: i.update(b.close),  # type: ignore[attr-defined]
-        )
-        return inst.value  # type: ignore[attr-defined,no-any-return]
+            lambda i, b: i.update(b.close),
+        ).value
 
     def atr(self, period: int = 14) -> float | None:
         """Streaming Wilder ATR for this feed (≈ ``atr(self.bars(), period)``)."""
-        from stinger_fx.strategies.indicators.incremental import IncrementalATR
-
-        inst = self._incremental(
+        return self._incremental(
             ("atr", period),
             lambda: IncrementalATR(period),
-            lambda i, b: i.update(b),  # type: ignore[attr-defined]
-        )
-        return inst.value  # type: ignore[attr-defined,no-any-return]
+            lambda i, b: i.update(b),
+        ).value
 
     def stoch_rsi(
         self,
@@ -133,14 +142,11 @@ class HistoryView:
         d_smooth: int = 3,
     ) -> tuple[float, float] | None:
         """Streaming Stochastic RSI (%K, %D) for this feed (≈ ``stoch_rsi(...)``)."""
-        from stinger_fx.strategies.indicators.incremental import IncrementalStochRSI
-
-        inst = self._incremental(
+        return self._incremental(
             ("stoch", rsi_period, stoch_period, k_smooth, d_smooth),
             lambda: IncrementalStochRSI(rsi_period, stoch_period, k_smooth, d_smooth),
-            lambda i, b: i.update(b.close),  # type: ignore[attr-defined]
-        )
-        return inst.value  # type: ignore[attr-defined,no-any-return]
+            lambda i, b: i.update(b.close),
+        ).value
 
     def update_tick(self, tick: Tick) -> None:
         self._last_tick = tick
