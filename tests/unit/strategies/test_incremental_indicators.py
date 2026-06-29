@@ -11,8 +11,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from stinger_fx.domain import Bar, Timeframe
-from stinger_fx.strategies.indicators import rsi, stoch_rsi
+from stinger_fx.strategies.indicators import adx, rsi, stoch_rsi
 from stinger_fx.strategies.indicators.incremental import (
+    IncrementalADX,
     IncrementalATR,
     IncrementalRSI,
     IncrementalStochRSI,
@@ -124,3 +125,46 @@ def test_incremental_rsi_value_is_none_before_warm() -> None:
     for x in _series(14, seed=1):  # 14 values → 13 deltas < period
         assert inc.update(x) is None
     assert inc.value is None
+
+
+@pytest.mark.parametrize("period", [5, 14])
+def test_incremental_adx_matches_batch_every_step(period: int) -> None:
+    # adx() is NOT tail-capped, so adx(bars[:i+1]) is the full from-start
+    # computation — the streaming class anchors on the same seed → bit-identical
+    # (all three fields), at every step including the warmup Nones.
+    bars = _bars(_series(400, seed=period * 7))
+    inc = IncrementalADX(period)
+    for i, b in enumerate(bars):
+        got = inc.update(b)
+        ref = adx(bars[: i + 1], period)
+        if ref is None:
+            assert got is None
+        else:
+            assert got is not None
+            assert got.adx == ref.adx
+            assert got.plus_di == ref.plus_di
+            assert got.minus_di == ref.minus_di
+
+
+def test_incremental_adx_flat_seed_stays_none_like_batch() -> None:
+    # A flat (zero-range) seed window makes the batch return None and keep
+    # returning None (it re-seeds the same flat window); the streaming class
+    # latches dead to match, even once a live tail arrives.
+    period = 14
+    t0 = datetime(2024, 1, 1, tzinfo=UTC)
+    flat = [
+        Bar(symbol="X", timeframe=Timeframe.M1, time=t0 + timedelta(minutes=i),
+            open=2000.0, high=2000.0, low=2000.0, close=2000.0,
+            tick_volume=1, is_closed=True)
+        for i in range(period + 2)
+    ]
+    tail = _bars(_series(200, seed=3))
+    for i in range(len(tail)):
+        tail[i] = tail[i].model_copy(
+            update={"time": t0 + timedelta(minutes=len(flat) + i)}
+        )
+    inc = IncrementalADX(period)
+    for b in flat + tail:
+        inc.update(b)
+    assert inc.value is None
+    assert adx(flat + tail, period) is None

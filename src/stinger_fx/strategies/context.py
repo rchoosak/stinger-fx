@@ -36,7 +36,9 @@ from stinger_fx.domain import (
     Tick,
     Timeframe,
 )
+from stinger_fx.strategies.indicators.adx import ADXResult
 from stinger_fx.strategies.indicators.incremental import (
+    IncrementalADX,
     IncrementalATR,
     IncrementalRSI,
     IncrementalStochRSI,
@@ -146,6 +148,14 @@ class HistoryView:
             ("stoch", rsi_period, stoch_period, k_smooth, d_smooth),
             lambda: IncrementalStochRSI(rsi_period, stoch_period, k_smooth, d_smooth),
             lambda i, b: i.update(b.close),
+        ).value
+
+    def adx(self, period: int = 14) -> ADXResult | None:
+        """Streaming Wilder ADX (+DI/-DI) for this feed (≈ ``adx(self.bars(), period)``)."""
+        return self._incremental(
+            ("adx", period),
+            lambda: IncrementalADX(period),
+            lambda i, b: i.update(b),
         ).value
 
     def update_tick(self, tick: Tick) -> None:
