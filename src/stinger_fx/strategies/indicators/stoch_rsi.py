@@ -21,6 +21,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import NamedTuple
 
+from stinger_fx.strategies.indicators._smoothing import WILDER_TAIL_FACTOR
 from stinger_fx.strategies.indicators.rsi import rsi_series
 
 
@@ -51,6 +52,14 @@ def stoch_rsi(
     needed = rsi_period + extra + 1
     if len(closes) < needed:
         return None
+
+    # Cap the RSI input to the trailing window that can affect the output at
+    # double precision (Wilder smoothing — see _smoothing.wilder_tail), but
+    # never below `needed`, so a 2000-bar history doesn't recompute 2000 RSI
+    # values every bar. Bit-identical to the full pass.
+    cap = max(rsi_period * WILDER_TAIL_FACTOR, needed)
+    if len(closes) > cap:
+        closes = closes[-cap:]
 
     # Compute the full RSI series in one O(n) pass, then take the last
     # (extra + 1) values — identical to calling rsi(closes[:end]) at each
