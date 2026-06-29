@@ -16,8 +16,12 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from stinger_fx.domain import Bar, Timeframe
-from stinger_fx.strategies.indicators import atr, rsi, stoch_rsi
-from stinger_fx.strategies.indicators._smoothing import WILDER_TAIL_FACTOR
+from stinger_fx.strategies.indicators import adx, atr, ema, rsi, stoch_rsi
+from stinger_fx.strategies.indicators._smoothing import (
+    ADX_TAIL_FACTOR,
+    EMA_TAIL_FACTOR,
+    WILDER_TAIL_FACTOR,
+)
 from stinger_fx.strategies.indicators.rsi import rsi_series
 
 # --- reference (uncapped) implementations -------------------------------- #
@@ -109,3 +113,74 @@ def test_short_input_is_unaffected_by_cap() -> None:
     assert rsi(series, 14) == _rsi_ref(series, 14)
     bars = _bars(series)
     assert atr(bars, 14) == _atr_ref(bars, 14)
+
+
+# --- EMA + ADX (added with their own factors) ---------------------------- #
+
+def _ema_ref(values: list[float], period: int) -> float | None:
+    """Un-capped EMA (the production ema() caps its input)."""
+    if len(values) < period:
+        return None
+    alpha = 2.0 / (period + 1)
+    out = sum(values[:period]) / period
+    for v in values[period:]:
+        out = alpha * v + (1 - alpha) * out
+    return out
+
+
+def _adx_ref(bars: list[Bar], period: int) -> float | None:
+    """Un-capped ADX — mirrors adx() without the trailing-window cap."""
+    if len(bars) < 2 * period:
+        return None
+    trs: list[float] = []
+    plus_dms: list[float] = []
+    minus_dms: list[float] = []
+    for i in range(1, len(bars)):
+        prev, curr = bars[i - 1], bars[i]
+        up = curr.high - prev.high
+        down = prev.low - curr.low
+        plus_dms.append(up if (up > down and up > 0) else 0.0)
+        minus_dms.append(down if (down > up and down > 0) else 0.0)
+        trs.append(max(curr.high - curr.low, abs(curr.high - prev.close),
+                       abs(curr.low - prev.close)))
+    tr_s = sum(trs[:period])
+    plus_s = sum(plus_dms[:period])
+    minus_s = sum(minus_dms[:period])
+    dxs: list[float] = []
+    def _dx(ps: float, ms: float, ts: float) -> float:
+        if ts == 0:
+            return 0.0
+        pd, md = 100 * ps / ts, 100 * ms / ts
+        s = pd + md
+        return 100 * abs(pd - md) / s if s > 0 else 0.0
+    dxs.append(_dx(plus_s, minus_s, tr_s))
+    for i in range(period, len(trs)):
+        tr_s = tr_s - tr_s / period + trs[i]
+        plus_s = plus_s - plus_s / period + plus_dms[i]
+        minus_s = minus_s - minus_s / period + minus_dms[i]
+        if tr_s == 0:
+            continue
+        dxs.append(_dx(plus_s, minus_s, tr_s))
+    if len(dxs) < period:
+        return None
+    adx_val = sum(dxs[:period]) / period
+    for dx_val in dxs[period:]:
+        adx_val = (adx_val * (period - 1) + dx_val) / period
+    return adx_val
+
+
+@pytest.mark.parametrize("period", [14, 20, 50])
+def test_ema_tail_cap_bit_identical(period: int) -> None:
+    series = _series(period * EMA_TAIL_FACTOR + 800, seed=period + 3)
+    assert ema(series, period) == _ema_ref(series, period)
+
+
+@pytest.mark.parametrize("period", [14, 20])
+def test_adx_tail_cap_bit_identical(period: int) -> None:
+    # Several seeds so the (data-dependent) convergence margin is exercised.
+    for seed in (1, 2, 3):
+        bars = _bars(_series(period * ADX_TAIL_FACTOR + 1200, seed=seed))
+        got = adx(bars, period)
+        ref = _adx_ref(bars, period)
+        assert got is not None and ref is not None
+        assert got.adx == ref

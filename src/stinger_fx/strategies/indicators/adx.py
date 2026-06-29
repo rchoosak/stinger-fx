@@ -20,6 +20,7 @@ from collections.abc import Sequence
 from typing import NamedTuple
 
 from stinger_fx.domain import Bar
+from stinger_fx.strategies.indicators._smoothing import ADX_TAIL_FACTOR, wilder_tail
 
 
 class ADXResult(NamedTuple):
@@ -33,6 +34,11 @@ def adx(bars: Sequence[Bar], period: int = 14) -> ADXResult | None:
         raise ValueError("period must be > 1")
     if len(bars) < 2 * period:
         return None
+
+    # Two cascaded Wilder stages, so the seed decays slower than a single one —
+    # cap the input to a wider trailing window that's still bit-identical (pinned
+    # by property tests) instead of recomputing over a 2000-bar history each bar.
+    bars = wilder_tail(bars, period, ADX_TAIL_FACTOR)
 
     # Build per-bar TR, +DM, -DM
     trs: list[float] = []
