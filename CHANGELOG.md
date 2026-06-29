@@ -3,6 +3,45 @@
 All notable changes to Stinger-Fx are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] — 2026-06-29
+
+A strategy fix and a backtest-performance pass. Everything is backward
+compatible — the strategy change is opt-in, and the indicator speedups are
+bit-identical (or, for the streaming path, ~1-ULP equivalent), so existing
+configs and backtest numbers are unchanged.
+
+### Strategies
+- **Pullback Reversal Scalper — trend filter + stop-distance floor** (#102).
+  Fixes the strategy's two structural blind spots. A higher-timeframe
+  trend-direction filter (`trend_filter_timeframe` + `trend_ema_period` + an ADX
+  band) only fades *with* the trend — the higher TF is folded internally from
+  the entry stream (emit-on-next-bucket, lookahead-free). A `min_stop_distance`
+  floor caps the risk-engine lot when ATR collapses (lot ∝ 1/stop). On 29-month
+  XAUUSD this turns −72% / 96k drawdown / 56-lot peaks into +8.3% / PF 1.16 /
+  18.8k / 2.8-lot peaks (2024 out-of-sample: −57.7% → +8.1% / PF 1.64).
+  Default-off; the example `prs_scalper_xau` config enables it. 2025 (a
+  strong-trend year) is still net negative even filtered — re-validate per
+  regime before live use.
+
+### Backtest performance
+- **Tail-capped Wilder indicators** (#103, #105) — `rsi` / `atr` / `stoch_rsi` /
+  `ema` only consume the trailing window that can affect the result at double
+  precision (`factor × period`) instead of the full ~2000-bar history each bar.
+  **Bit-identical**, pinned by property tests; ~1.5× on a representative sweep.
+  `adx` is deliberately left full — its `tr_smooth == 0 → None` seed guard makes
+  a windowed cap non-bit-identical for a degenerate flat seed (locked by a
+  regression test).
+- **Streaming O(1) indicators** (#104) — `HistoryView.rsi()` / `.atr()` /
+  `.stoch_rsi()` keep Wilder state current as bars arrive (O(1) per bar vs the
+  O(window) recompute + the per-bar window copy); ~242× per call in a
+  micro-benchmark. The Pullback Reversal Scalper is migrated as the first
+  consumer (bit-identical end-to-end on 2024 + 29-month). Streaming carries one
+  continuous seed vs the windowed batch's moving seed, so the two differ only at
+  the ~1-ULP level.
+- **Parallel backtest sweep runner** (`scripts/parallel_backtest.py`) — a
+  multi-strategy × multi-window comparison runner that reads params from config,
+  with `--workers` + `nice`.
+
 ## [1.3.0] — 2026-06-22
 
 Two new example strategies and the multi-timeframe infrastructure behind them.
