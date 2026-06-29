@@ -40,7 +40,7 @@ from pydantic import Field, model_validator
 from stinger_fx.domain import Bar, Order, Position, Side, Subscription, Timeframe
 from stinger_fx.strategies.base import BaseStrategy
 from stinger_fx.strategies.context import StrategyContext
-from stinger_fx.strategies.indicators import atr, bollinger, ema, rsi
+from stinger_fx.strategies.indicators import adx, atr, bollinger, ema, rsi
 from stinger_fx.strategies.parameters import StrategyParams
 
 
@@ -223,9 +223,7 @@ class BollingerReversionScalper(BaseStrategy):
         bb = bollinger(closes, params.bb_period, params.bb_std)
         rsi_v = rsi(closes, params.rsi_period)
         atr_v = atr(window, params.atr_period)
-        # Streaming ADX off the HistoryView — O(1) per bar (the view keeps Wilder
-        # state current) instead of the O(window) double-smoothed recompute.
-        adx_res = bars.adx(params.adx_period)
+        adx_res = adx(window, params.adx_period)
         if bb is None or rsi_v is None or atr_v is None or adx_res is None:
             return
         if adx_res.adx > params.max_adx:

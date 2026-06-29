@@ -36,9 +36,7 @@ from stinger_fx.domain import (
     Tick,
     Timeframe,
 )
-from stinger_fx.strategies.indicators.adx import ADXResult
 from stinger_fx.strategies.indicators.incremental import (
-    IncrementalADX,
     IncrementalATR,
     IncrementalRSI,
     IncrementalStochRSI,
@@ -150,13 +148,10 @@ class HistoryView:
             lambda i, b: i.update(b.close),
         ).value
 
-    def adx(self, period: int = 14) -> ADXResult | None:
-        """Streaming Wilder ADX (+DI/-DI) for this feed (≈ ``adx(self.bars(), period)``)."""
-        return self._incremental(
-            ("adx", period),
-            lambda: IncrementalADX(period),
-            lambda i, b: i.update(b),
-        ).value
+    # NB: no streaming adx() accessor — IncrementalADX has *from-start* semantics,
+    # which diverge from a rolling-buffer adx(self.bars()) recompute in the
+    # flat-seed edge (the streaming one latches None where the windowed one
+    # recovers once the flat seed scrolls out of the buffer). See IncrementalADX.
 
     def update_tick(self, tick: Tick) -> None:
         self._last_tick = tick

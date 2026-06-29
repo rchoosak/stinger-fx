@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 from stinger_fx.domain import Bar, Timeframe
 from stinger_fx.strategies.context import HistoryView
-from stinger_fx.strategies.indicators import adx, atr, rsi, stoch_rsi
+from stinger_fx.strategies.indicators import atr, rsi, stoch_rsi
 
 
 def _bars(n: int, seed: int) -> list[Bar]:
@@ -36,18 +36,6 @@ def test_view_atr_matches_batch_every_bar() -> None:
     for b in _bars(400, seed=2):
         view.append_bar(b)
         assert view.atr(14) == atr(list(view.bars()), 14)
-
-
-def test_view_adx_matches_batch_every_bar() -> None:
-    view = HistoryView("XAUUSD", Timeframe.M1)
-    for b in _bars(400, seed=5):
-        view.append_bar(b)
-        got = view.adx(14)
-        ref = adx(list(view.bars()), 14)
-        if ref is None:
-            assert got is None
-        else:
-            assert got == ref  # ADXResult is a NamedTuple → field-wise equality
 
 
 def test_view_stoch_rsi_matches_batch_every_bar() -> None:

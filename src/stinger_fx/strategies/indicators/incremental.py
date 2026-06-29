@@ -198,6 +198,13 @@ class IncrementalADX:
     Returns ``ADXResult`` once warm, else ``None``. NB: the batch returns ``None``
     when its seed TR window is all-flat (and re-seeds the same window every call,
     so it stays ``None``); this mirrors that with a permanent ``_dead`` latch.
+
+    These are **from-start** semantics — feed it the whole stream in order. It is
+    *not* a drop-in for a rolling-window recompute like ``adx(view.bars())`` over a
+    capped buffer: there, an all-flat seed eventually scrolls out of the window and
+    the batch *recovers*, whereas this latches ``None`` for good. (Real market data
+    never has a flat ADX seed, so this only matters for synthetic inputs — but it's
+    why there is no ``HistoryView.adx()`` accessor.)
     """
 
     __slots__ = (
