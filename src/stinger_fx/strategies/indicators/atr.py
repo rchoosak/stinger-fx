@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from stinger_fx.domain import Bar
+from stinger_fx.strategies.indicators._smoothing import wilder_tail
 
 
 def atr(bars: Sequence[Bar], period: int = 14) -> float | None:
@@ -12,6 +13,9 @@ def atr(bars: Sequence[Bar], period: int = 14) -> float | None:
         raise ValueError("period must be > 0")
     if len(bars) <= period:
         return None
+    # Only the trailing window can affect the result at double precision; cap it
+    # so a 2000-bar history doesn't cost 2000 iterations per call (bit-identical).
+    bars = wilder_tail(bars, period)
     trs: list[float] = []
     prev_close = bars[0].close
     for b in bars[1:]:

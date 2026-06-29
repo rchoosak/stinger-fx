@@ -4,12 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from stinger_fx.strategies.indicators._smoothing import wilder_tail
+
 
 def rsi(values: Sequence[float], period: int = 14) -> float | None:
     if period <= 0:
         raise ValueError("period must be > 0")
     if len(values) <= period:
         return None
+    # Only the trailing window can affect the result at double precision; cap it
+    # so a 2000-bar history doesn't cost 2000 iterations per call (bit-identical).
+    values = wilder_tail(values, period)
     gains = 0.0
     losses = 0.0
     for i in range(1, period + 1):
