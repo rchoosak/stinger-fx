@@ -20,7 +20,6 @@ from collections.abc import Sequence
 from typing import NamedTuple
 
 from stinger_fx.domain import Bar
-from stinger_fx.strategies.indicators._smoothing import ADX_TAIL_FACTOR, wilder_tail
 
 
 class ADXResult(NamedTuple):
@@ -35,10 +34,11 @@ def adx(bars: Sequence[Bar], period: int = 14) -> ADXResult | None:
     if len(bars) < 2 * period:
         return None
 
-    # Two cascaded Wilder stages, so the seed decays slower than a single one —
-    # cap the input to a wider trailing window that's still bit-identical (pinned
-    # by property tests) instead of recomputing over a 2000-bar history each bar.
-    bars = wilder_tail(bars, period, ADX_TAIL_FACTOR)
+    # NB: not tail-capped (unlike rsi/atr/ema). ADX's ``tr_smooth == 0 → None``
+    # seed guard depends on *which* window seeds it, so truncating the input
+    # would change the result for a degenerate all-flat seed window — i.e. a
+    # windowed cap is not bit-identical here. Real market data never has a flat
+    # seed, but the guarantee matters; for ADX perf use a streaming indicator.
 
     # Build per-bar TR, +DM, -DM
     trs: list[float] = []
