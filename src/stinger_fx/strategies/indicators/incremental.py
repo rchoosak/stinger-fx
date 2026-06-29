@@ -260,7 +260,7 @@ class IncrementalADX:
             self._tr_s = sum(self._seed_tr)
             self._plus_s = sum(self._seed_plus)
             self._minus_s = sum(self._seed_minus)
-            self._seed_tr = self._seed_plus = self._seed_minus = []
+            self._seed_tr, self._seed_plus, self._seed_minus = [], [], []
             if self._tr_s == 0.0:
                 self._dead = True  # flat seed → batch returns None (permanently)
                 return None
