@@ -58,7 +58,7 @@ from stinger_fx.domain import Bar, Order, Position, Side, Timeframe
 from stinger_fx.domain.symbols import Subscription
 from stinger_fx.strategies.base import BaseStrategy
 from stinger_fx.strategies.context import StrategyContext
-from stinger_fx.strategies.indicators import adx, atr, ema, rsi, stoch_rsi
+from stinger_fx.strategies.indicators import adx, ema, rsi
 from stinger_fx.strategies.managers.trailing import TrailingStopManager
 from stinger_fx.strategies.parameters import StrategyParams
 
@@ -305,13 +305,11 @@ class PullbackReversalScalper(BaseStrategy):
         m1_view = ctx.history_for(params.symbol, params.entry_timeframe)
         if m1_view is None:
             return
-        m1_bars = m1_view.bars()
-        m1_closes = [b.close for b in m1_bars]
-        if len(m1_closes) < params.m1_rsi_period + params.stoch_rsi_period:
-            return
-        m1_rsi_v = rsi(m1_closes, params.m1_rsi_period)
-        srsi = stoch_rsi(
-            m1_closes,
+        # Streaming RSI / Stoch RSI off the HistoryView — O(1) per bar (the view
+        # keeps Wilder state current as bars arrive) instead of recomputing over
+        # the whole window each bar. None until warm.
+        m1_rsi_v = m1_view.rsi(params.m1_rsi_period)
+        srsi = m1_view.stoch_rsi(
             rsi_period=params.m1_rsi_period,
             stoch_period=params.stoch_rsi_period,
             k_smooth=params.stoch_rsi_k_smooth,
@@ -319,7 +317,7 @@ class PullbackReversalScalper(BaseStrategy):
         )
         if m1_rsi_v is None or srsi is None:
             return
-        k, d = srsi.k, srsi.d
+        k, d = srsi
         prev_k, prev_d = self._prev_k, self._prev_d
         self._prev_k, self._prev_d = k, d   # always advance, every bar
 
@@ -384,10 +382,10 @@ class PullbackReversalScalper(BaseStrategy):
             m5_buy_ok = is_uptrend and m5_rsi < params.m5_rsi_buy_max
             m5_sell_ok = is_downtrend and m5_rsi > params.m5_rsi_sell_min
 
-        # 4) ATR for SL distance.  (M1 RSI / Stoch RSI / cross were already
-        #    computed in step 0 above so the cross detector stays correct
-        #    across open-position and cooldown bars.)
-        atr_v = atr(list(m1_bars), params.atr_period)
+        # 4) ATR for SL distance (streaming off the view — see step 0). M1 RSI /
+        #    Stoch RSI / cross were already computed above so the cross detector
+        #    stays correct across open-position and cooldown bars.
+        atr_v = m1_view.atr(params.atr_period)
         if atr_v is None or atr_v <= 0:
             return
         # Floor the stop distance so a tiny-ATR (quiet-market) read can't size
@@ -561,9 +559,9 @@ class PullbackReversalScalper(BaseStrategy):
         m1_view = ctx.history_for(params.symbol, params.entry_timeframe)
         if m1_view is None:
             return
-        m1_closes = [b.close for b in m1_view.bars()]
-        srsi = stoch_rsi(
-            m1_closes,
+        # The view already advanced this indicator for the current bar (in
+        # on_bar, before the open-position branch routed us here) — just read it.
+        srsi = m1_view.stoch_rsi(
             rsi_period=params.m1_rsi_period,
             stoch_period=params.stoch_rsi_period,
             k_smooth=params.stoch_rsi_k_smooth,
@@ -571,11 +569,11 @@ class PullbackReversalScalper(BaseStrategy):
         )
         if srsi is None:
             return
-        k = srsi.k
+        k, d = srsi
         # Keep the cross-detection samples fresh while we're in a trade,
         # so the next entry can see a valid "prev" the moment we exit.
         self._prev_k = k
-        self._prev_d = srsi.d
+        self._prev_d = d
 
         exit_now = (
             (self._open_side is Side.BUY and k > params.stoch_rsi_exit_long)

@@ -26,12 +26,11 @@ import structlog
 import stinger_fx.strategies.examples.pullback_reversal_scalper as prs_mod
 from stinger_fx.core import AsyncEventBus, SimClock
 from stinger_fx.domain import Bar, Order, OrderStatus, OrderType, Position, Side, Signal, Timeframe
-from stinger_fx.strategies.context import StrategyContext
+from stinger_fx.strategies.context import HistoryView, StrategyContext
 from stinger_fx.strategies.examples.pullback_reversal_scalper import (
     PullbackReversalScalper,
     PullbackReversalScalperParams,
 )
-from stinger_fx.strategies.indicators.stoch_rsi import StochRSIResult
 
 SYMBOL = "XAUUSD"
 
@@ -106,29 +105,30 @@ def _patch_indicators(
         idx = (len(state["calls_ema"]) - 1) % 2
         return state["ema"][idx]
 
-    # Dispatch RSI by series length, not call order — when
-    # `use_m5_filter=False` the strategy skips the M5 RSI call entirely,
-    # so M1 RSI is the first one to come through. M1 history in our
-    # fixture is ~60 bars; M5 is ~15. The 30-bar threshold cleanly
-    # separates them regardless of which call order the strategy uses.
+    # M5 RSI is still a module call (the M5 trend filter); M1 RSI / Stoch RSI /
+    # ATR now stream off the HistoryView, so they're stubbed on the *view*
+    # methods below. The module rsi stub therefore only ever serves M5.
     def _rsi_stub(closes, period):  # type: ignore[no-untyped-def]
         state["calls_rsi"].append((period, len(closes)))
-        is_m1 = len(closes) > 30
-        return state["rsi"][1] if is_m1 else state["rsi"][0]
+        return state["rsi"][0]
 
-    def _stoch_stub(closes, **kw):  # type: ignore[no-untyped-def]
-        state["calls_stoch"].append(len(closes))
+    def _hv_rsi(self, period=14):  # type: ignore[no-untyped-def]
+        return state["rsi"][1]
+
+    def _hv_stoch(self, rsi_period=14, stoch_period=14, k_smooth=3, d_smooth=3):  # type: ignore[no-untyped-def]
+        state["calls_stoch"].append(rsi_period)
         k = state["stoch_k"].pop(0) if len(state["stoch_k"]) > 1 else state["stoch_k"][0]
         d = state["stoch_d"].pop(0) if len(state["stoch_d"]) > 1 else state["stoch_d"][0]
-        return StochRSIResult(k=float(k), d=float(d))
+        return (float(k), float(d))
 
-    def _atr_stub(bars, period):  # type: ignore[no-untyped-def]
+    def _hv_atr(self, period=14):  # type: ignore[no-untyped-def]
         return atr_value
 
     monkeypatch.setattr(prs_mod, "ema", _ema_stub)
     monkeypatch.setattr(prs_mod, "rsi", _rsi_stub)
-    monkeypatch.setattr(prs_mod, "stoch_rsi", _stoch_stub)
-    monkeypatch.setattr(prs_mod, "atr", _atr_stub)
+    monkeypatch.setattr(HistoryView, "rsi", _hv_rsi)
+    monkeypatch.setattr(HistoryView, "stoch_rsi", _hv_stoch)
+    monkeypatch.setattr(HistoryView, "atr", _hv_atr)
     return state
 
 

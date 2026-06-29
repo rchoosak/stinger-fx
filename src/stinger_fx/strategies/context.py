@@ -66,11 +66,81 @@ class HistoryView:
         self.timeframe = timeframe
         self._bars: deque[Bar] = deque(maxlen=capacity)
         self._last_tick: Tick | None = None
+        # Streaming indicators kept up to date as bars arrive — O(1) per bar
+        # instead of the O(window) recompute a strategy pays calling the pure
+        # rsi()/atr()/stoch_rsi() over closes() each bar. Lazily created on first
+        # request (back-filled from the buffer once), then fed in append_bar().
+        # Each entry is (instance, updater) where updater(bar) advances it.
+        self._inc: dict[tuple[object, ...], tuple[object, Callable[[Bar], object]]] = {}
 
     def append_bar(self, bar: Bar) -> None:
         if not bar.is_closed:
             return
         self._bars.append(bar)
+        for _inst, update in self._inc.values():
+            update(bar)
+
+    def _incremental(
+        self,
+        key: tuple[object, ...],
+        factory: Callable[[], object],
+        update: Callable[[object, Bar], object],
+    ) -> object:
+        """Fetch (or lazily create) a streaming indicator for this feed. On first
+        request it is back-filled over the bars already in the buffer — including
+        the current one, which the runner appends *before* on_bar — so the value
+        reflects every closed bar seen so far, then append_bar keeps it current."""
+        entry = self._inc.get(key)
+        if entry is None:
+            inst = factory()
+
+            def updater(b: Bar, _inst: object = inst) -> object:
+                return update(_inst, b)
+
+            for b in self._bars:
+                updater(b)
+            self._inc[key] = (inst, updater)
+            return inst
+        return entry[0]
+
+    def rsi(self, period: int = 14) -> float | None:
+        """Streaming Wilder RSI for this feed (≈ ``rsi(self.closes(), period)``)."""
+        from stinger_fx.strategies.indicators.incremental import IncrementalRSI
+
+        inst = self._incremental(
+            ("rsi", period),
+            lambda: IncrementalRSI(period),
+            lambda i, b: i.update(b.close),  # type: ignore[attr-defined]
+        )
+        return inst.value  # type: ignore[attr-defined,no-any-return]
+
+    def atr(self, period: int = 14) -> float | None:
+        """Streaming Wilder ATR for this feed (≈ ``atr(self.bars(), period)``)."""
+        from stinger_fx.strategies.indicators.incremental import IncrementalATR
+
+        inst = self._incremental(
+            ("atr", period),
+            lambda: IncrementalATR(period),
+            lambda i, b: i.update(b),  # type: ignore[attr-defined]
+        )
+        return inst.value  # type: ignore[attr-defined,no-any-return]
+
+    def stoch_rsi(
+        self,
+        rsi_period: int = 14,
+        stoch_period: int = 14,
+        k_smooth: int = 3,
+        d_smooth: int = 3,
+    ) -> tuple[float, float] | None:
+        """Streaming Stochastic RSI (%K, %D) for this feed (≈ ``stoch_rsi(...)``)."""
+        from stinger_fx.strategies.indicators.incremental import IncrementalStochRSI
+
+        inst = self._incremental(
+            ("stoch", rsi_period, stoch_period, k_smooth, d_smooth),
+            lambda: IncrementalStochRSI(rsi_period, stoch_period, k_smooth, d_smooth),
+            lambda i, b: i.update(b.close),  # type: ignore[attr-defined]
+        )
+        return inst.value  # type: ignore[attr-defined,no-any-return]
 
     def update_tick(self, tick: Tick) -> None:
         self._last_tick = tick
