@@ -84,6 +84,15 @@ strategies:
       volume: 0.01
       atr_period: 14
       sl_atr_mult: 1.0
+      # Lot-explosion guard. The risk engine sizes each order to risk 1% of
+      # equity at the stop, so lot ∝ 1/stop_distance. A 1×ATR(M1) stop can
+      # shrink to cents in a quiet market, sizing the position to 50+ lots
+      # ($10M+ notional) that the next gap obliterates (and that a real
+      # broker's margin would reject). Flooring the stop at $4 caps the
+      # implied lot at risk$/(4×100) ≈ 2.5 @ $100k. Sweep over 29mo:
+      # max lot 56→2.8, DD 39k→18.8k (−52%), return +3.7%→+8.3%, PF 1.03→1.16
+      # (2024 OOS: DD 19.6k→2.7k, PF 1.15→1.64). 0 = off.
+      min_stop_distance: 4.0
       tp_atr_mult: 0.0          # 0 = no fixed TP — rely on Stoch RSI exit
       max_hold_bars_m1: 30      # safety time stop
       cooldown_bars_m1: 2       # bars after close before next entry
@@ -94,6 +103,24 @@ strategies:
       trailing_distance_atr: 0.8  # SL stays this many ATR behind price
       trailing_activate_atr: 0.5  # activate trail after this much profit (ATR)
       trailing_point: 0.01        # XAU point — change to 0.0001 for FX
+      # Higher-timeframe trend filter — the fix for this strategy's core
+      # blind spot. Fading with NO trend context (use_m5_filter=false) means
+      # every "oversold" buy / "overbought" sell in a trend is a counter-trend
+      # knife-catch. A 29-month XAUUSD backtest split by H1-EMA50 direction put
+      # ALL the loss in the counter-trend half (−$79k; the with-trend half was
+      # net positive). Restricting to *with-trend* fades inside an ADX band
+      # (skip dead chop with no mean to revert to, and runaway trends that
+      # overrun the fade) flips the 29-month result from −72.2% / PF 0.79 /
+      # 96k DD to +3.7% / PF 1.03 / 39k DD, and the 2024 out-of-sample year
+      # from −57.7% to +10.6% (PF 1.15). 2025 (a strong-trend year) is still
+      # net negative even filtered (−22.8%) — re-validate per regime before
+      # live use. The higher TF is folded internally from the M1 stream
+      # (emit-on-next-bucket) so it's lookahead-free / identical live==bt.
+      trend_filter_timeframe: H1   # null = off (the pre-fix behaviour)
+      trend_ema_period: 50         # long when H1 close > EMA50, short when below
+      trend_adx_period: 14
+      trend_adx_min: 18.0          # skip dead chop (no mean to revert to)
+      trend_adx_max: 35.0          # skip runaway trends (fade gets overrun)
 
   # Momentum Breakout Scalper — M1 Donchian breakout + M5 EMA trend
   # filter, with two risk gates the PRS sweep showed were the missing

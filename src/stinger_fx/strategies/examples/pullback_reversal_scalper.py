@@ -48,15 +48,17 @@ operator can re-fit per symbol / session.
 from __future__ import annotations
 
 import logging
+from collections import deque
+from datetime import datetime
 from typing import ClassVar
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from stinger_fx.domain import Bar, Order, Position, Side, Timeframe
 from stinger_fx.domain.symbols import Subscription
 from stinger_fx.strategies.base import BaseStrategy
 from stinger_fx.strategies.context import StrategyContext
-from stinger_fx.strategies.indicators import atr, ema, rsi, stoch_rsi
+from stinger_fx.strategies.indicators import adx, atr, ema, rsi, stoch_rsi
 from stinger_fx.strategies.managers.trailing import TrailingStopManager
 from stinger_fx.strategies.parameters import StrategyParams
 
@@ -106,6 +108,16 @@ class PullbackReversalScalperParams(StrategyParams):
     volume: float = Field(0.01, gt=0)
     atr_period: int = Field(14, ge=2, le=50)
     sl_atr_mult: float = Field(1.0, gt=0)
+    # Minimum stop distance in *price units* (e.g. 2.0 = $2 on XAU). The
+    # actual stop is ``max(atr × sl_atr_mult, min_stop_distance)``. This is a
+    # lot-explosion guard: the risk engine sizes each order to risk a fixed %
+    # of equity at the stop, so lot ∝ 1 / stop_distance. In a quiet market an
+    # ATR-only stop can shrink to cents, which sizes the position to tens of
+    # lots — a huge notional that gets murdered by the next gap (and would
+    # blow the margin a real broker enforces). Flooring the stop caps the
+    # implied lot at ``risk$ / (min_stop_distance × contract_size)`` and, as a
+    # bonus, stops the too-tight-stop instant knockouts. 0 = off (no floor).
+    min_stop_distance: float = Field(0.0, ge=0)
     tp_atr_mult: float = Field(0.0, ge=0)         # 0 → no fixed TP
     max_hold_bars_m1: int = Field(30, ge=1, le=10_000)
     cooldown_bars_m1: int = Field(2, ge=0, le=10_000)
@@ -124,6 +136,63 @@ class PullbackReversalScalperParams(StrategyParams):
     # Symbol's quote-point value used to convert ATR (price units) → pips,
     # which is what TrailingStopManager expects. XAU = 0.01, FX = 0.0001.
     trailing_point: float = Field(0.01, gt=0)
+
+    # --- Higher-timeframe trend filter (optional, default OFF) ---------
+    # The blind spot of the default config (use_m5_filter=False) is that it
+    # fades with NO trend context: in a trending market it buys dips / sells
+    # rips straight into continuation and gets stopped out immediately. A
+    # 29-month XAUUSD backtest split by H1-EMA50 direction showed *every*
+    # dollar of loss lived in the counter-trend half (mean-revert AGAINST
+    # the trend), while the with-trend half was net positive.
+    #
+    # When ``trend_filter_timeframe`` is set, only take entries *with* the
+    # higher-TF trend — long when the HTF close is above its EMA, short when
+    # below — and optionally only inside an ADX band (skip dead chop with no
+    # mean to revert to, and runaway trends that overrun the fade). The
+    # higher TF is folded internally from the entry stream (emit-on-next-
+    # bucket) so it's lookahead-free and identical in live and backtest; a
+    # separate higher-TF feed would be delivered at its *open* by the
+    # bar-mode backtester (one bucket early = lookahead). ``None`` = off
+    # (today's behaviour, zero overhead).
+    trend_filter_timeframe: Timeframe | None = None
+    trend_ema_period: int = Field(50, ge=2, le=400)
+    trend_adx_period: int = Field(14, ge=2, le=50)
+    trend_adx_min: float = Field(0.0, ge=0, le=100)    # 0   = no lower bound
+    trend_adx_max: float = Field(100.0, ge=0, le=100)  # 100 = no upper bound
+
+    @model_validator(mode="after")
+    def _check_trend_filter(self) -> PullbackReversalScalperParams:
+        # Timeframe preconditions the fold relies on. Reject at load time
+        # rather than crash in warmup_bars() / _fold_trend() or fold
+        # degenerate buckets. (Mirrors BollingerReversionScalper.)
+        tf = self.trend_filter_timeframe
+        if tf is not None:
+            if tf is Timeframe.TICK:
+                raise ValueError(
+                    "trend_filter_timeframe must be a bar timeframe, not TICK"
+                )
+            if tf in (Timeframe.W1, Timeframe.MN1):
+                # The fold buckets by epoch-floor (int(ts) // tf.seconds),
+                # canonical only for UTC-epoch-aligned timeframes. W1 would
+                # anchor on Thursday (the epoch weekday), and MN1.seconds is a
+                # 30-day approximation that drifts off calendar months.
+                raise ValueError(
+                    "trend_filter_timeframe does not support W1/MN1 (the internal "
+                    "fold buckets by epoch); use an intraday or daily timeframe"
+                )
+            if tf.seconds <= self.entry_timeframe.seconds:
+                raise ValueError(
+                    "trend_filter_timeframe must be higher than entry_timeframe "
+                    f"(got {tf.value} <= {self.entry_timeframe.value})"
+                )
+            if tf.seconds % self.entry_timeframe.seconds != 0:
+                raise ValueError(
+                    "trend_filter_timeframe must be an integer multiple of "
+                    f"entry_timeframe (got {tf.value} / {self.entry_timeframe.value})"
+                )
+        if self.trend_adx_max < self.trend_adx_min:
+            raise ValueError("trend_adx_max must be >= trend_adx_min")
+        return self
 
 
 class PullbackReversalScalper(BaseStrategy):
@@ -163,6 +232,18 @@ class PullbackReversalScalper(BaseStrategy):
             params.m5_rsi_period,
             params.swing_lookback + 1,
         ) + 5
+        if params.trend_filter_timeframe is not None:
+            # Enough entry bars to fold ``trend_ema_period`` (and, if the ADX
+            # band is on, ``2 * trend_adx_period``) completed higher-TF buckets.
+            per_bucket = max(
+                1,
+                params.trend_filter_timeframe.seconds
+                // params.entry_timeframe.seconds,
+            )
+            trend_buckets = max(
+                params.trend_ema_period + 2, 2 * params.trend_adx_period
+            )
+            m1_need = max(m1_need, trend_buckets * per_bucket)
         return {
             Subscription(symbol=params.symbol, timeframe=params.entry_timeframe):
                 m1_need,
@@ -183,6 +264,18 @@ class PullbackReversalScalper(BaseStrategy):
         self._open_side: Side | None = None
         self._open_bars: int = 0
         self._cooldown_left: int = 0
+        # Internal higher-TF fold for the trend filter: completed buckets
+        # (full OHLC, for both the EMA direction and the ADX band) plus the
+        # in-progress bucket. The in-progress bucket is held separately and
+        # never read, so the filter can't peek at an incomplete higher-TF bar.
+        self._trend_bars: deque[Bar] = deque(maxlen=4096)
+        self._trend_key: int | None = None
+        self._t_open: float = 0.0
+        self._t_high: float = 0.0
+        self._t_low: float = 0.0
+        self._t_close: float = 0.0
+        self._t_volume: int = 0
+        self._t_time: datetime | None = None
 
     # ------------------------------------------------------------------ #
     # Bar dispatch                                                        #
@@ -196,6 +289,11 @@ class PullbackReversalScalper(BaseStrategy):
         # corresponding HistoryView automatically via the runner.
         if bar.symbol != params.symbol or bar.timeframe != params.entry_timeframe:
             return
+
+        # Fold the higher-TF trend on EVERY entry-tf bar (no-op when the filter
+        # is off), before any early-return, so the completed-bucket history
+        # stays current across open-position and cooldown bars.
+        self._fold_trend(bar, params)
 
         # 0) Update Stoch RSI cross state on EVERY entry-tf bar, BEFORE the
         #    open-position / cooldown early-returns. The cross detector needs
@@ -292,12 +390,16 @@ class PullbackReversalScalper(BaseStrategy):
         atr_v = atr(list(m1_bars), params.atr_period)
         if atr_v is None or atr_v <= 0:
             return
-        sl_dist = atr_v * params.sl_atr_mult
+        # Floor the stop distance so a tiny-ATR (quiet-market) read can't size
+        # the position into a tens-of-lots monster (see ``min_stop_distance``).
+        sl_dist = max(atr_v * params.sl_atr_mult, params.min_stop_distance)
         tp_dist = atr_v * params.tp_atr_mult if params.tp_atr_mult > 0 else None
 
-        # 6) BUY — (optional M5 gate) + M1 Stoch K up out of OS + M1 oversold.
+        # 6) BUY — (optional M5 gate) + (optional HTF trend gate) + M1 Stoch K
+        #    up out of OS + M1 oversold.
         if (
             m5_buy_ok
+            and self._trend_ok(Side.BUY, params)
             and cross_up
             and k < params.stoch_rsi_oversold
             and m1_rsi_v < params.m1_rsi_oversold
@@ -315,6 +417,7 @@ class PullbackReversalScalper(BaseStrategy):
         # 7) SELL — symmetric.
         if (
             m5_sell_ok
+            and self._trend_ok(Side.SELL, params)
             and cross_down
             and k > params.stoch_rsi_overbought
             and m1_rsi_v > params.m1_rsi_overbought
@@ -360,6 +463,82 @@ class PullbackReversalScalper(BaseStrategy):
                 point=params.trailing_point,
             )
         )
+
+    # ------------------------------------------------------------------ #
+    # Higher-timeframe trend filter                                       #
+    # ------------------------------------------------------------------ #
+
+    def _fold_trend(
+        self, bar: Bar, params: PullbackReversalScalperParams
+    ) -> None:
+        """Fold the entry-TF stream into higher-TF OHLC buckets, emitting each
+        bucket only when the *next* bucket opens (emit-on-next-bucket). The
+        in-progress bucket is held in scratch fields and never read, so the
+        trend filter can't see an incomplete higher-TF bar — no lookahead,
+        identical in live and backtest."""
+        tf = params.trend_filter_timeframe
+        if tf is None:
+            return
+        key = int(bar.time.timestamp()) // tf.seconds
+        if self._trend_key is None or key != self._trend_key:
+            if self._trend_key is not None and self._t_time is not None:
+                # The prior bucket has closed — emit it.
+                self._trend_bars.append(
+                    Bar(
+                        symbol=bar.symbol,
+                        timeframe=tf,
+                        time=self._t_time,
+                        open=self._t_open,
+                        high=self._t_high,
+                        low=self._t_low,
+                        close=self._t_close,
+                        tick_volume=self._t_volume,
+                        is_closed=True,
+                    )
+                )
+            self._trend_key = key
+            self._t_time = bar.time
+            self._t_open = bar.open
+            self._t_high = bar.high
+            self._t_low = bar.low
+            self._t_close = bar.close
+            self._t_volume = bar.tick_volume
+        else:
+            self._t_high = max(self._t_high, bar.high)
+            self._t_low = min(self._t_low, bar.low)
+            self._t_close = bar.close
+            self._t_volume += bar.tick_volume
+
+    def _trend_ok(
+        self, side: Side, params: PullbackReversalScalperParams
+    ) -> bool:
+        """Whether the higher-TF trend filter permits ``side``.
+
+        Off (``trend_filter_timeframe is None``) → always True. On but not yet
+        warm → False (hold fire). Otherwise require the trade to be *with* the
+        higher-TF EMA direction (long above / short below) and, when the ADX
+        band is non-trivial, the higher-TF ADX inside ``[min, max]``."""
+        if params.trend_filter_timeframe is None:
+            return True
+        bars = list(self._trend_bars)
+        need = max(params.trend_ema_period + 1, 2 * params.trend_adx_period)
+        if len(bars) < need:
+            return False
+        closes = [b.close for b in bars]
+        ema_v = ema(closes, params.trend_ema_period)
+        if ema_v is None:
+            return False
+        up = closes[-1] > ema_v
+        if (side is Side.BUY and not up) or (side is Side.SELL and up):
+            return False
+        # ADX band — default 0..100 is a no-op, so skip the compute entirely.
+        if params.trend_adx_min > 0.0 or params.trend_adx_max < 100.0:
+            adx_res = adx(bars, params.trend_adx_period)
+            if adx_res is None:
+                return False
+            if not (params.trend_adx_min <= adx_res.adx <= params.trend_adx_max):
+                return False
+        return True
 
     # ------------------------------------------------------------------ #
     # Exit decision                                                       #

@@ -642,3 +642,203 @@ async def test_trailing_manager_attached_on_sell_entry(monkeypatch) -> None:
     assert captured[0].side is Side.SELL
     assert len(ctx._managers) == before + 1
     assert isinstance(ctx._managers[-1], TrailingStopManager)
+
+
+# =========================================================================
+# Higher-timeframe trend filter
+# =========================================================================
+
+
+def _m1(close: float, t: datetime, high: float | None = None,
+        low: float | None = None, open_: float | None = None) -> Bar:
+    return Bar(
+        symbol=SYMBOL, timeframe=Timeframe.M1, time=t,
+        open=open_ if open_ is not None else close,
+        high=high if high is not None else close,
+        low=low if low is not None else close,
+        close=close, tick_volume=10, is_closed=True,
+    )
+
+
+def _fill_trend(strat: PullbackReversalScalper, closes: list[float]) -> None:
+    """Push a list of *completed* higher-TF closes into the fold deque
+    (bypassing _fold_trend) so _trend_ok can be tested directly."""
+    for c in closes:
+        strat._trend_bars.append(_m1(c, _ts(0)))
+
+
+def test_trend_ok_off_by_default_is_always_true() -> None:
+    """Filter off (default) → no fold history needed, every side allowed."""
+    strat = PullbackReversalScalper()
+    params = _short_params()  # trend_filter_timeframe=None
+    assert strat._trend_ok(Side.BUY, params) is True
+    assert strat._trend_ok(Side.SELL, params) is True
+
+
+def test_trend_ok_blocks_against_trend() -> None:
+    """With the filter on, only the side aligned with the HTF EMA is allowed:
+    a rising series (close above EMA) permits BUY and blocks SELL."""
+    params = _short_params(
+        trend_filter_timeframe=Timeframe.H1, trend_ema_period=5, trend_adx_period=3
+    )
+    strat = PullbackReversalScalper()
+    _fill_trend(strat, [float(x) for x in range(100, 130)])  # steadily rising
+    assert strat._trend_ok(Side.BUY, params) is True
+    assert strat._trend_ok(Side.SELL, params) is False
+
+    strat2 = PullbackReversalScalper()
+    _fill_trend(strat2, [float(x) for x in range(130, 100, -1)])  # falling
+    assert strat2._trend_ok(Side.SELL, params) is True
+    assert strat2._trend_ok(Side.BUY, params) is False
+
+
+def test_trend_ok_not_warm_returns_false() -> None:
+    """Filter on but too few completed buckets → hold fire (False), never
+    trade on an unwarmed trend read."""
+    params = _short_params(
+        trend_filter_timeframe=Timeframe.H1, trend_ema_period=5, trend_adx_period=3
+    )
+    strat = PullbackReversalScalper()
+    _fill_trend(strat, [100.0, 101.0, 102.0])  # < need (max(6, 6))
+    assert strat._trend_ok(Side.BUY, params) is False
+    assert strat._trend_ok(Side.SELL, params) is False
+
+
+def test_trend_ok_adx_band_gates(monkeypatch) -> None:
+    """When the ADX band is non-trivial, a HTF ADX outside [min, max] blocks
+    even a correctly-aligned trade; the default 0..100 band is a no-op."""
+    from stinger_fx.strategies.indicators.adx import ADXResult
+
+    monkeypatch.setattr(prs_mod, "adx", lambda bars, period: ADXResult(
+        adx=40.0, plus_di=30.0, minus_di=10.0))
+    strat = PullbackReversalScalper()
+    _fill_trend(strat, [float(x) for x in range(100, 130)])  # rising → BUY aligned
+
+    # ADX 40 is above max 35 → blocked despite alignment.
+    p_band = _short_params(trend_filter_timeframe=Timeframe.H1, trend_ema_period=5,
+                           trend_adx_period=3, trend_adx_min=18.0, trend_adx_max=35.0)
+    assert strat._trend_ok(Side.BUY, p_band) is False
+
+    # Same series, band wide open (default) → ADX never consulted, allowed.
+    p_wide = _short_params(trend_filter_timeframe=Timeframe.H1, trend_ema_period=5,
+                           trend_adx_period=3)
+    assert strat._trend_ok(Side.BUY, p_wide) is True
+
+
+def test_fold_trend_emit_on_next_bucket() -> None:
+    """The fold emits a higher-TF bucket only once the *next* bucket opens,
+    aggregates OHLC correctly, and never exposes the in-progress bucket."""
+    params = _short_params(trend_filter_timeframe=Timeframe.H1)
+    strat = PullbackReversalScalper()
+    base = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
+
+    def at(minutes: int) -> datetime:
+        return base + timedelta(minutes=minutes)
+
+    # Hour 12 bucket: 4 bars. open=100 (first), high=115, low=90, close=105.
+    strat._fold_trend(_m1(100.0, at(0), high=100.0, low=100.0, open_=100.0), params)
+    strat._fold_trend(_m1(110.0, at(15), high=115.0, low=108.0), params)
+    strat._fold_trend(_m1(95.0, at(30), high=96.0, low=90.0), params)
+    strat._fold_trend(_m1(105.0, at(45), high=106.0, low=104.0), params)
+    # Still in-progress (hour 12 not closed): nothing emitted yet.
+    assert len(strat._trend_bars) == 0
+
+    # Hour 13 opens → hour 12 finalised + emitted.
+    strat._fold_trend(_m1(120.0, at(60), high=121.0, low=119.0), params)
+    assert len(strat._trend_bars) == 1
+    b12 = strat._trend_bars[-1]
+    assert b12.open == 100.0 and b12.high == 115.0
+    assert b12.low == 90.0 and b12.close == 105.0
+    assert b12.timeframe is Timeframe.H1
+
+    # Hour 14 opens → hour 13 emitted; hour 14 stays in-progress (not in deque).
+    strat._fold_trend(_m1(130.0, at(120), high=131.0, low=129.0), params)
+    assert len(strat._trend_bars) == 2
+    assert strat._trend_bars[-1].close == 120.0  # hour 13's close
+
+
+@pytest.mark.asyncio
+async def test_on_bar_trend_filter_blocks_entry(monkeypatch) -> None:
+    """on_bar consults _trend_ok: when it vetoes the side, a BUY that meets
+    every M1 condition is suppressed."""
+    params = _short_params(trend_filter_timeframe=Timeframe.H1, trend_ema_period=5)
+    _patch_indicators(monkeypatch)  # M1 conditions all BUY-ready
+    strat = PullbackReversalScalper()
+    ctx, captured, _ = _build_ctx(params=params)
+    strat._prev_k, strat._prev_d = 10.0, 13.0
+    # Force the trend gate to veto regardless of fold state.
+    strat._trend_ok = lambda side, p: False  # type: ignore[method-assign]
+    await strat.on_bar(ctx, _trigger_bar())
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_on_bar_trend_filter_allows_entry(monkeypatch) -> None:
+    """Mirror: when _trend_ok permits the side, the BUY fires as usual —
+    the gate doesn't suppress an aligned trade."""
+    params = _short_params(trend_filter_timeframe=Timeframe.H1, trend_ema_period=5)
+    _patch_indicators(monkeypatch)
+    strat = PullbackReversalScalper()
+    ctx, captured, _ = _build_ctx(params=params)
+    strat._prev_k, strat._prev_d = 10.0, 13.0
+    strat._trend_ok = lambda side, p: True  # type: ignore[method-assign]
+    await strat.on_bar(ctx, _trigger_bar())
+    assert len(captured) == 1
+    assert captured[0].side is Side.BUY
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        dict(trend_filter_timeframe=Timeframe.TICK),
+        dict(trend_filter_timeframe=Timeframe.W1),
+        dict(trend_filter_timeframe=Timeframe.MN1),
+        dict(trend_filter_timeframe=Timeframe.M1),   # <= entry (M1)
+        dict(trend_adx_min=40.0, trend_adx_max=30.0),  # max < min
+    ],
+)
+def test_trend_filter_param_validation_rejects(overrides) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        _short_params(**overrides)
+
+
+# =========================================================================
+# Stop-distance floor (lot-explosion guard)
+# =========================================================================
+
+
+@pytest.mark.asyncio
+async def test_min_stop_distance_floors_the_stop(monkeypatch) -> None:
+    """When ATR is tiny, ``min_stop_distance`` widens the stop so the
+    risk engine can't size into a tens-of-lots position. The emitted SL
+    sits at the floor, not the (much closer) ATR-based level."""
+    params = _short_params(sl_atr_mult=1.0, min_stop_distance=3.0)
+    _patch_indicators(monkeypatch, atr_value=0.4)   # ATR-only stop = 0.4
+    strat = PullbackReversalScalper()
+    ctx, captured, _ = _build_ctx(params=params)
+    strat._prev_k, strat._prev_d = 10.0, 13.0
+
+    await strat.on_bar(ctx, _trigger_bar(close=2336.0))
+
+    assert len(captured) == 1
+    # SL = entry(2336) - max(0.4, 3.0) = 2333.0, NOT 2335.6.
+    assert captured[0].suggested_sl == pytest.approx(2333.0)
+
+
+@pytest.mark.asyncio
+async def test_min_stop_distance_noop_when_atr_wider(monkeypatch) -> None:
+    """When the ATR-based stop already exceeds the floor, the floor is a
+    no-op — the ATR stop wins (default 0.0 floor keeps old behaviour)."""
+    params = _short_params(sl_atr_mult=1.0, min_stop_distance=1.0)
+    _patch_indicators(monkeypatch, atr_value=2.5)   # ATR stop 2.5 > floor 1.0
+    strat = PullbackReversalScalper()
+    ctx, captured, _ = _build_ctx(params=params)
+    strat._prev_k, strat._prev_d = 10.0, 13.0
+
+    await strat.on_bar(ctx, _trigger_bar(close=2336.0))
+
+    assert len(captured) == 1
+    # SL = entry - max(2.5, 1.0) = 2333.5
+    assert captured[0].suggested_sl == pytest.approx(2333.5)
