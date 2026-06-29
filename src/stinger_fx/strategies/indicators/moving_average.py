@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from stinger_fx.strategies.indicators._smoothing import EMA_TAIL_FACTOR, wilder_tail
+
 
 def sma(values: Sequence[float], period: int) -> float | None:
     """Latest simple moving average. Returns None if not enough data."""
@@ -21,6 +23,9 @@ def ema(values: Sequence[float], period: int) -> float | None:
         raise ValueError("period must be > 0")
     if len(values) < period:
         return None
+    # Only the trailing window can affect the result at double precision; cap it
+    # so a long history doesn't cost a full pass each call (bit-identical).
+    values = wilder_tail(values, period, EMA_TAIL_FACTOR)
     alpha = 2.0 / (period + 1)
     seed = sum(values[:period]) / period
     out = seed

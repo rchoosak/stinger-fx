@@ -34,6 +34,12 @@ def adx(bars: Sequence[Bar], period: int = 14) -> ADXResult | None:
     if len(bars) < 2 * period:
         return None
 
+    # NB: not tail-capped (unlike rsi/atr/ema). ADX's ``tr_smooth == 0 → None``
+    # seed guard depends on *which* window seeds it, so truncating the input
+    # would change the result for a degenerate all-flat seed window — i.e. a
+    # windowed cap is not bit-identical here. Real market data never has a flat
+    # seed, but the guarantee matters; for ADX perf use a streaming indicator.
+
     # Build per-bar TR, +DM, -DM
     trs: list[float] = []
     plus_dms: list[float] = []

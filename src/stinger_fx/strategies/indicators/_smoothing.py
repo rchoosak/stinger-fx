@@ -13,6 +13,15 @@ full pass, while doing far less work when ``period`` is small relative to the
 window (the hot case: RSI/ATR-14 fed a 2000-bar history every bar).
 
 ``FACTOR = 50`` keeps a comfortable margin over the ~37 needed.
+
+**EMA** (``alpha = 2/(period+1)``) decays ~2x faster than Wilder, so a smaller
+factor is already bit-identical; ``EMA_TAIL_FACTOR`` is set conservatively and
+pinned bit-identical by property tests over random series.
+
+NB: **ADX is intentionally not capped** — its ``tr_smooth == 0 → None`` seed
+guard depends on which window seeds it, so truncating the input is *not*
+bit-identical for a degenerate all-flat seed window. Use a streaming indicator
+if ADX ever needs the speedup.
 """
 
 from __future__ import annotations
@@ -20,10 +29,14 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 WILDER_TAIL_FACTOR = 50
+EMA_TAIL_FACTOR = 30
 
 
-def wilder_tail[T](seq: Sequence[T], period: int) -> Sequence[T]:
+def wilder_tail[T](
+    seq: Sequence[T], period: int, factor: int = WILDER_TAIL_FACTOR
+) -> Sequence[T]:
     """Return the trailing slice of ``seq`` long enough for a bit-identical
-    Wilder result at ``period`` (the whole sequence when already short enough)."""
-    cap = period * WILDER_TAIL_FACTOR
+    smoothed result at ``period`` (the whole sequence when already short enough).
+    ``factor`` widens the window for slower-decaying smoothers (see module doc)."""
+    cap = period * factor
     return seq[-cap:] if len(seq) > cap else seq

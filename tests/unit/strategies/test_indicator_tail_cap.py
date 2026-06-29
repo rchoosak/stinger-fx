@@ -16,8 +16,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from stinger_fx.domain import Bar, Timeframe
-from stinger_fx.strategies.indicators import atr, rsi, stoch_rsi
-from stinger_fx.strategies.indicators._smoothing import WILDER_TAIL_FACTOR
+from stinger_fx.strategies.indicators import adx, atr, ema, rsi, stoch_rsi
+from stinger_fx.strategies.indicators._smoothing import (
+    EMA_TAIL_FACTOR,
+    WILDER_TAIL_FACTOR,
+)
 from stinger_fx.strategies.indicators.rsi import rsi_series
 
 # --- reference (uncapped) implementations -------------------------------- #
@@ -109,3 +112,47 @@ def test_short_input_is_unaffected_by_cap() -> None:
     assert rsi(series, 14) == _rsi_ref(series, 14)
     bars = _bars(series)
     assert atr(bars, 14) == _atr_ref(bars, 14)
+
+
+# --- EMA (ADX is intentionally NOT capped — see _smoothing.py) ------------ #
+
+def _ema_ref(values: list[float], period: int) -> float | None:
+    """Un-capped EMA (the production ema() caps its input)."""
+    if len(values) < period:
+        return None
+    alpha = 2.0 / (period + 1)
+    out = sum(values[:period]) / period
+    for v in values[period:]:
+        out = alpha * v + (1 - alpha) * out
+    return out
+
+
+@pytest.mark.parametrize("period", [14, 20, 50])
+def test_ema_tail_cap_bit_identical(period: int) -> None:
+    series = _series(period * EMA_TAIL_FACTOR + 800, seed=period + 3)
+    assert ema(series, period) == _ema_ref(series, period)
+
+
+def test_adx_is_not_tail_capped_preserves_flat_seed_none() -> None:
+    """Regression guard: ADX must NOT be tail-capped. Its ``tr_smooth == 0 →
+    None`` seed guard is window-dependent, so a cap would drop a flat opening and
+    return a value where the full computation returns None. A flat (zero-range)
+    seed followed by a long live tail (past any plausible cap) must stay None."""
+    period = 14
+    t0 = datetime(2024, 1, 1, tzinfo=UTC)
+    flat = [
+        Bar(symbol="X", timeframe=Timeframe.M1, time=t0 + timedelta(minutes=i),
+            open=2000.0, high=2000.0, low=2000.0, close=2000.0,
+            tick_volume=1, is_closed=True)
+        for i in range(period + 2)  # first `period` TRs are all 0 → seed flat
+    ]
+    rng = random.Random(11)
+    px = 2000.0
+    tail = []
+    for j in range(period * 90):  # well past any 80*period-style cap
+        px += rng.uniform(-3.0, 3.0)
+        tail.append(Bar(symbol="X", timeframe=Timeframe.M1,
+                        time=t0 + timedelta(minutes=len(flat) + j),
+                        open=px, high=px + 0.7, low=px - 0.7, close=px,
+                        tick_volume=1, is_closed=True))
+    assert adx(flat + tail, period) is None
