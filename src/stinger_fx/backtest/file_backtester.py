@@ -31,6 +31,7 @@ from stinger_fx.core.events import (
     TickEvent,
 )
 from stinger_fx.data import BacktestRepo, SqliteStore, iter_bars
+from stinger_fx.data.historical import iter_ticks_from_table
 from stinger_fx.domain import Tick
 from stinger_fx.execution import OrderRouter
 from stinger_fx.risk import RiskMonitor
@@ -336,19 +337,6 @@ class FileBacktester(BaseBacktester):
 
         store = _PS(self._parquet_root)
 
-        def _gen(sym: str, table):
-            for batch in table.to_batches():
-                for row in batch.to_pylist():
-                    yield Tick(
-                        symbol=sym,
-                        time=row["time_ns"],
-                        bid=row["bid"],
-                        ask=row["ask"],
-                        last=row.get("last") or 0.0,
-                        volume=row.get("volume") or 0,
-                        flags=row.get("flags") or 0,
-                    )
-
         last_mid: dict[str, float] = {}
         count = 0
         last_equity_minute: int | None = None
@@ -375,7 +363,7 @@ class FileBacktester(BaseBacktester):
 
             merged = heapq.merge(
                 *(
-                    _gen(sym, tbl)
+                    iter_ticks_from_table(sym, tbl)
                     for sym, tbl in zip(symbols, per_symbol_tables, strict=True)
                 ),
                 key=lambda t: t.time,
