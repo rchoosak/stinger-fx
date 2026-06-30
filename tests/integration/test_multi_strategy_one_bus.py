@@ -18,7 +18,12 @@ from stinger_fx.backtest.order_router import OrderRouter
 from stinger_fx.backtest.replay_broker import SimBroker
 from stinger_fx.config.models import RiskConfig
 from stinger_fx.core import AsyncEventBus, SimClock
-from stinger_fx.core.events import AccountSnapshotEvent, BarEvent, SignalEvent
+from stinger_fx.core.events import (
+    AccountSnapshotEvent,
+    BarEvent,
+    DecisionEvent,
+    SignalEvent,
+)
 from stinger_fx.domain import AccountSnapshot, Bar, Side, Subscription, Timeframe
 from stinger_fx.risk import RiskMonitor
 from stinger_fx.strategies.base import BaseStrategy
@@ -190,6 +195,15 @@ async def test_account_kill_switch_blocks_every_runner() -> None:
     await runner_a.start()
     await runner_b.start()
 
+    # Capture pre-trade rejections so we can assert the *reason*, not just the
+    # absence of positions (which any rejection would produce).
+    rejected: list[DecisionEvent] = []
+    rej_sub = bus.subscribe(
+        DecisionEvent,
+        lambda e: rejected.append(e) if e.decision.action == "rejected" else None,
+        name="t.reject",
+    )
+
     try:
         px = 1.10
         for i in range(20):
@@ -202,10 +216,15 @@ async def test_account_kill_switch_blocks_every_runner() -> None:
             await _drain(bus)
 
         # Both strategies tried to enter, but the shared kill switch rejected
-        # every order — the broker opened nothing.
+        # every order — the broker opened nothing...
         assert a.placed and b.placed
         assert broker._positions == {}
+        # ...and the rejection is specifically the kill switch, for BOTH runners
+        # (not some unrelated gate that merely happened to block them).
+        assert {e.decision.signal.strategy_id for e in rejected} == {a_id, b_id}
+        assert all(e.decision.reason == "kill_switch_tripped" for e in rejected)
     finally:
+        await rej_sub.unsubscribe()
         await runner_a.stop()
         await runner_b.stop()
         await router.detach()
