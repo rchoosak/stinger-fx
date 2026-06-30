@@ -279,9 +279,20 @@ view2 = ctx.history_for("GBPUSD", Timeframe.H1) # any declared feed
 view.bars(n=50)     # → tuple[Bar, ...] — last 50 closed bars (or all if n=None)
 view.closes(n=50)   # → list[float]    — close prices only
 view.last_tick()    # → Tick | None    — most recent tick observed
+
+# Streaming indicators — O(1) per bar (Wilder state kept current as bars arrive),
+# instead of recomputing a pure indicator over closes()/bars() every bar:
+view.rsi(period=14)                       # → float | None
+view.atr(period=14)                       # → float | None
+view.stoch_rsi(rsi_period=14, ...)        # → tuple[float, float] | None  (%K, %D)
 ```
 
 Bars are **closed bars only** — the still-forming bar isn't in `bars()`. If you need it, look at `last_tick()`.
+
+The streaming accessors return the same values as the pure `rsi()` / `atr()` /
+`stoch_rsi()` functions but are far cheaper on long histories — prefer them in
+`on_bar` hot paths. (They're created lazily per param set and fed each closed
+bar, so feed only closed bars in order — the runner already does.)
 
 ### 4.3 Position data — `PositionView`
 

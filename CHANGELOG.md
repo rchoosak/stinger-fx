@@ -3,6 +3,16 @@
 All notable changes to Stinger-Fx are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Backtest performance
+- **Faster parquet → Bar/Tick iteration** (#108) — the replay loops built each
+  bar/tick from `batch.to_pylist()` (a Python dict per row + Arrow's tz-aware
+  datetime conversion per value). They now iterate column-wise — one
+  `column.to_pylist()` per field, the timestamp cast to int64 epoch, the
+  datetime built directly — over the hundreds of thousands of rows a backtest
+  replays. Bit-identical (verified value-by-value and on a bar-mode backtest).
+
 ## [1.4.0] — 2026-06-29
 
 A strategy fix and a backtest-performance pass. Everything is backward

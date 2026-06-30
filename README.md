@@ -77,7 +77,7 @@ Verify the install:
 
 ```bash
 uv run stinger-fx version
-# → stinger-fx 0.1.0
+# → stinger-fx 1.4.0
 ```
 
 ---
@@ -433,6 +433,12 @@ If the engine is running, the strategy starts immediately via hot-reload. Otherw
 - S/R: `pivot_points` (classic / fibonacci / camarilla)
 - Cross-asset: `correlation`
 
+These are pure functions over a bar/close sequence. For the hot path, the
+per-feed `HistoryView` also exposes **streaming** `rsi()`, `atr()`, and
+`stoch_rsi()` that keep Wilder state current as bars arrive — O(1) per bar
+instead of recomputing over the window — and produce the same values. See
+[strategy-development.md](strategy-development.md) §4.2.
+
 **Regime filters** (from `stinger_fx.strategies.regime`):
 
 - `TrendingFilter` / `RangingFilter` — ADX-based
@@ -479,7 +485,7 @@ stinger-fx db migrate
 ## 11. Development workflow
 
 ```bash
-# Run the full test suite (452 tests; ~6s on a modern laptop)
+# Run the full test suite (1093 tests; ~8s on a modern laptop)
 uv run pytest -q
 
 # Lint + format
