@@ -17,10 +17,13 @@ OS by stubbing the ZMQ socket.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import json
 import logging
 import subprocess
+import sys
 import textwrap
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -30,8 +33,10 @@ import zmq.asyncio
 from stinger_fx.backtest.base import BaseBacktester
 from stinger_fx.backtest.mt5_report_parser import parse_report
 from stinger_fx.backtest.reports import BacktestReport
+from stinger_fx.brokers.bar_aggregator import BarAggregator
 from stinger_fx.config.models import BacktestRunConfig, StrategyEntry
 from stinger_fx.core import AsyncEventBus, SimClock
+from stinger_fx.core.event_bus import Subscription as BusSubscription
 from stinger_fx.core.events import (
     TickEvent,
 )
@@ -52,6 +57,16 @@ from stinger_fx.strategies import (
 logger = logging.getLogger("stinger.backtest.mt5_tester")
 
 DEFAULT_ENDPOINT = "tcp://127.0.0.1:5555"
+
+# The terminal64.exe launcher detaches (relaunches itself and exits), so the
+# spawned process handle goes dead immediately and can't gate the serve loop.
+# Instead we drive completion off the wire + the report file:
+#   • STARTUP_TIMEOUT — give up if the shim never connects (DLL imports off,
+#     no tick history for the requested range, EA failed to compile, …).
+#   • IDLE_TIMEOUT    — once ticks have flowed, this much silence means the
+#     tester finished (and is writing/whas written the report on shutdown).
+STARTUP_TIMEOUT_S = 300.0
+IDLE_TIMEOUT_S = 60.0
 
 
 class MT5StrategyTester(BaseBacktester):
@@ -79,15 +94,27 @@ class MT5StrategyTester(BaseBacktester):
 
     async def run(self, cfg: BacktestRunConfig) -> BacktestReport:
         self._report_dir.mkdir(parents=True, exist_ok=True)
-        report_xml = self._report_dir / f"{cfg.id}_report.xml"
-        tester_ini = self._tester_workdir / f"{cfg.id}_tester.ini"
+        self._tester_workdir.mkdir(parents=True, exist_ok=True)
+        # Absolute paths — the terminal runs with its own cwd, so a relative
+        # Report= line would land somewhere we never look.
+        report_xml = (self._report_dir / f"{cfg.id}_report.xml").resolve()
+        tester_ini = (self._tester_workdir / f"{cfg.id}_tester.ini").resolve()
+        # A stale report from a prior run would make us "complete" instantly.
+        if report_xml.exists():
+            report_xml.unlink()
         self._write_tester_ini(cfg, tester_ini, report_xml)
 
         # Wire bus + strategy + router so we can intercept order requests
         bus = AsyncEventBus()
         sim_clock = SimClock(cfg.start)
         strategy_cls = load_strategy_class(self._strategy_entry.class_path)
-        params = validate_params(strategy_cls, self._strategy_entry.params)
+        params_dict = dict(self._strategy_entry.params)
+        param_fields = set(strategy_cls.Params.model_fields.keys())
+        if "symbol" in param_fields and cfg.symbol is not None:
+            params_dict.setdefault("symbol", cfg.symbol)
+        if "timeframe" in param_fields and cfg.timeframe is not None:
+            params_dict.setdefault("timeframe", cfg.timeframe.value)
+        params = validate_params(strategy_cls, params_dict)
         magic = derive_magic(self._strategy_entry.id)
 
         async def signal_sink(sig):
@@ -118,6 +145,19 @@ class MT5StrategyTester(BaseBacktester):
         )
         await runner.start()
 
+        agg_subs: list[BusSubscription[TickEvent]] = []
+        for sub in strategy_cls.subscriptions(params):
+            if sub.timeframe.is_tick:
+                continue
+            agg = BarAggregator(sub.symbol, sub.timeframe, bus)
+            agg_subs.append(
+                bus.subscribe(
+                    TickEvent,
+                    agg.on_tick,
+                    name=f"mt5_tester.agg.{sub.symbol}.{sub.timeframe.value}",
+                )
+            )
+
         # --- ZMQ + subprocess --------------------------------------------------
         ctx = zmq.asyncio.Context.instance()
         sock = ctx.socket(zmq.REP)
@@ -128,7 +168,7 @@ class MT5StrategyTester(BaseBacktester):
 
         started_at = datetime.now(UTC)
         try:
-            await self._serve(sock, bus, sim_clock, proc, runner)
+            await self._serve(sock, bus, sim_clock, proc, runner, report_xml)
         finally:
             sock.close(linger=0)
             if proc.poll() is None:
@@ -138,6 +178,8 @@ class MT5StrategyTester(BaseBacktester):
                 except subprocess.TimeoutExpired:
                     proc.kill()
 
+        for sub in agg_subs:
+            await sub.unsubscribe()
         await runner.stop()
         await bus.close()
         finished_at = datetime.now(UTC)
@@ -170,13 +212,38 @@ class MT5StrategyTester(BaseBacktester):
         sim_clock: SimClock,
         proc: subprocess.Popen,
         runner: StrategyRunner,
+        report_xml: Path,
     ) -> None:
-        del runner  # used via the bus; reference is for liveness
-        while proc.poll() is None:
+        del runner, proc  # the launcher detaches; never gate on its handle
+        started = time.monotonic()
+        last_activity: float | None = None
+        while True:
+            # The terminal writes the report on shutdown (ShutdownTerminal=1).
+            # Its appearance is the authoritative "test finished" signal.
+            if await asyncio.to_thread(report_xml.exists):
+                logger.info("MT5 tester report detected — finishing")
+                break
             try:
                 raw = await asyncio.wait_for(sock.recv(), timeout=1.0)
             except TimeoutError:
+                now = time.monotonic()
+                if last_activity is None:
+                    if now - started > STARTUP_TIMEOUT_S:
+                        logger.warning(
+                            "MT5 tester: shim never connected within %.0fs — "
+                            "check 'Allow DLL imports' and that tick history "
+                            "exists for the requested range",
+                            STARTUP_TIMEOUT_S,
+                        )
+                        break
+                elif now - last_activity > IDLE_TIMEOUT_S:
+                    logger.info(
+                        "MT5 tester: idle %.0fs after activity — finishing",
+                        IDLE_TIMEOUT_S,
+                    )
+                    break
                 continue
+            last_activity = time.monotonic()
             payload = json.loads(raw.decode("utf-8"))
             if payload.get("type") == "tick":
                 tick_time = datetime.fromtimestamp(int(payload["time"]), tz=UTC)
@@ -212,14 +279,16 @@ class MT5StrategyTester(BaseBacktester):
         return action
 
     def _spawn_terminal(self, tester_ini: Path) -> subprocess.Popen:
+        config_path = _windows_short_path(tester_ini) if sys.platform == "win32" else str(tester_ini)
         return subprocess.Popen(
-            [str(self._terminal_path), f"/config:{tester_ini}", "/portable"],
+            [str(self._terminal_path), f"/config:{config_path}", "/portable"],
             cwd=str(self._tester_workdir),
         )
 
     @staticmethod
     def _write_tester_ini(cfg: BacktestRunConfig, ini: Path, report_xml: Path) -> None:
         ini.parent.mkdir(parents=True, exist_ok=True)
+        report_path = _windows_short_path(report_xml) if sys.platform == "win32" else str(report_xml)
         # mt5_tester is single-symbol/single-timeframe; both fields are
         # mandatory (the multi-feed path is for file mode only).
         assert cfg.symbol is not None
@@ -239,9 +308,23 @@ class MT5StrategyTester(BaseBacktester):
             Currency=USD
             Leverage=1:100
             ExecutionMode=0
-            Report={report_xml}
+            Report={report_path}
             ReplaceReport=1
             ShutdownTerminal=1
             """
         ).strip()
         ini.write_text(content, encoding="utf-16")
+
+
+def _windows_short_path(path: Path) -> str:
+    """Return an 8.3 path so MT5 can parse /config: under Program Files."""
+    raw = str(path)
+    get_short_path_name = ctypes.windll.kernel32.GetShortPathNameW
+    needed = get_short_path_name(raw, None, 0)
+    if needed == 0 and not path.exists() and path.parent.exists():
+        return str(Path(_windows_short_path(path.parent)) / path.name)
+    if needed == 0:
+        return raw
+    buffer = ctypes.create_unicode_buffer(needed)
+    written = get_short_path_name(raw, buffer, needed)
+    return buffer.value if written else raw
