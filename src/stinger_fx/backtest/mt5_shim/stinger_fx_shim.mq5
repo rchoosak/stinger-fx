@@ -28,6 +28,7 @@
 #property copyright "Stinger-Fx"
 #property version   "0.1"
 #property strict
+#property tester_library "libsodium.dll"
 
 input string PythonEndpoint = "tcp://127.0.0.1:5555";   // Python REP socket
 input int    RequestTimeoutMs = 5000;
